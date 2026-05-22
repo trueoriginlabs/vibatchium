@@ -1,0 +1,31 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+.env
+.envrc
+
+# Patchium runtime
+.cache/
+*.sock
+screenshot*.png
+storage*.json
+
+# OS / IDE
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Build
+build/
+dist/
+.eggs/
+
+# Test
+.pytest_cache/
+.coverage
+htmlcov/
