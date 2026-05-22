@@ -46,33 +46,33 @@ def daemon_is_running() -> bool:
 
 
 def spawn_daemon(wait: float = 5.0) -> None:
-    """Fork+detach the daemon process. Returns once the socket is accepting."""
-    # double-fork to detach from controlling terminal
-    pid = os.fork()
-    if pid > 0:
-        # parent: wait for sock to appear
-        deadline = time.time() + wait
-        while time.time() < deadline:
-            if daemon_is_running():
-                return
-            time.sleep(0.1)
-        raise DaemonError(f"daemon did not come up within {wait}s")
+    """Spawn the daemon process detached from this process. Returns once the
+    socket is accepting.
 
-    # child: detach session, double-fork
-    os.setsid()
-    pid2 = os.fork()
-    if pid2 > 0:
-        os._exit(0)
-    # grandchild: become the daemon
-    sys.stdin = open(os.devnull)
-    sys.stdout = open(os.devnull, "w")
-    sys.stderr = open(os.devnull, "w")
-    from .daemon import server
-    server.main()
-    os._exit(0)
+    Uses subprocess.Popen with start_new_session=True instead of double-fork
+    so we don't leak fds, signal handlers, or asyncio loop state from the
+    calling process into the daemon. Safer when patchium is invoked from
+    long-lived hosts (Claude Code, an MCP shell, a notebook).
+    """
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "patchium.daemon.server"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+        close_fds=True,
+    )
+    deadline = time.time() + wait
+    while time.time() < deadline:
+        if daemon_is_running():
+            return
+        if proc.poll() is not None:
+            raise DaemonError(f"daemon exited immediately (rc={proc.returncode})")
+        time.sleep(0.1)
+    raise DaemonError(f"daemon did not come up within {wait}s")
 
 
-def call(cmd: str, args: dict[str, Any] | None = None, *, auto_spawn: bool = True, timeout: float = 60.0) -> Any:
+def call(cmd: str, args: dict[str, Any] | None = None, *, auto_spawn: bool = True, timeout: float = 120.0) -> Any:
     """RPC call. If daemon isn't running and auto_spawn=True, spawn it first."""
     if not daemon_is_running():
         if not auto_spawn:

@@ -13,7 +13,11 @@ from pathlib import Path
 
 from . import elements
 from .browser import attach_session, close_session, launch_session
-from .paths import DEFAULT_PROFILE_DIR
+from .paths import (
+    DEFAULT_PROFILE_DIR, PROFILES_DIR, ACTIVE_PROFILE_PATH,
+    get_active_profile_dir, get_active_profile_name,
+    set_active_profile_name, list_profile_names,
+)
 
 log = logging.getLogger("patchium.handlers")
 
@@ -46,10 +50,58 @@ def register_all(daemon) -> None:
     async def _start(d, args):
         if d.session is not None:
             return {"already_started": True, "mode": d.session.mode}
-        profile = Path(args.get("profile") or DEFAULT_PROFILE_DIR)
+        # If `profile` is an absolute path, use it; if a bare name, resolve via
+        # the profile registry; otherwise use the active profile.
+        raw = args.get("profile")
+        if raw:
+            p = Path(raw)
+            profile_dir = p if p.is_absolute() else (PROFILES_DIR / raw)
+        else:
+            profile_dir = get_active_profile_dir()
+        profile_dir.mkdir(parents=True, exist_ok=True)
         headless = bool(args.get("headless", False))
-        d.session = await launch_session(profile, headless=headless)
-        return {"started": True, "mode": "launch", "profile": str(profile)}
+        d.session = await launch_session(profile_dir, headless=headless)
+        return {"started": True, "mode": "launch", "profile": str(profile_dir),
+                "profile_name": profile_dir.name}
+
+    # ─── profile management ────────────────────────────────────────────
+
+    @daemon.handler("profile_list")
+    async def _profile_list(d, args):
+        return {"active": get_active_profile_name(), "profiles": list_profile_names()}
+
+    @daemon.handler("profile_new")
+    async def _profile_new(d, args):
+        name = args["name"]
+        if not name or "/" in name or name.startswith("."):
+            raise ValueError("bad profile name")
+        p = PROFILES_DIR / name
+        if p.exists():
+            return {"created": False, "exists": True, "path": str(p)}
+        p.mkdir(parents=True)
+        return {"created": True, "path": str(p)}
+
+    @daemon.handler("profile_use")
+    async def _profile_use(d, args):
+        name = args["name"]
+        if name not in list_profile_names():
+            raise ValueError(f"unknown profile: {name}")
+        set_active_profile_name(name)
+        return {"active": name, "note": "takes effect on next `start`"}
+
+    @daemon.handler("profile_delete")
+    async def _profile_delete(d, args):
+        import shutil
+        name = args["name"]
+        if name == "default":
+            raise ValueError("cannot delete the default profile")
+        if name == get_active_profile_name():
+            raise ValueError(f"profile {name!r} is active — switch first")
+        p = PROFILES_DIR / name
+        if not p.exists():
+            raise ValueError(f"no such profile: {name}")
+        shutil.rmtree(p)
+        return {"deleted": name}
 
     @daemon.handler("attach")
     async def _attach(d, args):
@@ -100,19 +152,31 @@ def register_all(daemon) -> None:
     @daemon.handler("back")
     async def _back(d, args):
         s = _need_session(d)
-        await s.page.go_back()
+        wait_until = args.get("wait_until", "domcontentloaded")
+        timeout = int(args.get("timeout_ms", 15_000))
+        try:
+            await s.page.go_back(wait_until=wait_until, timeout=timeout)
+        except Exception as exc:  # noqa: BLE001
+            # about:blank and some history edges don't fire load — return current url
+            log.info("go_back soft-failed: %s", exc)
         return {"url": s.page.url}
 
     @daemon.handler("forward")
     async def _forward(d, args):
         s = _need_session(d)
-        await s.page.go_forward()
+        wait_until = args.get("wait_until", "domcontentloaded")
+        timeout = int(args.get("timeout_ms", 15_000))
+        try:
+            await s.page.go_forward(wait_until=wait_until, timeout=timeout)
+        except Exception as exc:  # noqa: BLE001
+            log.info("go_forward soft-failed: %s", exc)
         return {"url": s.page.url}
 
     @daemon.handler("reload")
     async def _reload(d, args):
         s = _need_session(d)
-        await s.page.reload()
+        wait_until = args.get("wait_until", "domcontentloaded")
+        await s.page.reload(wait_until=wait_until)
         return {"url": s.page.url}
 
     @daemon.handler("url")

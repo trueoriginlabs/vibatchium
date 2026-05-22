@@ -21,7 +21,7 @@ import traceback
 from pathlib import Path
 from typing import Any, Callable, Awaitable
 
-from . import handlers
+from . import handlers, handlers_extra
 from .browser import BrowserSession, attach_session, close_session, launch_session
 from .paths import DEFAULT_PROFILE_DIR, LOG_PATH, PID_PATH, SOCK_PATH
 
@@ -33,8 +33,9 @@ class Daemon:
         self.session: BrowserSession | None = None
         self._handlers: dict[str, Callable[[Daemon, dict], Awaitable[Any]]] = {}
         self._stopping = asyncio.Event()
-        # populated by handlers.register_all() below
+        # populated by handlers.register_all() + handlers_extra.register_extra() below
         handlers.register_all(self)
+        handlers_extra.register_extra(self)
 
     def handler(self, name: str):
         def deco(fn):
@@ -75,14 +76,16 @@ class Daemon:
 
     async def run(self) -> None:
         if SOCK_PATH.exists():
-            # check if a live daemon is already using it
+            # check if a live daemon is already using it; catch broadly because
+            # OSError (and subclasses) can arrive when the socket file is stale
+            # but readable, e.g. orphaned across reboots
             try:
                 _, w = await asyncio.open_unix_connection(str(SOCK_PATH))
                 w.close()
                 await w.wait_closed()
                 print(f"[patchium] daemon already running at {SOCK_PATH}", file=sys.stderr)
                 sys.exit(2)
-            except (FileNotFoundError, ConnectionRefusedError):
+            except (OSError, ConnectionRefusedError):
                 SOCK_PATH.unlink(missing_ok=True)
 
         server = await asyncio.start_unix_server(self.handle_conn, path=str(SOCK_PATH))
@@ -98,11 +101,14 @@ class Daemon:
         async with server:
             stopper = asyncio.create_task(self._stopping.wait())
             serving = asyncio.create_task(server.serve_forever())
-            done, _ = await asyncio.wait(
+            done, pending = await asyncio.wait(
                 {stopper, serving}, return_when=asyncio.FIRST_COMPLETED
             )
-            for t in done:
+            # cancel any still-pending task and await its cancellation cleanly
+            for t in pending:
                 t.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await t
 
         await self.shutdown()
 

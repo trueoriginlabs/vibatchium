@@ -2,7 +2,7 @@
 
 Patchwright stealth backend + Vibium-style LLM-friendly CLI for agentic browser automation.
 
-> **Status: alpha, working end-to-end on phases 1–3.** Cleared HackerOne's Cloudflare wall on first cold-launch (no manual login, no attach). 36 MCP tools registered. ~750 LoC of Python.
+> **Status: alpha, fully working.** Cleared HackerOne's Cloudflare wall on first cold-launch (no manual login, no attach). **65 MCP tools** registered. ~3,600 LoC of Python, 27 tests, all green.
 
 ## Why patchium
 
@@ -64,19 +64,29 @@ patchium mcp                                  # stdio JSON-RPC MCP server
 
 Or register with Claude Code: `claude mcp add patchium python -m patchium.mcp_server`. Every CLI verb is exposed as an MCP tool (36 total: start/attach/stop/go/map/click/fill/type/hover/press/keys/eval/screenshot/text/html/storage/wait_url/wait_load/wait_fn/pages/page_new/page_switch/...) — all talking to the same daemon, so a single browser session is shared between shell invocations and Claude Code tool calls.
 
-## CLI surface (Vibium-compatible where it makes sense)
+## CLI surface
 
 ```
-Lifecycle:   start  attach  stop  shutdown  status
-Navigation:  go  back  forward  reload  url  title
-Content:     text  html  eval  attr  value
-Elements:    map  diff map  click  dblclick  fill  type
-             hover  focus  press  keys  check  uncheck  select  scroll  is
-Visual:      screenshot  viewport
-Storage:     storage export  storage restore  cookies
-Waits:       wait selector  wait url  wait load  wait fn  sleep
-Pages:       pages  page new  page switch  page close
-Server:      mcp
+Lifecycle:    start  attach  stop  shutdown  status  install
+Profiles:     profile list  profile new  profile use  profile delete
+Navigation:   go  back  forward  reload  url  title
+Content:      text  html  eval  attr  value  content
+Elements:     map [--compact]  diff map  find  count  click  dblclick
+              fill  type  hover  focus  press  keys  check  uncheck
+              select  scroll  is  highlight
+Frames:       frames  frame [--name|--url|--clear]
+Pages:        pages  page new  page switch  page close
+Mouse:        mouse click|move|down|up|dblclick|wheel  x y
+Visual:       screenshot [--annotate]  viewport  pdf
+Files:        upload  download arm|list|save
+Dialogs:      dialog accept|dismiss  [--text]
+Overrides:    geolocation  media
+Network:      network start|stop|dump
+Storage:      storage export  storage restore  cookies
+Tracing:      record start  record stop  (Playwright Trace Viewer ZIP)
+Waits:        wait selector  wait url  wait load  wait fn  sleep
+Agents:       observe "<intent>"  act "<intent>"  [--llm]
+Server:       mcp
 ```
 
 `@eN` refs come from Playwright's `page.aria_snapshot(mode='ai')` and resolve via the `aria-ref=` selector engine. No DOM pollution, no script injection — the snapshot is the same one Playwright MCP uses internally, just rendered in Vibium's `@eN` notation.
@@ -115,13 +125,26 @@ Layers we can add later (gated behind opt-in flags):
 
 ## What's working today
 
-End-to-end verified flows:
+End-to-end verified flows (all in the pytest suite):
 
-1. `start → go example.com → map → click @e6 → diff map` — navigation + interactive verbs over @eN refs
-2. `start → go hackerone.com/anthropic → screenshot` — Cloudflare cleared, full policy page rendered (135KB PNG)
-3. `storage export -o auth.json` — produces a Playwright-compatible storage-state JSON
-4. `wait load --state networkidle` / `wait fn 'document.title.length > 0'` / `sleep 500` — wait family
-5. `patchium mcp` + MCP `tools/list` returns 36 tools
+1. **Lifecycle**: `start → status → stop → shutdown` + profile switch
+2. **Navigation**: `go → back → forward` (about:blank-safe), `text`, `eval` (isolated context)
+3. **Element model**: `map` (Playwright aria_snapshot AI mode), `map --compact` (browser-use one-liner format), `diff map`, `click @eN`, `fill`, `type`, `hover`, `press`, `keys`, `check`/`uncheck`, `select`, `scroll`, `is`, `highlight`
+4. **Semantic find**: `find text|label|placeholder|role|testid|xpath|alt|title|css`
+5. **Frames**: `frames` (live-only, dedupes stale), `frame --url=...` switch + locator-class verbs target the active frame
+6. **Mouse**: `mouse click|move|down|up|dblclick|wheel` at pixel coordinates
+7. **Visual**: `screenshot --annotate` overlays @eN bounding boxes via Pillow, `pdf` page export
+8. **Files**: `upload` to `input[type=file]`, `download arm/list/save`
+9. **Dialogs**: `dialog accept|dismiss --text=...` for alert/confirm/prompt
+10. **Overrides**: `geolocation lat lng`, `media --color-scheme=dark`
+11. **Network capture**: `network start/stop/dump` — ring buffer of request/response events
+12. **Storage**: `storage export -o auth.json` (Playwright-compatible), `storage restore`
+13. **Tracing**: `record start/stop -o trace.zip` (Playwright Trace Viewer compatible)
+14. **Waits**: `wait selector|url|load|fn`, `sleep`
+15. **Cloudflare-pass**: cold launch `go hackerone.com/anthropic` clears the wall
+16. **Observe → act**: heuristic intent-matching with on-disk cache; LLM mode via `--llm` when `ANTHROPIC_API_KEY` is set
+17. **Profiles**: `profile list|new|use|delete` for isolated browser identities (work vs recon vs personal)
+18. **MCP**: `patchium mcp` exposes all 65 tools to Claude Code over stdio JSON-RPC, sharing the same daemon-managed browser
 
 ## License
 

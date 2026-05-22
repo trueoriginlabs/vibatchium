@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
@@ -18,7 +18,14 @@ log = logging.getLogger("patchium.browser")
 
 @dataclass
 class BrowserSession:
-    """Holds the live Patchwright handles for the daemon's lifetime."""
+    """Holds the live Patchwright handles for the daemon's lifetime.
+
+    `frame_ref` (when non-None) makes subsequent ops target that frame instead
+    of the top-level page — used by the frame/frames verbs to switch iframe
+    context. `dialog_handler` registers a one-shot dialog response when set.
+    `downloads` records page.on('download') events keyed by index. `network`
+    holds the network-capture ring buffer when capture is on.
+    """
 
     pw: Playwright
     context: BrowserContext
@@ -26,6 +33,16 @@ class BrowserSession:
     mode: str  # "launch" | "attach"
     profile_dir: Optional[Path] = None
     cdp_url: Optional[str] = None
+    frame_ref: object = None         # patchright.Frame | None
+    dialog_policy: dict = field(default_factory=lambda: {"action": "dismiss"})
+    downloads: list = field(default_factory=list)
+    network: dict = field(default_factory=lambda: {"capturing": False, "events": [], "max": 500})
+
+    @property
+    def target(self):
+        """Return the active page-or-frame for verbs that should respect a
+        currently-switched frame."""
+        return self.frame_ref if self.frame_ref is not None else self.page
 
 
 async def launch_session(profile_dir: Path, headless: bool = False) -> BrowserSession:
