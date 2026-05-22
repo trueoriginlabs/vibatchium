@@ -2,6 +2,11 @@
 <html lang="en">
 <head><meta charset="utf-8"><title>Patchium Test Page</title></head>
 <body>
+  <div id="cookie-banner" style="background:#eee;padding:8px">
+    We use cookies to make this site work.
+    <button id="reject-btn" type="button" onclick="document.getElementById('cookie-banner').remove()">Reject all</button>
+    <button id="accept-btn" type="button" onclick="document.getElementById('cookie-banner').remove()">Accept all</button>
+  </div>
   <h1>Hello, Patchium</h1>
   <p id="lead">This is a fixture page served from the local test server.</p>
   <button id="counter-btn" type="button" onclick="document.getElementById('counter').textContent = String(parseInt(document.getElementById('counter').textContent||'0',10)+1)">
@@ -16,6 +21,8 @@
   <div id="result"></div>
   <a id="link" href="/second.html">Go to second page</a>
   <input id="file" type="file" />
+  <button id="trigger-fetch" type="button" onclick="fetch('/api-test').then(r=>r.text()).then(t=>document.getElementById('fetched').textContent=t)">Fetch</button>
+  <div id="fetched"></div>
   <iframe id="if" src="/iframe.html"></iframe>
 </body>
 </html>

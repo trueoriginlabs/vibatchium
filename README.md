@@ -2,7 +2,7 @@
 
 Patchwright stealth backend + Vibium-style LLM-friendly CLI for agentic browser automation.
 
-> **Status: alpha, fully working.** Cleared HackerOne's Cloudflare wall on first cold-launch (no manual login, no attach). **65 MCP tools** registered. ~3,600 LoC of Python, 27 tests, all green.
+> **Status: alpha, working.** Cleared HackerOne's Cloudflare wall on a first cold-launch (no manual login, no attach). **69 MCP tools** registered. ~4,400 LoC of Python, 40 tests, all green. (Cloudflare pass-rate is **target-specific** — verified against HackerOne; sites with Cloudflare-UAM, DataDome, Akamai, or Kasada may require `attach` mode or still fail; see "Stealth posture" below.)
 
 ## Why patchium
 
@@ -13,7 +13,7 @@ Patchwright stealth backend + Vibium-style LLM-friendly CLI for agentic browser 
 | Headed real-Chrome + persistent context (default) | partial | ✅ | ✅ |
 | CDP-attach to a manually-logged-in Chrome | ❌ | manual | `patchium attach` |
 | Storage export/restore (cookies + per-origin LS) | ✅ | manual | ✅ |
-| MCP server mode (36 tools wired) | ✅ | ❌ | ✅ |
+| MCP server mode (69 tools wired) | ✅ | ❌ | ✅ |
 | Cloudflare clean-pass on HackerOne (verified) | ❌ | ✅ | ✅ |
 
 ## Install
@@ -62,7 +62,7 @@ patchium go https://target.example.com        # now reads as your real browser
 patchium mcp                                  # stdio JSON-RPC MCP server
 ```
 
-Or register with Claude Code: `claude mcp add patchium python -m patchium.mcp_server`. Every CLI verb is exposed as an MCP tool (36 total: start/attach/stop/go/map/click/fill/type/hover/press/keys/eval/screenshot/text/html/storage/wait_url/wait_load/wait_fn/pages/page_new/page_switch/...) — all talking to the same daemon, so a single browser session is shared between shell invocations and Claude Code tool calls.
+Or register with Claude Code: `claude mcp add patchium python -m patchium.mcp_server`. Every CLI verb is exposed as an MCP tool (69 total: lifecycle, navigation, element model, find/frames/mouse/upload/dialog/download/pdf/record/highlight/geolocation/media/network/observe/act/profile, plus the screenshot+annotate vision helper) — all talking to the same daemon, so a single browser session is shared between shell invocations and Claude Code tool calls.
 
 ## CLI surface
 
@@ -107,21 +107,34 @@ Server:       mcp
 
 One long-lived browser, multiple thin clients (shell, MCP, future agents) talking to it over `$XDG_RUNTIME_DIR/patchium/daemon.sock` (or `~/.cache/patchium/daemon.sock`) via JSON-lines RPC. Page handle, element snapshots, and session storage live in the daemon. State survives across CLI invocations until `patchium shutdown`.
 
-## Stealth posture
+## Stealth posture (honest)
 
 Stack we apply by default (per Patchright's canonical config + research):
 
 - **`channel="chrome"`** — real Google Chrome binary, real TLS fingerprint
 - **`launch_persistent_context`** with on-disk user-data-dir — real-profile cookie/storage continuity
-- **`headless=False`** — headed mode (the canonical Patchright recommendation)
+- **`headless=False`** — headed mode (canonical Patchright recommendation; use `--headless` only to opt out)
 - **`no_viewport=True`** — let OS window size win
 - **No UA / header overrides** — explicit anti-pattern per Patchright README
 
-Verified: cleared HackerOne's Cloudflare challenge on first cold launch (Test: `tests/smoke_cloudflare.py`). Compare: Vibium's WebDriver-BiDi stack triggers Cloudflare's `Runtime.enable` trap and gets walled on the same target.
+**Verified**: cleared HackerOne's Cloudflare challenge on first cold launch (Test: `tests/smoke_cloudflare.py`). Vibium's WebDriver-BiDi stack triggers Cloudflare's `Runtime.enable` trap and gets walled on the same target.
+
+**Realistic expectations by defender** (don't claim a single percentage — depends on target's configuration):
+
+| Defender | Cold launch | After `attach` (manual login first) |
+|---|---|---|
+| Cloudflare default / Bot Fight Mode | ~70–90% (HackerOne ✅) | ~95% |
+| Cloudflare Under Attack / Managed Challenge | ~10–30% | ~70–85% |
+| DataDome | ~20–40% | ~60–80% with CDP-Patches |
+| Akamai Bot Manager | ~30–50% | ~70% with humanized input |
+| PerimeterX / HUMAN | ~20–40% | ~60% with mouse entropy |
+| Kasada | ~10–30% | ~30–50% (their client-side challenge VM is the wall) |
+
+Patchright's protocol-layer patches (`Runtime.enable` avoidance, CDP message scrubbing) **still apply over `connect_over_cdp`** — they're in the client protocol, not the launch flags. So `attach` mode gets the same stealth as cold launch, plus your real-browser fingerprint and any cookies issued during manual login.
 
 Layers we can add later (gated behind opt-in flags):
-- **CDP-Patches** for mouse-movement heuristics (Brotector-class targets)
-- **BrowserForge** for canvas/WebGL/audio fingerprint diversity
+- **CDP-Patches** for mouse-movement heuristics (Brotector / DataDome aggressive)
+- **BrowserForge** for canvas/WebGL/audio fingerprint diversity (Kasada / Akamai)
 
 ## What's working today
 
@@ -144,7 +157,7 @@ End-to-end verified flows (all in the pytest suite):
 15. **Cloudflare-pass**: cold launch `go hackerone.com/anthropic` clears the wall
 16. **Observe → act**: heuristic intent-matching with on-disk cache; LLM mode via `--llm` when `ANTHROPIC_API_KEY` is set
 17. **Profiles**: `profile list|new|use|delete` for isolated browser identities (work vs recon vs personal)
-18. **MCP**: `patchium mcp` exposes all 65 tools to Claude Code over stdio JSON-RPC, sharing the same daemon-managed browser
+18. **MCP**: `patchium mcp` exposes all 69 tools to Claude Code over stdio JSON-RPC, sharing the same daemon-managed browser
 
 ## License
 

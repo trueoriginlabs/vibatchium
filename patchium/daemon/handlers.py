@@ -22,20 +22,61 @@ from .paths import (
 log = logging.getLogger("patchium.handlers")
 
 
+import re as _re
+
+_REF_TARGET_RE = _re.compile(r"^@?(e\d+)$|^\[ref=e\d+\]$")
+
+
 def _need_session(daemon):
     if daemon.session is None:
         raise RuntimeError("no browser session — run `patchium start` or `patchium attach` first")
-    return daemon.session
+    # Repair a stale session.page if the previously-active page has detached
+    # (popup-then-close, navigation-cancelled, target-crashed). Pick the
+    # newest live page from the context as the fallback.
+    s = daemon.session
+    try:
+        if s.page.is_closed():
+            live = [p for p in s.context.pages if not p.is_closed()]
+            if live:
+                s.page = live[-1]
+    except Exception:  # noqa: BLE001
+        # is_closed() not always available depending on attach mode; ignore
+        pass
+    return s
+
+
+def _invalidate_snapshot(daemon) -> None:
+    """Clear the cached AX snapshot — refs from before navigation no longer apply."""
+    daemon._prev_snapshot = getattr(daemon, "_snapshot", None)
+    daemon._snapshot = None
+
+
+def _is_ref_target(target: str) -> bool:
+    """True iff target looks like a structured @eN ref, not a CSS/XPath selector.
+
+    Strict: matches `@e3`, `e3`, `[ref=e3]` — refuses things like `[data-test="@e1"]`
+    that a loose `startswith("@e")` check would falsely match.
+    """
+    return bool(_REF_TARGET_RE.match(target.strip()))
 
 
 def _resolve_target(daemon, target: str):
-    """Resolve `target` to a Locator. If it looks like a ref (`@eN`, `eN`, `[ref=eN]`)
-    use the AX-snapshot resolver; otherwise treat as a raw CSS / Playwright selector."""
+    """Resolve `target` to a Locator.
+
+    If it's a structured ref (`@eN`, `eN`, `[ref=eN]`) use Playwright's
+    `aria-ref=` selector engine. Otherwise treat as raw CSS / Playwright
+    selector. The daemon-side `_snapshot` cache exists only to log staleness
+    diagnostics; the actual resolution goes through Playwright's selector
+    engine against the live AX tree.
+    """
     s = _need_session(daemon)
-    if target.startswith("@e") or elements.REF_RE.match(target):
-        return elements.resolve(s.page, getattr(daemon, "_snapshot", None), target)
-    if len(target) > 1 and target[0] == "e" and target[1:].isdigit():
-        return elements.resolve(s.page, getattr(daemon, "_snapshot", None), target)
+    if _is_ref_target(target):
+        if daemon._snapshot is None:
+            raise RuntimeError(
+                f"ref {target!r} cannot be resolved — last `map` was invalidated by "
+                f"a navigation. Run `patchium map` to refresh the snapshot first."
+            )
+        return elements.resolve(s.page, daemon._snapshot, target)
     return s.page.locator(target)
 
 
@@ -143,6 +184,9 @@ def register_all(daemon) -> None:
         wait_until = args.get("wait_until", "domcontentloaded")
         timeout = int(args.get("timeout_ms", 60_000))
         resp = await s.page.goto(url, wait_until=wait_until, timeout=timeout)
+        _invalidate_snapshot(d)
+        # also clear any frame switch — stale frame won't survive navigation
+        s.frame_ref = None
         return {
             "url": s.page.url,
             "title": await s.page.title(),
@@ -157,8 +201,9 @@ def register_all(daemon) -> None:
         try:
             await s.page.go_back(wait_until=wait_until, timeout=timeout)
         except Exception as exc:  # noqa: BLE001
-            # about:blank and some history edges don't fire load — return current url
             log.info("go_back soft-failed: %s", exc)
+        _invalidate_snapshot(d)
+        s.frame_ref = None
         return {"url": s.page.url}
 
     @daemon.handler("forward")
@@ -170,6 +215,8 @@ def register_all(daemon) -> None:
             await s.page.go_forward(wait_until=wait_until, timeout=timeout)
         except Exception as exc:  # noqa: BLE001
             log.info("go_forward soft-failed: %s", exc)
+        _invalidate_snapshot(d)
+        s.frame_ref = None
         return {"url": s.page.url}
 
     @daemon.handler("reload")
@@ -177,6 +224,7 @@ def register_all(daemon) -> None:
         s = _need_session(d)
         wait_until = args.get("wait_until", "domcontentloaded")
         await s.page.reload(wait_until=wait_until)
+        _invalidate_snapshot(d)
         return {"url": s.page.url}
 
     @daemon.handler("url")
@@ -252,8 +300,10 @@ def register_all(daemon) -> None:
     async def _map(d, args):
         s = _need_session(d)
         depth = args.get("depth")
-        snap = await elements.take_snapshot(s.page, depth=depth)
-        d._prev_snapshot = getattr(d, "_snapshot", None)
+        # Map operates against the active frame if one is set, else page.
+        surface = s.frame_ref if s.frame_ref is not None else s.page
+        snap = await elements.take_snapshot(surface, depth=depth)
+        d._prev_snapshot = d._snapshot
         d._snapshot = snap
         return {
             "url": snap.url,
@@ -264,19 +314,46 @@ def register_all(daemon) -> None:
     @daemon.handler("diff_map")
     async def _diff_map(d, args):
         s = _need_session(d)
-        prev = getattr(d, "_snapshot", None)
-        new = await elements.take_snapshot(s.page)
+        prev = d._snapshot
+        surface = s.frame_ref if s.frame_ref is not None else s.page
+        new = await elements.take_snapshot(surface)
         d._prev_snapshot = prev
         d._snapshot = new
         return {"text": elements.diff(prev, new)}
 
     @daemon.handler("click")
     async def _click(d, args):
+        """Click an @eN ref or selector.
+
+        With auto_dismiss_banners=True (default off): on an "intercepted by another
+        element" failure, try dismiss_banners once and retry. This is the
+        productionization fix for the common case where a consent banner covers
+        the target — Playwright's auto-wait reports the element as not actionable.
+        """
         target = args["target"]
         timeout = int(args.get("timeout_ms", 30_000))
+        auto_dismiss = bool(args.get("auto_dismiss_banners", False))
         loc = _resolve_target(d, target)
-        await loc.click(timeout=timeout)
-        return {"clicked": target}
+        try:
+            await loc.click(timeout=timeout)
+            return {"clicked": target}
+        except Exception as exc:  # noqa: BLE001
+            msg = str(exc).lower()
+            intercepted = "intercepts pointer events" in msg or "subtree intercepts" in msg \
+                          or "element is not stable" in msg or "is not visible" in msg
+            if not auto_dismiss or not intercepted:
+                raise
+            # Try to dismiss banners and retry once
+            log.info("click intercepted — attempting auto-dismiss + retry")
+            # We need the dismiss_banners handler — call via the daemon's table
+            try:
+                await d._handlers["dismiss_banners"](d, {"prefer": "reject", "max_clicks": 1})
+            except Exception:  # noqa: BLE001
+                pass
+            # Re-resolve (snapshot may have been invalidated by the banner click)
+            loc = _resolve_target(d, target) if _is_ref_target(target) else _need_session(d).page.locator(target)
+            await loc.click(timeout=timeout)
+            return {"clicked": target, "auto_dismissed": True}
 
     @daemon.handler("dblclick")
     async def _dblclick(d, args):
@@ -395,12 +472,17 @@ def register_all(daemon) -> None:
 
     @daemon.handler("storage_restore")
     async def _storage_restore(d, args):
-        """Restore cookies + per-origin storage from a Playwright storage-state JSON.
+        """Restore cookies + per-origin localStorage + sessionStorage from a
+        Playwright storage-state JSON.
 
-        Playwright loads storage_state at context-creation time, so we apply
-        cookies via add_cookies (no re-launch needed) and write localStorage /
-        sessionStorage by navigating to each origin and replaying via JS. This
-        matches Vibium's `storage restore` semantics while staying in-session.
+        Cookies apply context-wide via add_cookies. Per-origin localStorage and
+        sessionStorage are replayed by navigating to each origin's URL once
+        and writing via JS — this is how Playwright itself rehydrates state at
+        context creation, but we do it in-session.
+
+        We RESTORE the original page URL afterwards unless it was about:blank
+        OR the current URL is already one of the origins (in which case we
+        don't navigate at all — caller is on a real page and we leave them there).
         """
         import json as _json
         path = args.get("path")
@@ -413,29 +495,69 @@ def register_all(daemon) -> None:
         await s.context.add_cookies(state.get("cookies", []))
 
         origins = state.get("origins") or []
-        if origins:
+        origin_urls = {o.get("origin") for o in origins if o.get("origin")}
+        original_url = s.page.url
+        # Restore-in-place when current URL is one of the origins
+        in_place = any(original_url.startswith(u) for u in origin_urls if u)
+
+        if origins and not in_place:
             page = s.page
-            original_url = page.url
             for origin in origins:
                 url = origin.get("origin")
-                items = origin.get("localStorage") or []
-                if not url or not items:
+                ls = origin.get("localStorage") or []
+                ss = origin.get("sessionStorage") or []
+                if not url or (not ls and not ss):
                     continue
                 await page.goto(url, wait_until="domcontentloaded")
-                await page.evaluate(
-                    """(items) => {
-                        for (const {name, value} of items) {
-                            try { localStorage.setItem(name, value); } catch(e) {}
-                        }
-                    }""",
-                    items,
-                )
-            if original_url and original_url != "about:blank":
+                if ls:
+                    await page.evaluate(
+                        """(items) => {
+                            for (const {name, value} of items) {
+                                try { localStorage.setItem(name, value); } catch(e) {}
+                            }
+                        }""",
+                        ls,
+                    )
+                if ss:
+                    await page.evaluate(
+                        """(items) => {
+                            for (const {name, value} of items) {
+                                try { sessionStorage.setItem(name, value); } catch(e) {}
+                            }
+                        }""",
+                        ss,
+                    )
+            # Restore caller's original URL if it was meaningful
+            if original_url and original_url not in ("about:blank", ""):
                 await page.goto(original_url, wait_until="domcontentloaded")
+                _invalidate_snapshot(d)
+        elif origins and in_place:
+            # Already on a relevant origin — write directly without navigation
+            page = s.page
+            for origin in origins:
+                if not (original_url.startswith(origin.get("origin", "") or "_")):
+                    continue
+                for store_key, payload in (("localStorage", origin.get("localStorage") or []),
+                                           ("sessionStorage", origin.get("sessionStorage") or [])):
+                    if payload:
+                        await page.evaluate(
+                            f"""(items) => {{
+                                for (const {{name, value}} of items) {{
+                                    try {{ {store_key}.setItem(name, value); }} catch(e) {{}}
+                                }}
+                            }}""",
+                            payload,
+                        )
 
+        # Count what we actually restored
+        ls_total = sum(len(o.get("localStorage") or []) for o in origins)
+        ss_total = sum(len(o.get("sessionStorage") or []) for o in origins)
         return {
             "cookies": len(state.get("cookies", [])),
-            "origins": len(state.get("origins", [])),
+            "origins": len(origins),
+            "localStorage_items": ls_total,
+            "sessionStorage_items": ss_total,
+            "in_place": in_place,
         }
 
     @daemon.handler("cookies")

@@ -45,6 +45,49 @@ class BrowserSession:
         return self.frame_ref if self.frame_ref is not None else self.page
 
 
+def _wire_page_tracking(session: "BrowserSession") -> None:
+    """Auto-track new pages (popups, target=_blank) and recover from page close.
+
+    Without this, `s.page` becomes stale when:
+    - JS opens a popup via `window.open` (new tab appears, session.page still old)
+    - The active page closes (session.page points at a dead Page object)
+    - target=_blank link navigates (new tab is now where the action is)
+
+    We listen on the BrowserContext for new pages and bring them to the front
+    of `s.page` if the caller hasn't explicitly switched tabs recently. Page
+    close events trigger fallback to the newest remaining live page.
+    """
+    def on_new_page(page):
+        # Make the new page the active one. Callers that want the old page
+        # back can use `pages` + `page switch <index>`.
+        session.page = page
+        log.info("new page opened — switched session.page to %s", page.url or "(blank)")
+
+        def on_close(_):
+            try:
+                live = [p for p in session.context.pages if not p.is_closed()]
+                if live:
+                    session.page = live[-1]
+                    log.info("active page closed — fell back to %s", session.page.url)
+            except Exception:  # noqa: BLE001
+                pass
+        page.on("close", on_close)
+
+    session.context.on("page", on_new_page)
+    # Hook close on existing pages too
+    for p in session.context.pages:
+        def make_handler(pg):
+            def on_close(_):
+                try:
+                    live = [x for x in session.context.pages if not x.is_closed()]
+                    if live:
+                        session.page = live[-1]
+                except Exception:  # noqa: BLE001
+                    pass
+            return on_close
+        p.on("close", make_handler(p))
+
+
 async def launch_session(profile_dir: Path, headless: bool = False) -> BrowserSession:
     """Cold-launch real Chrome with persistent context (canonical Patchright config)."""
     profile_dir.mkdir(parents=True, exist_ok=True)
@@ -58,7 +101,9 @@ async def launch_session(profile_dir: Path, headless: bool = False) -> BrowserSe
         no_viewport=True,
     )
     page = context.pages[0] if context.pages else await context.new_page()
-    return BrowserSession(pw=pw, context=context, page=page, mode="launch", profile_dir=profile_dir)
+    sess = BrowserSession(pw=pw, context=context, page=page, mode="launch", profile_dir=profile_dir)
+    _wire_page_tracking(sess)
+    return sess
 
 
 async def attach_session(cdp_url: str) -> BrowserSession:
@@ -76,7 +121,9 @@ async def attach_session(cdp_url: str) -> BrowserSession:
         raise RuntimeError("attached browser has no contexts — open a tab in Chrome first")
     context = browser.contexts[0]
     page = context.pages[0] if context.pages else await context.new_page()
-    return BrowserSession(pw=pw, context=context, page=page, mode="attach", cdp_url=cdp_url)
+    sess = BrowserSession(pw=pw, context=context, page=page, mode="attach", cdp_url=cdp_url)
+    _wire_page_tracking(sess)
+    return sess
 
 
 async def close_session(session: BrowserSession) -> None:

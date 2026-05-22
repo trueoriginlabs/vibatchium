@@ -29,10 +29,32 @@ log = logging.getLogger("patchium.server")
 
 
 class Daemon:
+    # Verbs whose handlers DON'T acquire the global RPC lock. These either
+    # block on external events (waits) and need to coexist with the action
+    # that triggers the event, or they're cheap read-only state queries.
+    # Running them outside the lock means: `patchium wait-response /api/foo` in
+    # one shell while `patchium click @e3` in another shell can fire the request
+    # — neither blocks on the other.
+    UNLOCKED_VERBS = frozenset({
+        "ping", "status",
+        "wait_selector", "wait_ref", "wait_url", "wait_load", "wait_fn",
+        "wait_response", "sleep",
+    })
+
     def __init__(self) -> None:
         self.session: BrowserSession | None = None
         self._handlers: dict[str, Callable[[Daemon, dict], Awaitable[Any]]] = {}
         self._stopping = asyncio.Event()
+        # Global RPC lock — serializes mutating verbs so concurrent MCP/CLI clients
+        # don't race on session.page, session.frame_ref, _snapshot, etc.
+        # Patchright/Playwright operations aren't safe to interleave on the same
+        # Page anyway. Wait verbs (see UNLOCKED_VERBS) skip the lock so they
+        # can block on events fired by lock-holding verbs running in parallel.
+        self._lock = asyncio.Lock()
+        # `_snapshot` is the most recent aria_snapshot result; resolves @eN refs.
+        # Cleared on navigation (see _invalidate_snapshot() in handlers.py).
+        self._snapshot = None
+        self._prev_snapshot = None
         # populated by handlers.register_all() + handlers_extra.register_extra() below
         handlers.register_all(self)
         handlers_extra.register_extra(self)
@@ -50,7 +72,13 @@ class Daemon:
         if cmd not in self._handlers:
             return {"id": req_id, "ok": False, "error": f"unknown command: {cmd}"}
         try:
-            result = await self._handlers[cmd](self, args)
+            if cmd in self.UNLOCKED_VERBS:
+                # Wait verbs and read-only state queries run without the lock so
+                # they can block on events triggered by lock-holding verbs.
+                result = await self._handlers[cmd](self, args)
+            else:
+                async with self._lock:
+                    result = await self._handlers[cmd](self, args)
             return {"id": req_id, "ok": True, "result": result}
         except Exception as exc:  # noqa: BLE001
             log.exception("handler %s failed", cmd)

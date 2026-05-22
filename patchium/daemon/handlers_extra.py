@@ -11,6 +11,7 @@ import base64
 import json as _json
 import logging
 import re
+import re as _re_local
 import time
 from io import BytesIO
 from pathlib import Path
@@ -223,28 +224,58 @@ def register_extra(daemon) -> None:
 
     @daemon.handler("dialog_policy")
     async def _dialog_policy(d, args):
-        """Set how the next dialog (alert/confirm/prompt) is handled."""
+        """Set how the next dialog (alert/confirm/prompt) is handled.
+
+        Idempotent: replaces any prior handler cleanly via `page.remove_listener`.
+        Registered on the BrowserContext so popup-window dialogs also fire.
+        Each new page in the context (existing + future) gets the same policy.
+        """
         s = _session(d)
         action = args.get("action", "dismiss")  # accept | dismiss
         text = args.get("text")  # prompt-input text when accepting
 
-        # Replace the current handler (Patchright doesn't expose remove)
         async def handle(dialog):
             try:
                 if action == "accept":
-                    await dialog.accept(prompt_text=text) if text else await dialog.accept()
+                    if text is not None:
+                        await dialog.accept(prompt_text=text)
+                    else:
+                        await dialog.accept()
                 else:
                     await dialog.dismiss()
             except Exception:  # noqa: BLE001
                 pass
 
-        # off+on idempotent re-registration
-        try:
-            s.page.remove_listener("dialog", s.dialog_policy.get("_handle"))
-        except Exception:  # noqa: BLE001
-            pass
-        s.page.on("dialog", handle)
-        s.dialog_policy = {"action": action, "text": text, "_handle": handle}
+        # Remove the prior handler (if any) from all live pages
+        prior = s.dialog_policy.get("_handle") if isinstance(s.dialog_policy, dict) else None
+        if prior is not None:
+            for p in list(s.context.pages):
+                try:
+                    p.remove_listener("dialog", prior)
+                except Exception:  # noqa: BLE001
+                    pass
+
+        # Register on existing pages AND on future ones (popups inherit the policy)
+        for p in s.context.pages:
+            p.on("dialog", handle)
+
+        # Wire to future pages via context — install once, reuse for the
+        # lifetime of this dialog policy
+        prior_page_hook = s.dialog_policy.get("_page_hook") if isinstance(s.dialog_policy, dict) else None
+        if prior_page_hook is not None:
+            try:
+                s.context.remove_listener("page", prior_page_hook)
+            except Exception:  # noqa: BLE001
+                pass
+
+        def on_new_page_register_dialog(page):
+            page.on("dialog", handle)
+        s.context.on("page", on_new_page_register_dialog)
+
+        s.dialog_policy = {
+            "action": action, "text": text,
+            "_handle": handle, "_page_hook": on_new_page_register_dialog,
+        }
         return {"action": action, "text": text}
 
     # ─── downloads ────────────────────────────────────────────────────────
@@ -365,6 +396,133 @@ def register_extra(daemon) -> None:
         await s.page.emulate_media(**kwargs)
         return kwargs
 
+    # ─── request interception (route) ─────────────────────────────────────
+
+    @daemon.handler("route_add")
+    async def _route_add(d, args):
+        """Add a request-interception rule. Mode: abort | fulfill | passthrough.
+
+        - abort:  request fails. Use to block heavy resources (images/css/fonts)
+                  to save bandwidth, or to block third-party trackers during recon.
+        - fulfill: return a synthetic response. Useful for API mocking and tests.
+                   body / status / content_type / headers come from args.
+        - passthrough (default): observe + log without altering. Use to record
+                   that this pattern was matched (visible in `route_list`).
+
+        Multi-page aware: route is registered on the context, so popups inherit it.
+        """
+        s = _session(d)
+        pattern = args["pattern"]
+        mode = args.get("mode", "passthrough")
+        body = args.get("body", "")
+        status = int(args.get("status", 200))
+        content_type = args.get("content_type", "text/plain")
+        headers_in = args.get("headers") or {}
+
+        if not hasattr(s, "_routes"):
+            s._routes = []  # list of {pattern, mode, body, status, content_type, headers, hits}
+        # Allow updating an existing rule with the same pattern
+        existing = next((r for r in s._routes if r["pattern"] == pattern), None)
+        if existing is not None:
+            existing.update(mode=mode, body=body, status=status,
+                            content_type=content_type, headers=headers_in)
+            existing.setdefault("hits", 0)
+            return {"updated": pattern, "mode": mode}
+
+        async def handler(route, request):
+            rule = next((r for r in s._routes if r["pattern"] == pattern), None)
+            if rule is None:
+                await route.continue_()
+                return
+            rule["hits"] = rule.get("hits", 0) + 1
+            if rule["mode"] == "abort":
+                await route.abort()
+            elif rule["mode"] == "fulfill":
+                await route.fulfill(
+                    status=rule["status"],
+                    body=rule["body"],
+                    content_type=rule["content_type"],
+                    headers=rule.get("headers") or {},
+                )
+            else:
+                await route.continue_()
+
+        await s.context.route(pattern, handler)
+        s._routes.append({
+            "pattern": pattern, "mode": mode, "body": body, "status": status,
+            "content_type": content_type, "headers": headers_in, "hits": 0,
+            "_handler": handler,
+        })
+        return {"added": pattern, "mode": mode}
+
+    @daemon.handler("route_list")
+    async def _route_list(d, args):
+        s = _session(d)
+        rules = getattr(s, "_routes", [])
+        return {
+            "routes": [
+                {"pattern": r["pattern"], "mode": r["mode"], "hits": r.get("hits", 0)}
+                for r in rules
+            ]
+        }
+
+    @daemon.handler("route_clear")
+    async def _route_clear(d, args):
+        s = _session(d)
+        rules = getattr(s, "_routes", [])
+        pattern = args.get("pattern")
+        if pattern:
+            rule = next((r for r in rules if r["pattern"] == pattern), None)
+            if rule is None:
+                return {"cleared": 0}
+            try:
+                await s.context.unroute(pattern, rule.get("_handler"))
+            except Exception:  # noqa: BLE001
+                pass
+            rules.remove(rule)
+            return {"cleared": 1, "pattern": pattern}
+        # clear all
+        n = len(rules)
+        for r in rules:
+            try:
+                await s.context.unroute(r["pattern"], r.get("_handler"))
+            except Exception:  # noqa: BLE001
+                pass
+        s._routes = []
+        return {"cleared": n}
+
+    @daemon.handler("wait_response")
+    async def _wait_response(d, args):
+        """Wait for a response matching URL pattern; optionally return its body."""
+        s = _session(d)
+        pattern = args["pattern"]
+        timeout = int(args.get("timeout_ms", 30_000))
+        capture_body = bool(args.get("body", False))
+        max_body = int(args.get("max_body", 1_000_000))
+
+        # page.wait_for_response accepts a string (substring) or regex source
+        resp = await s.page.wait_for_response(pattern, timeout=timeout)
+        out = {
+            "url": resp.url,
+            "status": resp.status,
+            "ok": resp.ok,
+            "headers": dict(resp.headers),
+        }
+        if capture_body:
+            try:
+                body_bytes = await resp.body()
+                if len(body_bytes) > max_body:
+                    body_bytes = body_bytes[:max_body]
+                    out["truncated"] = True
+                # text-ish bodies → utf-8; binary → base64
+                try:
+                    out["text"] = body_bytes.decode("utf-8")
+                except UnicodeDecodeError:
+                    out["b64"] = base64.b64encode(body_bytes).decode()
+            except Exception as exc:  # noqa: BLE001
+                out["body_error"] = f"{type(exc).__name__}: {exc}"
+        return out
+
     # ─── network capture ─────────────────────────────────────────────────
 
     @daemon.handler("network_start")
@@ -441,9 +599,12 @@ def register_extra(daemon) -> None:
         path = args.get("path") or "screenshot.png"
 
         if not _HAS_PILLOW:
-            await s.page.screenshot(path=path, full_page=full_page)
-            return {"path": path, "annotated": False,
-                    "note": "Pillow not installed — install patchium[annotate]"}
+            # Fail loudly rather than silently fall back — caller asked for
+            # annotation, doesn't get it without Pillow.
+            raise RuntimeError(
+                "screenshot --annotate requires Pillow. Install with "
+                "`pip install pillow` (or omit --annotate)."
+            )
 
         # boxes=True yields lines like:  [ref=e3] [box=L,T,W,H]
         snap_text = await s.page.aria_snapshot(mode="ai", boxes=True)
@@ -472,6 +633,90 @@ def register_extra(daemon) -> None:
         out.save(path)
         return {"path": path, "annotated": True, "boxes": len(boxes)}
 
+    # ─── cookie banner / consent dismissal ────────────────────────────────
+
+    @daemon.handler("dismiss_banners")
+    async def _dismiss_banners(d, args):
+        """Heuristic: scan the current snapshot for common consent / cookie /
+        newsletter dismiss buttons and click the most likely one.
+
+        Args:
+          dry_run: bool — return the candidate without clicking
+          max_clicks: int (default 1) — how many banners to dismiss in one call
+
+        Looks for buttons/links whose accessible name matches well-known consent
+        verbs (Accept / Allow / Agree / Got it / Continue / Reject all / OK).
+        Prefers shorter, more direct labels (single-button banners) over long
+        verbose ones. Returns the ones it clicked (or would have) for transparency.
+        """
+        s = _session(d)
+        # Common consent / dismissal labels, ordered by directness (most-direct first)
+        ACCEPT_LABELS = [
+            r"\baccept all\b", r"\baccept\b", r"\bagree to all\b", r"\bi agree\b",
+            r"\bagree\b", r"\ballow all\b", r"\ballow\b", r"\baccept cookies\b",
+            r"\bgot it\b", r"\bok\b", r"\bcontinue\b", r"\bunderstood\b",
+            r"\bdismiss\b", r"\bclose\b",
+        ]
+        # Buttons-without-accept (last resort, reject preserves privacy more)
+        REJECT_LABELS = [
+            r"\breject all\b", r"\breject\b", r"\bdecline\b", r"\bno thanks\b",
+            r"\bno, thanks\b",
+        ]
+
+        prefer = (args.get("prefer") or "reject").lower()  # accept | reject
+        dry_run = bool(args.get("dry_run", False))
+        max_clicks = int(args.get("max_clicks", 1))
+
+        labels = REJECT_LABELS + ACCEPT_LABELS if prefer == "reject" else ACCEPT_LABELS + REJECT_LABELS
+
+        # Snapshot the current page, parse for buttons/links matching the labels
+        snap = await elements.take_snapshot(s.page)
+        d._prev_snapshot = d._snapshot
+        d._snapshot = snap
+        yaml_text = snap.text(indent=True)
+
+        # extract (role, name, ref) tuples from the snapshot
+        # pattern: `- {role} "{name}" ... @eN`
+        entry_re = _re_local.compile(
+            r'^\s*-\s+(?P<role>button|link)\s+"(?P<name>[^"]+)"[^\n@]*@(?P<ref>e\d+)',
+            _re_local.MULTILINE,
+        )
+        candidates = []
+        for m in entry_re.finditer(yaml_text):
+            name = m["name"].strip()
+            for prio, pattern in enumerate(labels):
+                if _re_local.search(pattern, name, _re_local.IGNORECASE):
+                    candidates.append({
+                        "ref": "@" + m["ref"],
+                        "role": m["role"],
+                        "name": name,
+                        "priority": prio,
+                    })
+                    break
+
+        # Sort: lowest priority number = highest preference
+        candidates.sort(key=lambda c: c["priority"])
+
+        if dry_run or not candidates:
+            return {"dry_run": dry_run, "found": len(candidates),
+                    "candidates": candidates[:5], "clicked": []}
+
+        clicked = []
+        for cand in candidates[:max_clicks]:
+            try:
+                loc = elements.resolve(s.page, snap, cand["ref"])
+                await loc.click(timeout=5_000)
+                clicked.append(cand)
+            except Exception as exc:  # noqa: BLE001
+                cand["error"] = f"{type(exc).__name__}: {exc}"
+                clicked.append(cand)
+
+        # post-click snapshot probably changed; invalidate
+        d._prev_snapshot = d._snapshot
+        d._snapshot = None
+        return {"found": len(candidates), "clicked": clicked,
+                "preference": prefer}
+
     # ─── observe → act ────────────────────────────────────────────────────
 
     @daemon.handler("observe")
@@ -480,15 +725,21 @@ def register_extra(daemon) -> None:
         intent = args["intent"]
         use_llm = bool(args.get("llm", False))
         force = bool(args.get("force", False))
-        return await _observe_mod.observe(s.page, intent, use_llm=use_llm, force_refresh=force)
+        return await _observe_mod.observe(s.page, intent, use_llm=use_llm,
+                                          force_refresh=force, daemon=d)
 
     @daemon.handler("act")
     async def _act(d, args):
-        """Execute a previously-observed (or freshly-computed) plan."""
+        """Execute a previously-observed (or freshly-computed) plan.
+
+        Passes daemon to observe so the snapshot gets cached for ref resolution
+        in the dispatched verbs below.
+        """
         s = _session(d)
         intent = args["intent"]
         use_llm = bool(args.get("llm", False))
-        result = await _observe_mod.observe(s.page, intent, use_llm=use_llm, force_refresh=False)
+        result = await _observe_mod.observe(s.page, intent, use_llm=use_llm,
+                                            force_refresh=False, daemon=d)
         plan = result.get("plan") or []
         if not plan:
             return {"executed": 0, "intent": intent, "reason": "empty plan"}

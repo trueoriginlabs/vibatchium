@@ -253,11 +253,23 @@ def cache_put(url: str, intent: str, result: dict) -> None:
 # ─── orchestrator ─────────────────────────────────────────────────────────
 
 
-async def observe(page, intent: str, *, use_llm: bool = False, force_refresh: bool = False) -> dict:
-    """Return a cached or freshly-computed plan for `intent` against page's snapshot."""
+async def observe(page, intent: str, *, use_llm: bool = False,
+                  force_refresh: bool = False, daemon=None) -> dict:
+    """Return a cached or freshly-computed plan for `intent`.
+
+    Side-effect: when `daemon` is supplied, writes the freshly-taken AX snapshot
+    to `daemon._snapshot` so that subsequent `act`-style verb dispatch (`click @eN`)
+    can resolve refs without a separate `map` call. Without this, observe→act
+    chains would refuse with "snapshot invalidated" since the daemon's snapshot
+    cache is cleared on navigation by design.
+    """
     snap = await elements.take_snapshot(page)
     yaml_text = snap.text(indent=True)
     url = page.url
+
+    if daemon is not None:
+        daemon._prev_snapshot = daemon._snapshot
+        daemon._snapshot = snap
 
     if not force_refresh:
         cached = cache_get(url, intent)

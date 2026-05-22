@@ -387,10 +387,13 @@ def diff_cmd(ctx, subcmd):
 @cli.command(name="click")
 @click.argument("target")
 @click.option("--timeout", "timeout_ms", default=30_000, type=int)
+@click.option("--auto-dismiss-banners", is_flag=True,
+              help="On 'intercepted' failure, try to dismiss banners and retry once.")
 @click.pass_context
-def click_cmd(ctx, target, timeout_ms):
+def click_cmd(ctx, target, timeout_ms, auto_dismiss_banners):
     """Click an @eN ref or selector."""
-    _emit(call("click", {"target": target, "timeout_ms": timeout_ms}),
+    _emit(call("click", {"target": target, "timeout_ms": timeout_ms,
+                          "auto_dismiss_banners": auto_dismiss_banners}),
           ctx.obj["json"], "clicked")
 
 
@@ -875,7 +878,96 @@ def network_dump(ctx, output):
     _emit(call("network_dump", args), ctx.obj["json"])
 
 
+# ─── request interception (route) ────────────────────────────────────────
+
+@cli.group()
+def route():
+    """Request interception (abort/fulfill/observe URL patterns)."""
+
+
+@route.command("add")
+@click.argument("pattern")
+@click.option("--mode", default="passthrough",
+              type=click.Choice(["abort", "fulfill", "passthrough"]))
+@click.option("--body", default="", help="Response body when --mode=fulfill.")
+@click.option("--status", default=200, type=int)
+@click.option("--content-type", default="text/plain")
+@click.pass_context
+def route_add(ctx, pattern, mode, body, status, content_type):
+    """Add a route rule. PATTERN is a Playwright URL glob like `**/*.png`.
+
+    Examples:
+      patchium route add "**/*.{png,jpg,css}" --mode abort
+      patchium route add "**/api/users" --mode fulfill --body '{"ok":true}' --content-type application/json
+    """
+    _emit(call("route_add", {"pattern": pattern, "mode": mode, "body": body,
+                              "status": status, "content_type": content_type}),
+          ctx.obj["json"])
+
+
+@route.command("list")
+@click.pass_context
+def route_list(ctx):
+    """List active route rules + hit counts."""
+    _emit(call("route_list"), ctx.obj["json"])
+
+
+@route.command("clear")
+@click.argument("pattern", required=False)
+@click.pass_context
+def route_clear(ctx, pattern):
+    """Clear one rule by pattern, or all rules if no pattern given."""
+    args = {"pattern": pattern} if pattern else {}
+    _emit(call("route_clear", args), ctx.obj["json"])
+
+
+@cli.command("wait-response")
+@click.argument("pattern")
+@click.option("--timeout", "timeout_ms", default=30_000, type=int)
+@click.option("--body", is_flag=True, help="Capture and return the response body.")
+@click.option("--max-body", default=1_000_000, type=int)
+@click.pass_context
+def wait_response(ctx, pattern, timeout_ms, body, max_body):
+    """Wait for a network response matching URL pattern (and optionally return the body)."""
+    _emit(call("wait_response", {"pattern": pattern, "timeout_ms": timeout_ms,
+                                  "body": body, "max_body": max_body}),
+          ctx.obj["json"])
+
+
+# ─── cookie / consent banner auto-dismiss ─────────────────────────────────
+
+@cli.command("dismiss-banners")
+@click.option("--prefer", default="reject", type=click.Choice(["reject", "accept"]),
+              help="Prefer reject-class buttons (privacy default) or accept-class.")
+@click.option("--dry-run", is_flag=True, help="Report candidates without clicking.")
+@click.option("--max", "max_clicks", default=1, type=int)
+@click.pass_context
+def dismiss_banners(ctx, prefer, dry_run, max_clicks):
+    """Heuristically dismiss cookie/consent/newsletter banners on the current page.
+
+    Scans the AX snapshot for buttons matching common consent labels (Accept,
+    Reject, Agree, Got it, etc.) and clicks the most direct one. Uses the
+    privacy-friendly default (--prefer=reject).
+    """
+    _emit(call("dismiss_banners", {"prefer": prefer, "dry_run": dry_run,
+                                    "max_clicks": max_clicks}),
+          ctx.obj["json"])
+
+
 # ─── observe / act (intent → plan) ────────────────────────────────────────
+
+@cli.command("observe-clear-cache")
+@click.pass_context
+def observe_clear_cache(ctx):
+    """Delete the on-disk observe→act plan cache."""
+    from .daemon.paths import CACHE_DIR
+    cache = CACHE_DIR / "observe-cache.json"
+    if cache.exists():
+        cache.unlink()
+        click.echo(f"cleared {cache}")
+    else:
+        click.echo("no cache file")
+
 
 @cli.command()
 @click.argument("intent")
@@ -900,6 +992,24 @@ def observe(ctx, intent, llm, force):
 def act(ctx, intent, llm):
     """Observe + execute the resulting plan in one shot."""
     _emit(call("act", {"intent": intent, "llm": llm}), ctx.obj["json"])
+
+
+@cli.command()
+@click.option("-n", "--lines", default=50, type=int)
+@click.option("--follow", is_flag=True, help="tail -f the log.")
+@click.pass_context
+def logs(ctx, lines, follow):
+    """Tail the daemon log."""
+    from .daemon.paths import LOG_PATH
+    import subprocess as _sub
+    if not LOG_PATH.exists():
+        click.echo(f"no log yet at {LOG_PATH}", err=True)
+        sys.exit(1)
+    cmd = ["tail", "-n", str(lines)]
+    if follow:
+        cmd.append("-f")
+    cmd.append(str(LOG_PATH))
+    _sub.call(cmd)
 
 
 # ─── MCP server ───────────────────────────────────────────────────────────

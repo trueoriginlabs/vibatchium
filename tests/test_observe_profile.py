@@ -68,5 +68,7 @@ def test_count_extra(local_server):
     """Sanity: count + content + map_compact extras."""
     call("go", {"url": f"{local_server}/simple.html"})
     assert call("count", {"target": "input"})["count"] == 2  # #q and #file
+    # buttons: counter + submit + reject-banner + accept-banner + trigger-fetch
+    assert call("count", {"target": "button"})["count"] >= 4
     res = call("map_compact")
     assert res["count"] > 0
