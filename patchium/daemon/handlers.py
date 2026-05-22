@@ -46,9 +46,24 @@ def _need_session(daemon):
 
 
 def _invalidate_snapshot(daemon) -> None:
-    """Clear the cached AX snapshot — refs from before navigation no longer apply."""
+    """Clear the cached AX snapshot AND any held JS handles — refs and handles
+    from before navigation no longer apply."""
     daemon._prev_snapshot = getattr(daemon, "_snapshot", None)
     daemon._snapshot = None
+    # Best-effort dispose of held handles
+    handles = getattr(daemon, "_handles", {})
+    for h in list(handles.values()):
+        try:
+            # JSHandle.dispose() returns a coroutine but we can't await here
+            # — schedule a fire-and-forget. The handle becomes invalid anyway
+            # since navigation tears down the execution context.
+            import asyncio as _aio
+            coro = h.dispose()
+            if _aio.iscoroutine(coro):
+                _aio.create_task(coro)
+        except Exception:  # noqa: BLE001
+            pass
+    handles.clear()
 
 
 def _is_ref_target(target: str) -> bool:
@@ -102,8 +117,21 @@ def register_all(daemon) -> None:
         profile_dir.mkdir(parents=True, exist_ok=True)
         headless = bool(args.get("headless", False))
         d.session = await launch_session(profile_dir, headless=headless)
-        return {"started": True, "mode": "launch", "profile": str(profile_dir),
-                "profile_name": profile_dir.name}
+
+        out = {"started": True, "mode": "launch", "profile": str(profile_dir),
+               "profile_name": profile_dir.name}
+
+        # Optional stealth layer: humanized mouse via CDP-Patches
+        if args.get("stealth_mouse"):
+            from ..stealth import install_humanized_mouse
+            try:
+                await install_humanized_mouse(d.session)
+                out["stealth_mouse"] = True
+            except Exception as exc:  # noqa: BLE001
+                out["stealth_mouse"] = False
+                out["stealth_mouse_error"] = str(exc)
+
+        return out
 
     # ─── profile management ────────────────────────────────────────────
 

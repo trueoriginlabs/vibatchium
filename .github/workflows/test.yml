@@ -1,0 +1,77 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install system deps (Xvfb + Chrome runtime)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -yq xvfb libnss3 libatk-bridge2.0-0 libdrm2 \
+            libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 \
+            libgbm1 libxss1 libasound2t64 || sudo apt-get install -yq libasound2
+
+      - name: Install patchium + extras
+        run: |
+          python -m pip install -U pip
+          pip install -e ".[annotate]"
+          pip install pytest pytest-asyncio pytest-timeout
+
+      - name: Install patchright Chrome
+        run: |
+          patchright install chrome
+          patchright install-deps chrome || true
+
+      - name: Run tests under Xvfb
+        env:
+          PYTHONUNBUFFERED: "1"
+        run: |
+          xvfb-run -a -s "-screen 0 1920x1080x24" python -m pytest tests/ -v --tb=short --timeout=60
+
+      - name: MCP server smoke
+        run: |
+          xvfb-run -a -s "-screen 0 1920x1080x24" bash -c '
+            (echo "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"ci\",\"version\":\"1\"}}}";
+             sleep 0.3;
+             echo "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}";
+             sleep 0.2;
+             echo "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}";
+             sleep 1) | timeout 10 patchium mcp | python -c "
+            import json, sys
+            for line in sys.stdin:
+                try:
+                    d = json.loads(line)
+                    if d.get(\"id\") == 2:
+                        tools = d.get(\"result\", {}).get(\"tools\", [])
+                        print(f\"MCP tool count: {len(tools)}\")
+                        assert len(tools) >= 60, f\"too few tools: {len(tools)}\"
+                except Exception:
+                    pass
+            "
+          '
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.13" }
+      - run: pip install ruff
+      - run: ruff check patchium/ tests/

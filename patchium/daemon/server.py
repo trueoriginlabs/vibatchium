@@ -55,6 +55,11 @@ class Daemon:
         # Cleared on navigation (see _invalidate_snapshot() in handlers.py).
         self._snapshot = None
         self._prev_snapshot = None
+        # `_handles` — id (`h_N`) → JSHandle from eval_handle. Disposed on
+        # navigation (same as _snapshot). Allows DOM-handle traversal (shadow
+        # DOM, NodeList, passing elements between calls).
+        self._handles: dict[str, object] = {}
+        self._handle_counter = 0
         # populated by handlers.register_all() + handlers_extra.register_extra() below
         handlers.register_all(self)
         handlers_extra.register_extra(self)

@@ -2,7 +2,7 @@
 
 Patchwright stealth backend + Vibium-style LLM-friendly CLI for agentic browser automation.
 
-> **Status: alpha, working.** Cleared HackerOne's Cloudflare wall on a first cold-launch (no manual login, no attach). **69 MCP tools** registered. ~4,400 LoC of Python, 40 tests, all green. (Cloudflare pass-rate is **target-specific** — verified against HackerOne; sites with Cloudflare-UAM, DataDome, Akamai, or Kasada may require `attach` mode or still fail; see "Stealth posture" below.)
+> **Status: alpha, working.** Cleared HackerOne's Cloudflare wall on a first cold-launch (no manual login, no attach). **76 MCP tools** registered. ~5,000 LoC of Python, 46 tests, all green. (Cloudflare pass-rate is **target-specific** — verified against HackerOne; sites with Cloudflare-UAM, DataDome, Akamai, or Kasada may require `attach` mode or still fail; see "Stealth posture" below.)
 
 ## Why patchium
 
@@ -13,16 +13,19 @@ Patchwright stealth backend + Vibium-style LLM-friendly CLI for agentic browser 
 | Headed real-Chrome + persistent context (default) | partial | ✅ | ✅ |
 | CDP-attach to a manually-logged-in Chrome | ❌ | manual | `patchium attach` |
 | Storage export/restore (cookies + per-origin LS) | ✅ | manual | ✅ |
-| MCP server mode (69 tools wired) | ✅ | ❌ | ✅ |
+| MCP server mode (76 tools wired) | ✅ | ❌ | ✅ |
 | Cloudflare clean-pass on HackerOne (verified) | ❌ | ✅ | ✅ |
 
 ## Install
 
 ```bash
-git clone https://github.com/ClavIclar/patchium && cd patchium
-python -m venv .venv && source .venv/bin/activate
-pip install -e .
-patchright install chrome             # one-time: install real Chrome (not Chromium)
+pip install patchium                            # core CLI + MCP server
+pip install "patchium[annotate]"                # + Pillow for screenshot --annotate
+pip install "patchium[llm]"                     # + anthropic for observe --llm
+pip install "patchium[stealth-mouse]"           # + CDP-Patches for humanized mouse (Brotector/DataDome)
+pip install "patchium[all]"                     # everything except stealth-mouse
+patchright install chrome                       # one-time: install real Chrome (not Chromium)
+patchium install                                # sanity-check the environment
 ```
 
 Linux servers without a display: `Xvfb :99 -screen 0 1920x1080x24 &` then `export DISPLAY=:99` before launching. On a desktop with $DISPLAY already set, nothing extra needed.
@@ -62,7 +65,7 @@ patchium go https://target.example.com        # now reads as your real browser
 patchium mcp                                  # stdio JSON-RPC MCP server
 ```
 
-Or register with Claude Code: `claude mcp add patchium python -m patchium.mcp_server`. Every CLI verb is exposed as an MCP tool (69 total: lifecycle, navigation, element model, find/frames/mouse/upload/dialog/download/pdf/record/highlight/geolocation/media/network/observe/act/profile, plus the screenshot+annotate vision helper) — all talking to the same daemon, so a single browser session is shared between shell invocations and Claude Code tool calls.
+Or register with Claude Code: `claude mcp add patchium python -m patchium.mcp_server`. Every CLI verb is exposed as an MCP tool (76 total: lifecycle, navigation, element model, find/frames/mouse/upload/dialog/download/pdf/record/highlight/geolocation/media/network/observe/act/profile, plus the screenshot+annotate vision helper) — all talking to the same daemon, so a single browser session is shared between shell invocations and Claude Code tool calls.
 
 ## CLI surface
 
@@ -83,7 +86,9 @@ Dialogs:      dialog accept|dismiss  [--text]
 Overrides:    geolocation  media
 Network:      network start|stop|dump
 Storage:      storage export  storage restore  cookies
+HAR:          har start  har stop  (full HTTP archive: req+resp+timings+bodies)
 Tracing:      record start  record stop  (Playwright Trace Viewer ZIP)
+Handles:      handle create  handle eval  handle list  handle dispose  handle clear
 Waits:        wait selector  wait url  wait load  wait fn  sleep
 Agents:       observe "<intent>"  act "<intent>"  [--llm]
 Server:       mcp
@@ -157,7 +162,7 @@ End-to-end verified flows (all in the pytest suite):
 15. **Cloudflare-pass**: cold launch `go hackerone.com/anthropic` clears the wall
 16. **Observe → act**: heuristic intent-matching with on-disk cache; LLM mode via `--llm` when `ANTHROPIC_API_KEY` is set
 17. **Profiles**: `profile list|new|use|delete` for isolated browser identities (work vs recon vs personal)
-18. **MCP**: `patchium mcp` exposes all 69 tools to Claude Code over stdio JSON-RPC, sharing the same daemon-managed browser
+18. **MCP**: `patchium mcp` exposes all 76 tools to Claude Code over stdio JSON-RPC, sharing the same daemon-managed browser
 
 ## License
 

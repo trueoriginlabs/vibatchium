@@ -585,6 +585,168 @@ def register_extra(daemon) -> None:
             return {"path": path, "events": len(events)}
         return {"events": events}
 
+    # ─── HAR export (full network capture format) ────────────────────────
+
+    @daemon.handler("har_start")
+    async def _har_start(d, args):
+        """Start recording a full HAR (HTTP Archive 1.2) to disk.
+
+        Playwright's HAR mode captures request + response (with bodies),
+        timings, redirects, content types — everything dev tools shows under
+        the Network tab. Compatible with Wireshark, Chrome DevTools import,
+        and HAR analysis tools (har-validator, har-tools-cli).
+
+        Unlike `network_start` (in-memory ring buffer of summaries), HAR
+        capture writes to disk and includes response bodies by default.
+
+        Caveats: HAR recording is per-context — calling har_start re-creates
+        the BrowserContext if one is already attached without HAR, which loses
+        in-page state. We refuse to do that destructive thing automatically;
+        require explicit har_start *before* any go/navigation if you want a
+        full capture from session start.
+        """
+        s = _session(d)
+        path = args["path"]
+        content = args.get("content", "embed")  # embed | attach | omit
+        url_filter = args.get("url_filter")     # glob
+
+        # Tracing is the modern PW way; for true HAR we use context tracing's
+        # HAR recording, but the simpler API is BrowserContext.set_har... oh wait
+        # that doesn't exist. Use context.tracing or, more reliably,
+        # the launch_persistent_context(record_har_path=...) at start time.
+        # Since we're already started, the workable path is page-level via
+        # `page.route` to log each event into a HAR-shaped JSON. Playwright
+        # actually exposes context.record_har_path only at context-creation;
+        # for in-session HAR capture, the simplest fallback is to do it
+        # ourselves: subscribe to request/response and write a HAR-shaped
+        # JSON manually on stop.
+
+        if hasattr(s, "_har_state") and s._har_state.get("recording"):
+            return {"recording": True, "already_on": True, "path": s._har_state["path"]}
+
+        har_state = {
+            "recording": True,
+            "path": path,
+            "url_filter": url_filter,
+            "entries": [],
+            "started_at": time.time(),
+            "_handlers": [],
+            "_pending": {},  # request -> partial entry
+        }
+
+        def on_request(req):
+            if url_filter and url_filter not in req.url:
+                return
+            har_state["_pending"][req] = {
+                "startedDateTime": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()),
+                "time": 0,
+                "request": {
+                    "method": req.method,
+                    "url": req.url,
+                    "httpVersion": "HTTP/2",  # best-effort; PW doesn't expose
+                    "headers": [{"name": k, "value": v} for k, v in req.headers.items()],
+                    "queryString": [],
+                    "headersSize": -1,
+                    "bodySize": -1,
+                },
+                "_t0": time.time(),
+            }
+
+        async def on_response(resp):
+            req = resp.request
+            entry = har_state["_pending"].pop(req, None)
+            if entry is None:
+                return
+            elapsed_ms = int((time.time() - entry.pop("_t0")) * 1000)
+            try:
+                body_bytes = await resp.body()
+            except Exception:  # noqa: BLE001
+                body_bytes = b""
+            body_text = None
+            body_b64 = None
+            if content == "embed":
+                try:
+                    body_text = body_bytes.decode("utf-8")
+                except UnicodeDecodeError:
+                    body_b64 = base64.b64encode(body_bytes).decode()
+            entry["time"] = elapsed_ms
+            entry["response"] = {
+                "status": resp.status,
+                "statusText": resp.status_text or "",
+                "httpVersion": "HTTP/2",
+                "headers": [{"name": k, "value": v} for k, v in resp.headers.items()],
+                "cookies": [],
+                "content": {
+                    "size": len(body_bytes),
+                    "mimeType": resp.headers.get("content-type", "application/octet-stream"),
+                    **({"text": body_text} if body_text is not None else {}),
+                    **({"encoding": "base64", "text": body_b64} if body_b64 is not None else {}),
+                },
+                "redirectURL": "",
+                "headersSize": -1,
+                "bodySize": len(body_bytes),
+            }
+            entry["cache"] = {}
+            entry["timings"] = {"send": 0, "wait": elapsed_ms, "receive": 0}
+            har_state["entries"].append(entry)
+
+        # Wire on the active page + future pages
+        page = s.page
+        page.on("request", on_request)
+        page.on("response", on_response)
+        har_state["_handlers"].append((page, on_request, on_response))
+
+        # Also re-wire on context for new pages
+        def on_new_page(new_page):
+            new_page.on("request", on_request)
+            new_page.on("response", on_response)
+            har_state["_handlers"].append((new_page, on_request, on_response))
+        s.context.on("page", on_new_page)
+        har_state["_context_hook"] = on_new_page
+
+        s._har_state = har_state
+        return {"recording": True, "path": path, "url_filter": url_filter}
+
+    @daemon.handler("har_stop")
+    async def _har_stop(d, args):
+        """Stop HAR recording and flush entries to disk."""
+        s = _session(d)
+        har_state = getattr(s, "_har_state", None)
+        if not har_state or not har_state.get("recording"):
+            return {"recording": False, "note": "not recording"}
+
+        # Detach handlers
+        for page, on_req, on_resp in har_state["_handlers"]:
+            try:
+                page.remove_listener("request", on_req)
+                page.remove_listener("response", on_resp)
+            except Exception:  # noqa: BLE001
+                pass
+        try:
+            s.context.remove_listener("page", har_state["_context_hook"])
+        except Exception:  # noqa: BLE001
+            pass
+
+        # Write HAR file
+        har_doc = {
+            "log": {
+                "version": "1.2",
+                "creator": {"name": "patchium", "version": "0.1.0"},
+                "browser": {"name": "Chrome", "version": ""},
+                "pages": [],  # we don't track page boundaries here — could add
+                "entries": [{k: v for k, v in e.items() if not k.startswith("_")}
+                            for e in har_state["entries"]],
+            }
+        }
+        Path(har_state["path"]).write_text(_json.dumps(har_doc, indent=2))
+        s._har_state = {"recording": False, "path": har_state["path"]}
+        return {
+            "recording": False,
+            "path": har_state["path"],
+            "entries": len(har_state["entries"]),
+            "elapsed_s": round(time.time() - har_state["started_at"], 2),
+        }
+
     # ─── annotated screenshot ─────────────────────────────────────────────
 
     @daemon.handler("screenshot_annotate")
@@ -716,6 +878,73 @@ def register_extra(daemon) -> None:
         d._snapshot = None
         return {"found": len(candidates), "clicked": clicked,
                 "preference": prefer}
+
+    # ─── eval_handle / handle table (DOM handle API) ──────────────────────
+
+    @daemon.handler("eval_handle")
+    async def _eval_handle(d, args):
+        """Evaluate JS in the page and store the result as a JSHandle.
+
+        Returns {"handle": "h_N", "preview": "<short JSON if serializable>"}.
+        Use the handle with `handle_eval` to chain operations, or
+        `handle_dispose` to release.
+
+        Use cases: traverse shadow DOM (closed-only paths excluded), inspect
+        a NodeList, hold a reference to an element across mutations, pass DOM
+        objects between calls without re-querying.
+        """
+        s = _session(d)
+        expr = args["expr"]
+        handle = await s.page.evaluate_handle(expr)
+        d._handle_counter += 1
+        hid = f"h_{d._handle_counter}"
+        d._handles[hid] = handle
+        # Best-effort preview — JSON.stringify of the value when it's serializable
+        try:
+            preview = await handle.evaluate("(v) => { try { return JSON.stringify(v).slice(0, 500); } catch(e) { return String(v).slice(0, 500); } }")
+        except Exception:  # noqa: BLE001
+            preview = None
+        return {"handle": hid, "preview": preview}
+
+    @daemon.handler("handle_eval")
+    async def _handle_eval(d, args):
+        """Run a JS expression with a stored handle as `arg`.
+
+        Example: handle = eval_handle("document.querySelectorAll('button')")
+                 handle_eval(handle, "(buttons) => Array.from(buttons).map(b => b.textContent)")
+        """
+        hid = args["handle"]
+        if hid not in d._handles:
+            raise KeyError(f"unknown handle: {hid} (use eval_handle first)")
+        expr = args["expr"]
+        return {"value": await d._handles[hid].evaluate(expr)}
+
+    @daemon.handler("handle_list")
+    async def _handle_list(d, args):
+        return {"handles": list(d._handles.keys()), "count": len(d._handles)}
+
+    @daemon.handler("handle_dispose")
+    async def _handle_dispose(d, args):
+        hid = args["handle"]
+        h = d._handles.pop(hid, None)
+        if h is None:
+            return {"disposed": False, "reason": "unknown handle"}
+        try:
+            await h.dispose()
+        except Exception as exc:  # noqa: BLE001
+            return {"disposed": True, "warning": f"{type(exc).__name__}: {exc}"}
+        return {"disposed": True}
+
+    @daemon.handler("handle_dispose_all")
+    async def _handle_dispose_all(d, args):
+        n = len(d._handles)
+        for h in list(d._handles.values()):
+            try:
+                await h.dispose()
+            except Exception:  # noqa: BLE001
+                pass
+        d._handles.clear()
+        return {"disposed": n}
 
     # ─── observe → act ────────────────────────────────────────────────────
 

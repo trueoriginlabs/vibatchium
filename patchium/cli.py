@@ -48,14 +48,18 @@ def cli(ctx: click.Context, json_mode: bool) -> None:
 @click.option("--profile", default=None,
               help="Profile name or absolute path (defaults to active profile).")
 @click.option("--headless", is_flag=True, help="Headless mode (NOT recommended for stealth).")
+@click.option("--stealth-mouse", is_flag=True,
+              help="Layer humanized mouse via CDP-Patches (needs patchium[stealth-mouse]).")
 @click.pass_context
-def start(ctx, profile, headless):
+def start(ctx, profile, headless, stealth_mouse):
     """Start a browser session (cold launch real Chrome + persistent context)."""
     args = {}
     if profile:
         args["profile"] = profile
     if headless:
         args["headless"] = True
+    if stealth_mouse:
+        args["stealth_mouse"] = True
     _emit(call("start", args), ctx.obj["json"])
 
 
@@ -300,6 +304,51 @@ def eval_cmd(ctx, expr, stdin):
         click.echo("expr or --stdin required", err=True)
         sys.exit(2)
     _emit(call("eval", {"expr": expr}), ctx.obj["json"], "value")
+
+
+@cli.group()
+def handle():
+    """JSHandle table — hold DOM references across calls (eval_handle / dispose / list)."""
+
+
+@handle.command("create")
+@click.argument("expr")
+@click.pass_context
+def handle_create(ctx, expr):
+    """Eval JS and store the result as a handle (`h_N`)."""
+    _emit(call("eval_handle", {"expr": expr}), ctx.obj["json"])
+
+
+@handle.command("eval")
+@click.argument("handle_id")
+@click.argument("expr")
+@click.pass_context
+def handle_eval(ctx, handle_id, expr):
+    """Run JS with a stored handle as `arg`."""
+    _emit(call("handle_eval", {"handle": handle_id, "expr": expr}),
+          ctx.obj["json"], "value")
+
+
+@handle.command("list")
+@click.pass_context
+def handle_list(ctx):
+    """List active handles."""
+    _emit(call("handle_list"), ctx.obj["json"])
+
+
+@handle.command("dispose")
+@click.argument("handle_id")
+@click.pass_context
+def handle_dispose(ctx, handle_id):
+    """Release a single handle."""
+    _emit(call("handle_dispose", {"handle": handle_id}), ctx.obj["json"])
+
+
+@handle.command("clear")
+@click.pass_context
+def handle_clear(ctx):
+    """Dispose ALL active handles."""
+    _emit(call("handle_dispose_all"), ctx.obj["json"])
 
 
 @cli.command()
@@ -876,6 +925,35 @@ def network_dump(ctx, output):
     if output:
         args["path"] = str(Path(output).resolve())
     _emit(call("network_dump", args), ctx.obj["json"])
+
+
+# ─── HAR (full HTTP Archive) ─────────────────────────────────────────────
+
+@cli.group()
+def har():
+    """HTTP Archive (HAR 1.2) capture — request + response bodies + timings."""
+
+
+@har.command("start")
+@click.argument("output", type=click.Path())
+@click.option("--content", default="embed", type=click.Choice(["embed", "omit"]),
+              help="embed: include response bodies (default). omit: skip bodies.")
+@click.option("--url-filter", default=None,
+              help="Only capture entries whose URL contains this substring.")
+@click.pass_context
+def har_start(ctx, output, content, url_filter):
+    """Start HAR recording. Writes on `har stop`."""
+    args = {"path": str(Path(output).resolve()), "content": content}
+    if url_filter:
+        args["url_filter"] = url_filter
+    _emit(call("har_start", args), ctx.obj["json"])
+
+
+@har.command("stop")
+@click.pass_context
+def har_stop(ctx):
+    """Stop HAR recording and flush to disk."""
+    _emit(call("har_stop"), ctx.obj["json"])
 
 
 # ─── request interception (route) ────────────────────────────────────────
