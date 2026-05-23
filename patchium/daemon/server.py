@@ -84,6 +84,9 @@ class Daemon:
         # Wave 6.3b: email-code polling is a long-running wait — don't hold
         # the registry mutate lock.
         "wait_email_code",
+        # Wave 7.6: pure utilities — no session, no registry mutation
+        "verify_url",      # DNS / HTTP pre-check before committing to `go`
+        "set_log_verbs",   # runtime toggle for the per-verb DEBUG audit log
     })
 
     # Verbs that mutate the registry itself (create/destroy sessions, switch
@@ -106,6 +109,13 @@ class Daemon:
         self.registry = SessionRegistry()
         self._handlers: dict[str, Callable[[Daemon, dict], Awaitable[Any]]] = {}
         self._stopping = asyncio.Event()
+        # Wave 7.6: daemon-level flags (runtime-mutable). `log_verbs` controls
+        # per-verb DEBUG logging; initial value from env so existing scripts
+        # that set PATCHIUM_LOG_VERBS=1 keep working without a daemon restart
+        # being needed to change it.
+        self.flags: dict[str, Any] = {
+            "log_verbs": os.environ.get("PATCHIUM_LOG_VERBS", "0") in ("1", "true", "yes"),
+        }
         handlers.register_all(self)
         handlers_extra.register_extra(self)
 
@@ -204,12 +214,12 @@ class Daemon:
         if cmd not in self._handlers:
             return {"id": req_id, "ok": False, "error": f"unknown command: {cmd}"}
 
-        # Wave 7.5e: opt-in per-verb DEBUG log. PATCHIUM_LOG_VERBS=1 enables
-        # an auditable trail of "session=X verb=Y args=Z" for every dispatched
-        # call. Off by default because (a) it's noisy and (b) the args could
-        # contain large strings (eval scripts, fill text). When on, sensitive
-        # fields are redacted before logging.
-        if os.environ.get("PATCHIUM_LOG_VERBS", "0") in ("1", "true", "yes"):
+        # Wave 7.5e + 7.6: opt-in per-verb DEBUG log. Off by default because
+        # (a) noisy and (b) args may contain large strings (eval scripts).
+        # Read from daemon.flags so `set_log_verbs` can toggle at runtime
+        # without a daemon restart. Sensitive fields are redacted before
+        # logging.
+        if self.flags.get("log_verbs"):
             log.debug("verb session=%s cmd=%s args=%s",
                       session_name, cmd, _redact_for_log(cmd, args))
 

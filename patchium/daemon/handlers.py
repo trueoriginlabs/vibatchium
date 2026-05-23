@@ -114,6 +114,104 @@ def register_all(daemon) -> None:
     async def _ping(d, args):
         return {"pong": True, "session": d.session is not None}
 
+    # ─── Wave 7.6: utilities (no session required) ───────────────────────
+
+    @daemon.handler("verify_url")
+    async def _verify_url(d, args):
+        """Fast pre-check that a URL is reachable, before `go` commits to a
+        30s navigation timeout. Resolves DNS first (most common failure mode
+        in agent dogfood: bad URL guesses like `docs.antigravity.google/`);
+        optionally does an HTTP HEAD if `check_http=true`.
+
+        Args:
+          url            (str)  full URL to check
+          check_http     (bool) also do HTTP HEAD (default false — DNS only)
+          timeout_ms     (int)  per-stage timeout, default 3000
+
+        Returns:
+          {ok, url, host, dns_resolved, status, latency_ms, error}
+        """
+        import asyncio as _asyncio
+        import socket as _socket
+        import time as _time
+        from urllib.parse import urlparse as _urlparse
+
+        url = args.get("url")
+        if not isinstance(url, str) or not url:
+            raise ValueError("verify_url requires `url`")
+        check_http = bool(args.get("check_http", False))
+        timeout_ms = int(args.get("timeout_ms", 3000))
+        timeout_s = timeout_ms / 1000.0
+        parsed = _urlparse(url)
+        if not parsed.hostname:
+            return {"ok": False, "url": url, "host": None,
+                    "dns_resolved": False, "status": None,
+                    "latency_ms": 0, "error": "no hostname in URL"}
+        t0 = _time.time()
+        # DNS — getaddrinfo is sync; run in thread w/ timeout
+        try:
+            await _asyncio.wait_for(
+                _asyncio.to_thread(_socket.getaddrinfo, parsed.hostname, None),
+                timeout=timeout_s,
+            )
+            dns_ok = True
+        except (TimeoutError, _socket.gaierror, OSError) as exc:
+            return {
+                "ok": False, "url": url, "host": parsed.hostname,
+                "dns_resolved": False, "status": None,
+                "latency_ms": int((_time.time() - t0) * 1000),
+                "error": f"DNS: {type(exc).__name__}: {exc}",
+            }
+        # Optional HTTP HEAD
+        status = None
+        if check_http:
+            import urllib.request as _ureq
+            def _head():
+                req = _ureq.Request(url, method="HEAD")
+                req.add_header("User-Agent",
+                               "Mozilla/5.0 (compatible; patchium-verify/1.0)")
+                with _ureq.urlopen(req, timeout=timeout_s) as r:
+                    return r.status
+            try:
+                status = await _asyncio.wait_for(
+                    _asyncio.to_thread(_head), timeout=timeout_s,
+                )
+            except Exception as exc:  # noqa: BLE001
+                return {
+                    "ok": False, "url": url, "host": parsed.hostname,
+                    "dns_resolved": dns_ok, "status": None,
+                    "latency_ms": int((_time.time() - t0) * 1000),
+                    "error": f"HTTP: {type(exc).__name__}: {exc}",
+                }
+        return {
+            "ok": True, "url": url, "host": parsed.hostname,
+            "dns_resolved": dns_ok, "status": status,
+            "latency_ms": int((_time.time() - t0) * 1000), "error": None,
+        }
+
+    @daemon.handler("set_log_verbs")
+    async def _set_log_verbs(d, args):
+        """Toggle per-verb DEBUG audit logging at runtime. No daemon restart
+        needed — for any non-trivial run where you want a full call trail.
+
+        Args:
+          on    (bool|str)  truthy enables, falsy disables. Accepts "on"/"off".
+
+        Returns the new state.
+        """
+        on = args.get("on")
+        if isinstance(on, str):
+            on = on.strip().lower() in ("on", "1", "true", "yes")
+        else:
+            on = bool(on)
+        d.flags["log_verbs"] = on
+        log.info("log_verbs toggled to %s", on)
+        return {"log_verbs": on,
+                "note": ("per-verb DEBUG log enabled — set "
+                         "PATCHIUM_LOG_LEVEL=DEBUG and tail "
+                         "$XDG_RUNTIME_DIR/patchium/daemon.log "
+                         "to see verb traffic") if on else "off"}
+
     # ─── lifecycle ────────────────────────────────────────────────────────
 
     @daemon.handler("start")

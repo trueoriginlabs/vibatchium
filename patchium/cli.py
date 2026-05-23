@@ -1844,6 +1844,214 @@ def pages(ctx):
     _emit(call("pages"), ctx.obj["json"])
 
 
+# ─── Wave 7.6: research — multi-session parallel fan-out ──────────────────
+
+@cli.command()
+@click.option("--target", required=True,
+              help="Target URL the research threads start from (each thread navigates here first).")
+@click.option("--intent", "intents", required=True, multiple=True,
+              help="A sub-question for one research thread. Repeat for N threads. "
+                   "Example: --intent 'prize structure' --intent 'judging rubric'")
+@click.option("--threads", default=None, type=int,
+              help="Number of parallel sessions. Defaults to the number of --intent args.")
+@click.option("--output-dir", "output_dir", default=None,
+              help="Where to write per-thread markdown + screenshots. "
+                   "Default: ./patchium-research-<timestamp>/")
+@click.option("--headless/--headed", default=True,
+              help="Headless by default (no desktop clutter); --headed if you want to watch.")
+@click.option("--safety", default="wrap", type=click.Choice(["off", "flag-only", "wrap", "redact"]),
+              help="Prompt-injection safety mode per session (default: wrap).")
+@click.option("--max-pages-per-thread", default=5, type=int,
+              help="Cap follow-up page visits per thread (default: 5).")
+@click.option("--verify-urls/--no-verify-urls", default=True,
+              help="Pre-check the target URL with verify_url before starting each thread.")
+@click.pass_context
+def research(ctx, target, intents, threads, output_dir, headless, safety,
+              max_pages_per_thread, verify_urls):
+    """Fan out N parallel browser sessions to research a target, one intent per thread.
+
+    Each thread gets its own session (research-<i>), navigates to --target,
+    extracts text + a screenshot of the landing page, attempts an `act` on
+    the intent, and writes per-thread markdown + screenshot artifacts to
+    --output-dir. Sessions are closed cleanly when the thread finishes.
+
+    The caller (you, or an outer LLM) does the merging / deduping /
+    contradiction-resolution after this returns.
+
+    EXAMPLE:
+
+    \b
+        patchium research --target https://geminixprize.com \\
+            --intent "prize structure and judging rubric" \\
+            --intent "google tool stack pricing" \\
+            --intent "prior xprize hackathon winners" \\
+            --output-dir /tmp/intel
+    """
+    import datetime as _dt
+    import json as _json
+    from concurrent.futures import ThreadPoolExecutor
+    from pathlib import Path as _P
+    from urllib.parse import urlparse as _urlparse
+
+    intents_list = list(intents)
+    n_threads = threads if threads is not None else len(intents_list)
+    if n_threads < 1:
+        click.echo("error: --threads must be >= 1", err=True)
+        sys.exit(1)
+    if n_threads > len(intents_list):
+        # Pad: cycle the intent list (rarely useful, but don't crash)
+        intents_list = intents_list + [intents_list[i % len(intents_list)]
+                                         for i in range(n_threads - len(intents_list))]
+    intents_list = intents_list[:n_threads]
+    # Resolve output dir
+    if output_dir is None:
+        stamp = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+        output_dir = f"./patchium-research-{stamp}"
+    out = _P(output_dir).resolve()
+    out.mkdir(parents=True, exist_ok=True)
+    click.echo(f"output → {out}", err=True)
+
+    # Pre-check target URL (one call shared across threads; if it's dead,
+    # we save 5 sessions' worth of 30s timeouts).
+    if verify_urls:
+        try:
+            v = call("verify_url", {"url": target, "check_http": False})
+            if not v.get("ok"):
+                click.echo(
+                    f"error: target URL failed verify_url: {v.get('error')}",
+                    err=True,
+                )
+                sys.exit(1)
+            click.echo(f"verify_url ok ({v.get('latency_ms')}ms)", err=True)
+        except (DaemonError, DaemonNotRunning):
+            # If daemon isn't up, spawn_daemon happens implicitly on first
+            # real call below; skip pre-check rather than block.
+            pass
+
+    target_host = _urlparse(target).hostname or "unknown"
+
+    def _run_thread(idx: int, intent: str) -> dict:
+        """Single research thread. Sync — runs in a thread pool worker."""
+        name = f"research-{idx + 1}"
+        thread_log: list[str] = []
+        thread_log.append(f"# research thread {idx + 1}: {intent}\n")
+        thread_log.append(f"- session: `{name}`")
+        thread_log.append(f"- target: {target}")
+        try:
+            call("session_new", {"name": name})
+            call("start", {"headless": headless}, session=name)
+            # Safety mode per-session before any external crawl
+            if safety and safety != "off":
+                try:
+                    call("safety_set", {"mode": safety}, session=name)
+                    thread_log.append(f"- safety: {safety}")
+                except DaemonError as exc:
+                    thread_log.append(f"- safety: failed ({exc})")
+            # Navigate
+            t_go0 = _dt.datetime.now()
+            try:
+                call("go", {"url": target}, session=name)
+                ms = int((_dt.datetime.now() - t_go0).total_seconds() * 1000)
+                thread_log.append(f"- go ok ({ms}ms)")
+            except DaemonError as exc:
+                thread_log.append(f"- go FAILED: {exc}")
+                return {"name": name, "intent": intent, "log": thread_log,
+                        "screenshot": None, "text": None, "error": str(exc)}
+            # Landing page text
+            try:
+                t = call("text", {}, session=name)
+                landing_text = t.get("text", "")
+            except DaemonError as exc:
+                landing_text = ""
+                thread_log.append(f"- text failed: {exc}")
+            # Landing page screenshot
+            shot_path = out / f"{name}-landing.png"
+            try:
+                call("screenshot",
+                     {"path": str(shot_path), "full_page": True},
+                     session=name)
+                thread_log.append(f"- screenshot → {shot_path.name}")
+            except DaemonError as exc:
+                thread_log.append(f"- screenshot failed: {exc}")
+            # Try act() on the intent — heuristic mode (no LLM key needed).
+            # Best-effort; many sites won't have actionable affordances for
+            # arbitrary intents, that's expected.
+            act_result = None
+            try:
+                act_result = call("act", {"intent": intent}, session=name)
+                steps = (act_result or {}).get("steps", [])
+                thread_log.append(f"- act: {len(steps)} step(s) planned")
+            except DaemonError as exc:
+                thread_log.append(f"- act: {exc}")
+            # Final content snapshot
+            final_text = ""
+            try:
+                final_text = call("text", {}, session=name).get("text", "")
+            except DaemonError:
+                pass
+            # Save markdown
+            md = out / f"{name}.md"
+            md.write_text("\n".join(thread_log) + "\n\n"
+                          + "## landing page text\n\n"
+                          + (landing_text or "_(empty)_") + "\n\n"
+                          + ("## act result\n\n" + "```json\n"
+                             + _json.dumps(act_result, indent=2)
+                             + "\n```\n\n" if act_result else "")
+                          + ("## final page text\n\n" + final_text
+                             if final_text and final_text != landing_text else ""))
+            return {"name": name, "intent": intent, "log": thread_log,
+                    "screenshot": str(shot_path), "text_bytes": len(landing_text),
+                    "act_steps": len((act_result or {}).get("steps", [])),
+                    "markdown": str(md), "error": None}
+        finally:
+            try:
+                call("session_close", {"name": name})
+            except DaemonError:
+                pass
+
+    # Fan out — N threads in parallel via a thread pool
+    click.echo(f"fanning out {n_threads} sessions on {target_host}…", err=True)
+    t0 = _dt.datetime.now()
+    results = []
+    with ThreadPoolExecutor(max_workers=n_threads) as pool:
+        futures = [pool.submit(_run_thread, i, intents_list[i])
+                   for i in range(n_threads)]
+        for fut in futures:
+            results.append(fut.result())
+    wall_s = (_dt.datetime.now() - t0).total_seconds()
+    # Index report
+    index_md = out / "index.md"
+    lines = ["# patchium research run", "",
+             f"- target: {target}",
+             f"- threads: {n_threads}",
+             f"- safety: {safety}",
+             f"- wall time: {wall_s:.1f}s",
+             f"- started: {t0.isoformat(timespec='seconds')}",
+             "",
+             "## threads", ""]
+    for r in results:
+        status = "❌ " + (r.get("error") or "error") if r.get("error") else "✅"
+        lines.append(f"- {status} **{r['name']}** — {r['intent']}")
+        if r.get("markdown"):
+            lines.append(f"  - [`{_P(r['markdown']).name}`]({_P(r['markdown']).name})"
+                          + (f", `{_P(r['screenshot']).name}`"
+                             if r.get("screenshot") else ""))
+            lines.append(f"  - text: {r.get('text_bytes', 0)} bytes, "
+                          f"act: {r.get('act_steps', 0)} step(s)")
+    index_md.write_text("\n".join(lines) + "\n")
+    summary = {"target": target, "threads": n_threads, "wall_s": wall_s,
+                "output_dir": str(out),
+                "threads_summary": [
+                    {"name": r["name"], "intent": r["intent"],
+                     "ok": r.get("error") is None,
+                     "text_bytes": r.get("text_bytes", 0),
+                     "act_steps": r.get("act_steps", 0)}
+                    for r in results
+                ]}
+    _emit(summary, ctx.obj["json"])
+    click.echo(f"\ndone: {wall_s:.1f}s — see {index_md}", err=True)
+
+
 # ─── error wrapper ────────────────────────────────────────────────────────
 
 def main():
