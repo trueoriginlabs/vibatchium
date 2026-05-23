@@ -37,6 +37,42 @@ from .registry import SessionEntry, SessionRegistry, current_session_ctx
 log = logging.getLogger("patchium.server")
 
 
+# Wave 7.5e: fields that must be redacted from per-verb DEBUG logs.
+# Maps verb name → set of arg keys whose values should be replaced with
+# `<redacted>` before logging. Conservative — when in doubt, redact.
+_REDACTED_ARG_FIELDS: dict[str, set[str]] = {
+    "secret_set":        {"value"},          # the secret material itself
+    "fill":              {"text"},           # may be a password / secret value
+    "type":              {"text"},           # same
+    "keys":              {"keys"},           # may be typed password
+    "press":             {"keys"},
+    "proxy_set":         {"url"},            # contains user:pass@host
+    "eval":              {"expr"},           # may include inline credentials
+    "eval_handle":       {"expr"},
+    "handle_eval":       {"expr"},
+    "route_add":         {"body", "json"},   # mock content may contain secrets
+    "secret_init":       {"key"},            # base64 key material
+}
+
+
+def _redact_for_log(cmd: str, args: dict) -> dict:
+    """Strip sensitive fields from args before they hit the log file.
+
+    Returns a SHALLOW COPY of `args` with sensitive values replaced by
+    `<redacted>`. Caller-supplied free-text fields (eval expressions,
+    type / fill text) are conservatively redacted because they're the
+    most likely vector for accidentally logging passwords / tokens.
+    """
+    redact = _REDACTED_ARG_FIELDS.get(cmd)
+    if not redact:
+        return args
+    out = dict(args)
+    for k in redact:
+        if k in out:
+            out[k] = "<redacted>"
+    return out
+
+
 class Daemon:
     # Verbs whose handlers DON'T acquire a per-session lock. These either
     # block on external events (waits) and need to coexist with the action
@@ -168,6 +204,15 @@ class Daemon:
         if cmd not in self._handlers:
             return {"id": req_id, "ok": False, "error": f"unknown command: {cmd}"}
 
+        # Wave 7.5e: opt-in per-verb DEBUG log. PATCHIUM_LOG_VERBS=1 enables
+        # an auditable trail of "session=X verb=Y args=Z" for every dispatched
+        # call. Off by default because (a) it's noisy and (b) the args could
+        # contain large strings (eval scripts, fill text). When on, sensitive
+        # fields are redacted before logging.
+        if os.environ.get("PATCHIUM_LOG_VERBS", "0") in ("1", "true", "yes"):
+            log.debug("verb session=%s cmd=%s args=%s",
+                      session_name, cmd, _redact_for_log(cmd, args))
+
         # Push the selected session into the contextvar so handlers (via the
         # session-routed properties above) operate on the right SessionEntry.
         tok = current_session_ctx.set(session_name)
@@ -286,11 +331,23 @@ class Daemon:
 
 
 def main() -> None:
+    # Wave 7.5e: level controlled by PATCHIUM_LOG_LEVEL (default INFO).
+    # Setting it to DEBUG together with PATCHIUM_LOG_VERBS=1 produces a
+    # full audit trail of every verb dispatched.
+    level_name = os.environ.get("PATCHIUM_LOG_LEVEL", "INFO").upper()
+    level = getattr(logging, level_name, logging.INFO)
     logging.basicConfig(
         filename=str(LOG_PATH),
-        level=logging.INFO,
+        level=level,
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
     )
+    # Wave 7.5d/e fix: basicConfig opens the file with mode inherited from
+    # umask (typically 0664). The daemon log can include site names from
+    # `secret set` and other low-but-real-sensitivity metadata. Force 0600.
+    try:
+        os.chmod(LOG_PATH, 0o600)
+    except OSError:
+        pass
     asyncio.run(Daemon().run())
 
 

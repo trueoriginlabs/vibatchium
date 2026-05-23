@@ -87,6 +87,25 @@ try:
     os.chmod(PROFILES_DIR, 0o700)
 except OSError:
     pass
+# Wave 7.5e: retroactively narrow any pre-existing profile sub-dirs (created
+# by older patchium versions under loose umask). These hold cookies +
+# localStorage — same risk as their parent. Only touch the dir mode, not
+# Chrome's inner files (those are 0700 because Chrome chmods them itself).
+for _pdir in PROFILES_DIR.iterdir() if PROFILES_DIR.exists() else ():
+    if _pdir.is_dir():
+        try:
+            os.chmod(_pdir, 0o700)
+        except OSError:
+            pass
+# Also retroactively narrow the legacy `chrome-profile` dir that older
+# patchium versions created directly under CACHE_DIR (pre-multi-session
+# layout). New code uses PROFILES_DIR/<name> instead.
+_legacy_chrome_profile = CACHE_DIR / "chrome-profile"
+if _legacy_chrome_profile.is_dir():
+    try:
+        os.chmod(_legacy_chrome_profile, 0o700)
+    except OSError:
+        pass
 ACTIVE_PROFILE_PATH = CONFIG_DIR / "active-profile"
 ACTIVE_SESSION_PATH = CONFIG_DIR / "active-session"
 
@@ -99,6 +118,12 @@ try:
     os.chmod(DEFAULT_PROFILE_DIR, 0o700)
 except OSError:
     pass
+# Retroactively narrow daemon.log if it exists from a pre-fix run.
+if LOG_PATH.exists():
+    try:
+        os.chmod(LOG_PATH, 0o600)
+    except OSError:
+        pass
 
 DEFAULT_SESSION_NAME = "default"
 

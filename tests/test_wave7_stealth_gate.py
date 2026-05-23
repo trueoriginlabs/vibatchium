@@ -256,3 +256,49 @@ def test_secure_mkdir_is_0700(tmp_path):
         assert mode == 0o700, f"secure_mkdir gave 0o{mode:03o} != 0o700"
     finally:
         os.umask(old_umask)
+
+
+# ─── 4. Wave 7.5e: daemon log + per-verb audit trail ────────────────────
+
+
+def test_daemon_log_is_0600(local_server):
+    """The daemon log holds lifecycle events including `secret set
+    site=X key=Y` lines — site names are metadata-sensitive. Must be
+    0600 not 0664. (Audit miss: logging.basicConfig inherits umask.)"""
+    from patchium.daemon.paths import LOG_PATH
+    # conftest has already started the daemon, which runs basicConfig
+    # + the chmod-to-0600. The log file should exist at LOG_PATH and
+    # be 0600.
+    if not LOG_PATH.exists():
+        pytest.skip(f"daemon log not yet at {LOG_PATH}")
+    mode = _mode_bits(LOG_PATH)
+    assert mode == 0o600, (
+        f"daemon log {LOG_PATH} mode 0o{mode:03o} != 0o600 "
+        "(basicConfig umask leak)"
+    )
+
+
+def test_verb_log_redacts_secret_values():
+    """The redactor must strip `value` from secret_set, `text` from fill,
+    `url` from proxy_set, `expr` from eval. Direct unit test on the
+    redaction helper, so the live audit log can be trusted."""
+    from patchium.daemon.server import _redact_for_log
+    # secret_set: value redacted
+    r = _redact_for_log("secret_set", {"site": "github", "key": "totp-seed",
+                                         "value": "JBSWY3DPEHPK3PXP"})
+    assert r["value"] == "<redacted>"
+    assert r["site"] == "github"
+    # fill: text redacted (could be a password via --use-secret resolution)
+    r = _redact_for_log("fill", {"target": "@e2", "text": "hunter2"})
+    assert r["text"] == "<redacted>"
+    assert r["target"] == "@e2"
+    # proxy_set: url redacted (contains user:pass@host)
+    r = _redact_for_log("proxy_set",
+                        {"url": "http://user:hunter2@proxy.example.com:8080"})
+    assert r["url"] == "<redacted>"
+    # eval: expr redacted (free-form JS, could embed credentials)
+    r = _redact_for_log("eval", {"expr": "fetch('/api', {token: 'sk-secret'})"})
+    assert r["expr"] == "<redacted>"
+    # status: no redaction (no sensitive fields)
+    r = _redact_for_log("status", {"foo": "bar"})
+    assert r == {"foo": "bar"}
