@@ -1281,6 +1281,30 @@ def register_extra(daemon) -> None:
         cleared = _vision.cache_clear()
         return {"cleared": cleared}
 
+    @daemon.handler("vision_budget")
+    async def _vision_budget(d, args):
+        """Report today's + lifetime vision spend, configured caps, remaining.
+        Also supports `reset: 'today' | 'lifetime' | 'all'` for ops use."""
+        from .. import vision as _vision
+        if args.get("reset"):
+            return _vision.reset_spend(scope=args["reset"])
+        snapshot = _vision.check_budget(estimate_usd=0)  # query, no consumption
+        out = {
+            "today_usd": round(snapshot["today"], 6),
+            "lifetime_usd": round(snapshot["lifetime"], 6),
+            "daily_cap_usd": snapshot["daily_cap"],
+            "lifetime_cap_usd": snapshot["lifetime_cap"],
+        }
+        if snapshot["daily_cap"] is not None:
+            out["daily_remaining_usd"] = max(
+                0.0, round(snapshot["daily_cap"] - snapshot["today"], 6)
+            )
+        if snapshot["lifetime_cap"] is not None:
+            out["lifetime_remaining_usd"] = max(
+                0.0, round(snapshot["lifetime_cap"] - snapshot["lifetime"], 6)
+            )
+        return out
+
     # ─── Wave 6.3c: prompt-injection safety ──────────────────────────────
 
     @daemon.handler("safety_set")

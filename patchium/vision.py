@@ -60,6 +60,10 @@ class VisionLowConfidence(RuntimeError):
     pass
 
 
+class VisionBudgetExceeded(RuntimeError):
+    """Daily or lifetime vision spend cap would be exceeded by this call."""
+
+
 def _cache_path() -> Path:
     from .daemon.paths import CACHE_DIR
     return CACHE_DIR / "vision-cache.json"
@@ -201,6 +205,114 @@ def estimate_cost_usd(input_tokens: int, output_tokens: int) -> float:
            (output_tokens / 1_000_000) * HAIKU_OUTPUT_PRICE_USD_PER_M
 
 
+# ─── Wave 7.2: persistent spend log + budget gates ─────────────────────
+
+
+# Pre-call cost estimate (worst-case): a 1080p screenshot tokenizes to
+# ~1500 input tokens; max_tokens output is 300. Add 3× safety margin.
+PRE_CALL_COST_ESTIMATE_USD = 0.005
+
+
+def _spend_path() -> Path:
+    from .daemon.paths import CACHE_DIR
+    return CACHE_DIR / "vision-spend.json"
+
+
+def _today_iso() -> str:
+    import datetime as _dt
+    return _dt.date.today().isoformat()
+
+
+def _load_spend() -> dict:
+    p = _spend_path()
+    if not p.exists():
+        return {"lifetime": 0.0}
+    try:
+        return json.loads(p.read_text())
+    except Exception:  # noqa: BLE001
+        return {"lifetime": 0.0}
+
+
+def _save_spend(data: dict) -> None:
+    p = _spend_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(data))
+
+
+def get_today_spend() -> float:
+    return _load_spend().get(_today_iso(), 0.0)
+
+
+def get_lifetime_spend() -> float:
+    return _load_spend().get("lifetime", 0.0)
+
+
+def add_spend(amount_usd: float) -> dict:
+    """Increment today's + lifetime spend; return updated row."""
+    data = _load_spend()
+    today = _today_iso()
+    data[today] = round(data.get(today, 0.0) + amount_usd, 6)
+    data["lifetime"] = round(data.get("lifetime", 0.0) + amount_usd, 6)
+    _save_spend(data)
+    return {"today": data[today], "lifetime": data["lifetime"]}
+
+
+def _env_cap(name: str) -> float | None:
+    raw = os.environ.get(name)
+    if not raw:
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        return None
+
+
+def check_budget(estimate_usd: float = PRE_CALL_COST_ESTIMATE_USD) -> dict:
+    """Raise VisionBudgetExceeded if approving this call would breach either
+    PATCHIUM_VISION_MAX_DAILY_USD or PATCHIUM_VISION_MAX_LIFETIME_USD.
+
+    Returns the current spend snapshot when the call is allowed.
+    """
+    daily_cap = _env_cap("PATCHIUM_VISION_MAX_DAILY_USD")
+    lifetime_cap = _env_cap("PATCHIUM_VISION_MAX_LIFETIME_USD")
+    today = get_today_spend()
+    lifetime = get_lifetime_spend()
+    if daily_cap is not None and today + estimate_usd > daily_cap:
+        raise VisionBudgetExceeded(
+            f"daily vision budget exceeded: today ${today:.4f} + "
+            f"est ${estimate_usd:.4f} > cap ${daily_cap:.2f}. "
+            f"Raise PATCHIUM_VISION_MAX_DAILY_USD or wait until tomorrow."
+        )
+    if lifetime_cap is not None and lifetime + estimate_usd > lifetime_cap:
+        raise VisionBudgetExceeded(
+            f"lifetime vision budget exceeded: lifetime ${lifetime:.4f} + "
+            f"est ${estimate_usd:.4f} > cap ${lifetime_cap:.2f}. "
+            f"Raise PATCHIUM_VISION_MAX_LIFETIME_USD or "
+            f"`patchium vision budget --reset-lifetime`."
+        )
+    return {
+        "today": today, "lifetime": lifetime,
+        "daily_cap": daily_cap, "lifetime_cap": lifetime_cap,
+        "estimate_usd": estimate_usd,
+    }
+
+
+def reset_spend(*, scope: str = "lifetime") -> dict:
+    """Reset spend tracking. scope ∈ {'today', 'lifetime', 'all'}."""
+    data = _load_spend()
+    if scope == "today":
+        data.pop(_today_iso(), None)
+    elif scope == "lifetime":
+        data["lifetime"] = 0.0
+    elif scope == "all":
+        data = {"lifetime": 0.0}
+    else:
+        raise ValueError(f"unknown scope {scope!r}")
+    _save_spend(data)
+    return {"today": data.get(_today_iso(), 0.0),
+            "lifetime": data.get("lifetime", 0.0)}
+
+
 # ─── high-level vision_find (the orchestrator) ─────────────────────────
 
 
@@ -240,6 +352,10 @@ async def find_element(page, intent: str, *,
                 "via": "cache", "devicePixelRatio": dpr, "cost_usd": 0.0,
             }
 
+    # Wave 7.2: pre-call budget gate. Raises VisionBudgetExceeded if approving
+    # this call would breach the daily/lifetime cap.
+    check_budget()
+
     # Cache miss → Claude
     locator = _claude_locate or claude_locate
     result = await locator(screenshot_bytes, intent)
@@ -256,6 +372,8 @@ async def find_element(page, intent: str, *,
     cost = estimate_cost_usd(
         result["tokens"]["input"], result["tokens"]["output"],
     )
+    # Persist actual spend (post-call, with real token counts)
+    add_spend(cost)
     try:
         dpr = await page.evaluate("() => window.devicePixelRatio || 1")
     except Exception:  # noqa: BLE001

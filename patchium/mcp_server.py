@@ -486,6 +486,12 @@ TOOLS: list[tuple[str, str, dict, str, Any]] = [
      {"type": "object", "properties": {}}, "vision_stats", None),
     ("vision_clear_cache", "Drop the on-disk vision coords cache.",
      {"type": "object", "properties": {}}, "vision_clear_cache", None),
+    ("vision_budget",
+     "Report today + lifetime vision spend vs PATCHIUM_VISION_MAX_*_USD caps. "
+     "reset='today'|'lifetime'|'all' clears the spend log.",
+     {"type": "object", "properties": {
+         "reset": _str("today | lifetime | all"),
+     }}, "vision_budget", None),
     # ─── Wave 6.3c: prompt-injection safety ──────────────────────────
     ("safety_set",
      "Set safety mode for current session: off|flag-only|wrap|redact.",
@@ -622,7 +628,9 @@ _CAP_BUCKETS: dict[str, set[str]] = {
     "vision":   {"screenshot", "screenshot_annotate", "pdf",
                  # Wave 6.3d: vision-first primitives belong in 'vision' too
                  "vision_click", "vision_find", "vision_type",
-                 "vision_stats", "vision_clear_cache"},
+                 "vision_stats", "vision_clear_cache",
+                 # Wave 7.2: budget reporting
+                 "vision_budget"},
     "devtools": {"record_start", "record_stop",
                  "eval_handle", "handle_eval", "handle_list",
                  "handle_dispose", "handle_dispose_all"},

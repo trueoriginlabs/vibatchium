@@ -194,3 +194,120 @@ async def test_find_element_dpr_scaling(tmp_path, monkeypatch):
     res = await find_element(page, "x", _claude_locate=fake_locate)
     assert res["devicePixelRatio"] == 2.0
     # Caller scales the click coords by dpr themselves
+
+
+# ─── Wave 7.2: cost cap tests ──────────────────────────────────────────
+
+
+@pytest.fixture
+def _isolate_spend(tmp_path, monkeypatch):
+    """Redirect both the vision cache AND the spend log to tmp + clear env caps."""
+    from patchium import vision as _vision
+    monkeypatch.setattr(_vision, "_cache_path", lambda: tmp_path / "vc.json")
+    monkeypatch.setattr(_vision, "_spend_path", lambda: tmp_path / "vs.json")
+    monkeypatch.delenv("PATCHIUM_VISION_MAX_DAILY_USD", raising=False)
+    monkeypatch.delenv("PATCHIUM_VISION_MAX_LIFETIME_USD", raising=False)
+    return tmp_path
+
+
+def test_spend_persists_across_loads(_isolate_spend):
+    from patchium.vision import add_spend, get_today_spend, get_lifetime_spend
+    assert get_today_spend() == 0.0
+    add_spend(0.001)
+    add_spend(0.002)
+    assert get_today_spend() == pytest.approx(0.003)
+    assert get_lifetime_spend() == pytest.approx(0.003)
+
+
+def test_no_caps_no_gate(_isolate_spend):
+    from patchium.vision import check_budget
+    # Without env vars set, check_budget never raises
+    snap = check_budget()
+    assert snap["daily_cap"] is None
+    assert snap["lifetime_cap"] is None
+
+
+def test_daily_cap_blocks_when_exceeded(_isolate_spend, monkeypatch):
+    from patchium.vision import add_spend, check_budget, VisionBudgetExceeded
+    monkeypatch.setenv("PATCHIUM_VISION_MAX_DAILY_USD", "0.01")
+    # Push spend up close to cap
+    add_spend(0.009)
+    # Estimate 0.005 → 0.009 + 0.005 > 0.01 → raise
+    with pytest.raises(VisionBudgetExceeded, match="daily"):
+        check_budget(estimate_usd=0.005)
+    # Smaller estimate that fits in remaining budget → OK
+    snap = check_budget(estimate_usd=0.0005)
+    assert snap["today"] == pytest.approx(0.009)
+
+
+def test_lifetime_cap_blocks_when_exceeded(_isolate_spend, monkeypatch):
+    from patchium.vision import add_spend, check_budget, VisionBudgetExceeded
+    monkeypatch.setenv("PATCHIUM_VISION_MAX_LIFETIME_USD", "0.10")
+    add_spend(0.099)
+    with pytest.raises(VisionBudgetExceeded, match="lifetime"):
+        check_budget(estimate_usd=0.005)
+
+
+def test_reset_spend_scopes(_isolate_spend):
+    from patchium.vision import add_spend, reset_spend, get_today_spend, get_lifetime_spend
+    add_spend(0.05)
+    # reset today only
+    reset_spend(scope="today")
+    assert get_today_spend() == 0.0
+    assert get_lifetime_spend() == pytest.approx(0.05)
+    # reset lifetime
+    reset_spend(scope="lifetime")
+    assert get_lifetime_spend() == 0.0
+    # reset all
+    add_spend(0.03)
+    reset_spend(scope="all")
+    assert get_today_spend() == 0.0
+    assert get_lifetime_spend() == 0.0
+
+
+@pytest.mark.asyncio
+async def test_find_element_enforces_budget(_isolate_spend, monkeypatch):
+    """When the daily cap is set and exceeded, find_element refuses the call
+    AND never invokes the Claude mock."""
+    from patchium.vision import add_spend, find_element, VisionBudgetExceeded
+    monkeypatch.setenv("PATCHIUM_VISION_MAX_DAILY_USD", "0.01")
+    add_spend(0.009)
+    calls = []
+    async def fake_locate(png, desc):
+        calls.append(desc)
+        return {"x": 1, "y": 1, "confidence": 0.95, "rationale": "",
+                "tokens": {"input": 100, "output": 10}}
+    page = _FakePage(b"budget_test_png")
+    with pytest.raises(VisionBudgetExceeded):
+        await find_element(page, "intent", _claude_locate=fake_locate)
+    # Claude mock NEVER called because budget gate fires first
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_find_element_increments_spend_on_success(_isolate_spend):
+    from patchium.vision import find_element, get_today_spend
+    before = get_today_spend()
+    async def fake_locate(png, desc):
+        return {"x": 1, "y": 1, "confidence": 0.95, "rationale": "",
+                "tokens": {"input": 1500, "output": 50}}
+    page = _FakePage(b"spend_increments")
+    await find_element(page, "intent", _claude_locate=fake_locate)
+    after = get_today_spend()
+    # 1500 input * $1/M + 50 output * $5/M = 0.0015 + 0.00025 = 0.00175
+    assert after - before == pytest.approx(0.00175, abs=0.0001)
+
+
+def test_vision_budget_handler_reports_caps():
+    """End-to-end: vision_budget handler returns the snapshot the user expects.
+
+    Note: env vars set in the test process don't propagate to the
+    already-spawned daemon. We just verify the handler runs and returns
+    the expected response shape.
+    """
+    from patchium.client import call as _call
+    res = _call("vision_budget")
+    assert "today_usd" in res
+    assert "lifetime_usd" in res
+    assert "daily_cap_usd" in res  # may be None on daemon side
+    assert "lifetime_cap_usd" in res

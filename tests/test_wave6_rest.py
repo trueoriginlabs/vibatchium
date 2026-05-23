@@ -125,3 +125,94 @@ def test_daemon_error_returns_500(client_auth):
     )
     assert r.status_code == 500
     assert "unknown command" in r.json()["detail"].lower()
+
+
+# ─── Wave 7.3: /v1/stream/<session> WebSocket passthrough ──────────────
+
+
+def test_stream_rejects_missing_token(client_auth, local_server):
+    """WS without ?token=... must close immediately (no frames received)."""
+    from starlette.websockets import WebSocketDisconnect
+    with pytest.raises(WebSocketDisconnect):
+        with client_auth.websocket_connect("/v1/stream/default") as ws:
+            # Should be closed by server before we can receive anything
+            ws.receive()
+
+
+def test_stream_rejects_bad_token(client_auth, local_server):
+    from starlette.websockets import WebSocketDisconnect
+    with pytest.raises(WebSocketDisconnect):
+        with client_auth.websocket_connect(
+            "/v1/stream/default?token=wrong-token"
+        ) as ws:
+            ws.receive()
+
+
+def test_stream_sends_hello_and_frames(client_auth, local_server):
+    """With a valid token, we should get a hello envelope + at least one JPEG/PNG."""
+    # Navigate so the screenshot has content
+    import urllib.request
+    # We can't use the daemon client directly here — the test client uses
+    # the SAME daemon (via daemon_call inside the handler). Tell that
+    # daemon to navigate via the REST shim itself.
+    r = client_auth.post(
+        "/v1/go", json={"url": f"{local_server}/simple.html"},
+        headers={"Authorization": "Bearer test-token-1234"},
+    )
+    assert r.status_code == 200
+
+    with client_auth.websocket_connect(
+        "/v1/stream/default?token=test-token-1234&fps=20"
+    ) as ws:
+        # First message is the hello JSON
+        hello = ws.receive_json()
+        assert hello["type"] == "hello"
+        assert hello["session"] == "default"
+        assert hello["fps"] == 20
+        assert hello["takeover"] is False
+        # Then we should get binary frames
+        msg = ws.receive_bytes()
+        # Could be PNG (89 50 4E 47) or, in some flows, JSON; verify PNG magic
+        assert msg[:4] == b"\x89PNG"
+        # Get one more for good measure
+        msg2 = ws.receive_bytes()
+        assert msg2[:4] == b"\x89PNG"
+
+
+def test_stream_takeover_flag_forwarded_in_hello(client_auth, local_server):
+    """?takeover=1 reflected in the hello envelope so the client knows to forward input."""
+    r = client_auth.post(
+        "/v1/go", json={"url": f"{local_server}/simple.html"},
+        headers={"Authorization": "Bearer test-token-1234"},
+    )
+    assert r.status_code == 200
+    with client_auth.websocket_connect(
+        "/v1/stream/default?token=test-token-1234&takeover=1"
+    ) as ws:
+        hello = ws.receive_json()
+        assert hello["takeover"] is True
+
+
+def test_stream_fps_clamped_to_30(client_auth, local_server):
+    """fps > 30 clamps to 30 (no runaway CPU)."""
+    r = client_auth.post(
+        "/v1/go", json={"url": f"{local_server}/simple.html"},
+        headers={"Authorization": "Bearer test-token-1234"},
+    )
+    assert r.status_code == 200
+    with client_auth.websocket_connect(
+        "/v1/stream/default?token=test-token-1234&fps=1000"
+    ) as ws:
+        hello = ws.receive_json()
+        assert hello["fps"] == 30
+
+
+def test_stream_no_auth_mode_no_token_required(client_noauth, local_server):
+    """With auth disabled, ?token is unnecessary."""
+    r = client_noauth.post(
+        "/v1/go", json={"url": f"{local_server}/simple.html"},
+    )
+    assert r.status_code == 200
+    with client_noauth.websocket_connect("/v1/stream/default?fps=10") as ws:
+        hello = ws.receive_json()
+        assert hello["type"] == "hello"

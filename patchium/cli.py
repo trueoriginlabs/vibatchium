@@ -1275,6 +1275,22 @@ def vision_clear_cache(ctx):
     _emit(call("vision_clear_cache"), ctx.obj["json"])
 
 
+@vision.command("budget")
+@click.option("--reset", type=click.Choice(["today", "lifetime", "all"]),
+              default=None, help="Reset today's or lifetime spend tracking.")
+@click.pass_context
+def vision_budget(ctx, reset):
+    """Show today's + lifetime vision spend vs configured caps.
+
+    Caps via env vars: PATCHIUM_VISION_MAX_DAILY_USD,
+    PATCHIUM_VISION_MAX_LIFETIME_USD. Unset = no cap.
+    """
+    args = {}
+    if reset:
+        args["reset"] = reset
+    _emit(call("vision_budget", args), ctx.obj["json"])
+
+
 # ─── Wave 6.3c: prompt-injection safety ──────────────────────────────────
 
 @cli.group()

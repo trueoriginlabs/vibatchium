@@ -51,49 +51,88 @@ CONTENT_FIELDS: dict[str, tuple[str, ...]] = {
 
 PATTERNS: list[tuple[re.Pattern, str, str]] = [
     # (compiled regex, signal-name, severity 'high' | 'low')
-    (re.compile(r"\b(ignore|disregard|forget)\s+(your\s+)?(previous|prior|all|the|above)\s+"
-                r"(instruction|instructions|prompt|rule|rules|message|messages)\b", re.I),
+    #
+    # Patterns are TIGHT — they require the injection signature, not just a
+    # word that could appear in legit content. "ignore previous instructions"
+    # is the smoking-gun phrase; "ignore the previous warnings" (legit) shares
+    # only 2/3 words and won't match because the third word must be
+    # `instruction|prompt|rule|context`.
+
+    # ─── instruction override: full 3-word smoking-gun phrases ─────────
+    (re.compile(r"\b(ignore|disregard|forget|override)\s+"
+                r"(all\s+)?(your\s+)?(previous|prior|earlier|above|preceding)\s+"
+                r"(instruction|instructions|prompt|prompts|rule|rules|"
+                r"context|directive|directives|system\s+message)\b", re.I),
      "instruction_override", "high"),
-    (re.compile(r"\b(new|updated?|revised?)\s+(instruction|instructions|system|prompt)\b", re.I),
+    (re.compile(r"\bignore\s+(everything|all)\s+(above|before|prior)\b", re.I),
      "instruction_override", "high"),
-    (re.compile(r"\b(you\s+are\s+now|from\s+now\s+on|act\s+as|pretend\s+to\s+be|"
-                r"roleplay\s+as|you\s+must\s+now)\b", re.I),
+    (re.compile(r"\bforget\s+(everything|all)\s+(I|you)\s+(was|were|have\s+been)\s+told\b", re.I),
+     "instruction_override", "high"),
+
+    # ─── role manipulation: require AI-adjacent target noun ────────────
+    (re.compile(r"\byou\s+are\s+now\s+(an?\s+|the\s+)?"
+                r"(AI|assistant|model|chatbot|bot|jailbroken|unrestricted|DAN|"
+                r"different\s+(ai|model|assistant))\b", re.I),
      "role_manipulation", "high"),
-    (re.compile(r"\b(system\s+prompt|system\s+message|admin\s+override)\b", re.I),
-     "role_manipulation", "low"),
-    # Chat-template special tokens that signal an injection trying to forge a turn
+    (re.compile(r"\bpretend\s+to\s+be\s+(an?\s+|the\s+)?"
+                r"(AI|assistant|claude|chatgpt|gpt|bard|gemini|copilot|"
+                r"different\s+(ai|model|assistant))\b", re.I),
+     "role_manipulation", "high"),
+    (re.compile(r"\b(act\s+as|roleplay\s+as)\s+(an?\s+|the\s+)?"
+                r"(AI|assistant|jailbroken|unrestricted|DAN|"
+                r"different\s+(ai|model|assistant))\b", re.I),
+     "role_manipulation", "high"),
+    (re.compile(r"\bsystem\s+prompt\s*[:=]\s*[\"']", re.I),
+     "role_manipulation", "high"),
+
+    # ─── chat-template tokens & forged turns ───────────────────────────
     (re.compile(r"<\|(?:im_start|im_end|system|user|assistant|endoftext)\|>", re.I),
      "special_tokens", "high"),
-    # HTML comment injections
-    (re.compile(r"<!--\s*(system|assistant|user|admin)\s*[:;]", re.I),
+    (re.compile(r"</?(system|assistant)\s*>", re.I),
+     "fake_tag", "high"),
+    (re.compile(r"<!--\s*(system|assistant|admin)\s*[:;]", re.I),
      "html_comment_injection", "high"),
-    # Markdown/style sections meant to look like a system prompt
-    (re.compile(r"###\s*(system|admin|override)\s*[:#]", re.I),
-     "fake_section_header", "low"),
-    # Hidden / steganographic Unicode
+
+    # ─── fake section header: ### or ## followed by meta-prompt words ──
+    (re.compile(r"^#{2,4}\s*(system\s+prompt|admin\s+override|new\s+instructions|"
+                r"override|jailbreak)\b", re.I | re.M),
+     "fake_section_header", "high"),
+
+    # ─── hidden / steganographic Unicode ───────────────────────────────
     (re.compile(r"[​-‏﻿‪-‮]"),
      "hidden_unicode", "high"),
-    # Tag-soup injection
-    (re.compile(r"</?(system|assistant|user)>", re.I),
-     "fake_tag", "high"),
-    # Common AI-bait phrases
-    (re.compile(r"\b(as\s+an?\s+ai\s+(language\s+)?model|i\s+am\s+claude\b|i\s+am\s+chatgpt\b|"
-                r"i\s+am\s+gpt[\s-])", re.I),
-     "ai_persona_claim", "low"),
-    # Imperative commands targeting an agent
-    (re.compile(r"\b(stop\s+immediately|do\s+not\s+continue|cease\s+all)\b", re.I),
-     "agent_command", "low"),
-    # Credential-extraction probes
-    (re.compile(r"\b(print|reveal|show|output)\s+(your\s+)?(system\s+prompt|instructions|"
-                r"api\s+key|password|credentials)\b", re.I),
+
+    # ─── credential probes: action verb on a secret-class noun ─────────
+    (re.compile(r"\b(print|reveal|show|output|expose|leak|tell\s+me)\s+"
+                r"(your\s+|the\s+)?"
+                r"(system\s+prompt|system\s+instructions|"
+                r"api[\s_-]?key|credentials|"
+                r"hidden\s+prompt|secret\s+prompt|original\s+prompt)\b", re.I),
      "credential_probe", "high"),
-    # JSON/YAML payload trying to inject a fake tool call
-    (re.compile(r"\{[^{}]*(\"tool_use\"|\"function_call\"|\"name\"\s*:\s*\"shell\")", re.I),
+
+    # ─── AI persona-leak phrases (low — sometimes legit in AI-about-AI articles)
+    (re.compile(r"\bas\s+an?\s+(ai|artificial\s+intelligence)\s+language\s+model\b", re.I),
+     "ai_persona_claim", "low"),
+    (re.compile(r"\bi\s+am\s+(claude|chatgpt|gpt-\d|bard|gemini|copilot)\s+"
+                r"(from|made|created|developed|built)\s+by\b", re.I),
+     "ai_persona_claim", "low"),
+
+    # ─── fake JSON tool-call inside scraped content (low) ──────────────
+    (re.compile(r"\{[^{}]*\"(tool_use|function_call)\"\s*:", re.I),
      "fake_tool_call", "low"),
-    # Email/SMS phishing patterns common in scraped content
-    (re.compile(r"\b(click\s+here\s+to\s+verify|account\s+will\s+be\s+suspended|"
-                r"unusual\s+activity\s+detected)\b", re.I),
-     "phishing_indicator", "low"),
+
+    # ─── "new instructions:" leading a content block (high) ────────────
+    (re.compile(r"\b(new|updated|revised|additional)\s+instructions?\s*[:=]\s*\S", re.I),
+     "instruction_override", "high"),
+
+    # ─── jailbreak-canon phrases ───────────────────────────────────────
+    (re.compile(r"\b(DAN\s+mode|developer\s+mode|jailbreak\s+mode|"
+                r"unrestricted\s+mode)\s+(enabled|activated|on)\b", re.I),
+     "jailbreak", "high"),
+    (re.compile(r"\byou\s+are\s+(now\s+)?in\s+"
+                r"(admin|root|god|developer|jailbreak|unrestricted)\s+"
+                r"(mode|override|access)\b", re.I),
+     "jailbreak", "high"),
 ]
 
 
