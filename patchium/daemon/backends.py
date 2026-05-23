@@ -78,9 +78,10 @@ async def launch_patchright_session(
     *,
     headless: bool = False,
     pw: Playwright | None = None,
+    proxy: dict | None = None,
 ) -> BrowserSession:
     """Canonical Patchright launch (current default)."""
-    return await launch_session(profile_dir, headless=headless, pw=pw)
+    return await launch_session(profile_dir, headless=headless, pw=pw, proxy=proxy)
 
 
 async def launch_nodriver_session(
@@ -88,6 +89,7 @@ async def launch_nodriver_session(
     *,
     headless: bool = False,
     pw: Playwright | None = None,
+    proxy: dict | None = None,
 ) -> BrowserSession:
     """Launch Chrome via nodriver, then connect Patchright over CDP.
 
@@ -119,11 +121,22 @@ async def launch_nodriver_session(
     port = sk.getsockname()[1]
     sk.close()
 
+    # nodriver supports proxy via browser_args; passing through.
+    extra_args = []
+    if proxy:
+        extra_args.append(f"--proxy-server={proxy['server']}")
+        # nodriver doesn't auto-inject Basic-Auth — caller must pass an
+        # auth-handling extension or use a proxy URL that includes inline creds.
+        # For now, warn if username/password present.
+        if proxy.get("username") or proxy.get("password"):
+            log.warning("nodriver proxy doesn't support inline auth; "
+                        "use a Chrome extension or IP-allowlisted proxy")
     browser = await uc.start(
         user_data_dir=str(profile_dir),
         headless=headless,
         port=port,
         no_sandbox=False,
+        browser_args=extra_args if extra_args else None,
     )
     cdp_url = f"http://127.0.0.1:{port}"
 
@@ -144,6 +157,7 @@ async def launch(
     *,
     headless: bool = False,
     pw: Playwright | None = None,
+    proxy: dict | None = None,
 ) -> BrowserSession:
     """Dispatch to the requested backend's launcher."""
     if backend not in VALID_BACKENDS:
@@ -151,9 +165,11 @@ async def launch(
             f"unknown backend {backend!r}; valid: {sorted(VALID_BACKENDS)}"
         )
     if backend in ("patchright", "auto"):
-        return await launch_patchright_session(profile_dir, headless=headless, pw=pw)
+        return await launch_patchright_session(profile_dir, headless=headless,
+                                                pw=pw, proxy=proxy)
     if backend == "nodriver":
-        return await launch_nodriver_session(profile_dir, headless=headless, pw=pw)
+        return await launch_nodriver_session(profile_dir, headless=headless,
+                                              pw=pw, proxy=proxy)
     raise AssertionError(f"unreachable backend: {backend}")
 
 

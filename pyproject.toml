@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "patchium"
-version = "0.2.0"
+version = "0.3.0"
 description = "Patchwright stealth + Vibium-style LLM-friendly CLI for agentic browser automation."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -38,6 +38,15 @@ stealth-mouse = ["cdp-patches @ git+https://github.com/Kaliiiiiiiiii-Vinyzu/CDP-
 # Wave 5.4: nodriver backend for the hardest Cloudflare gates. AGPL-3.0
 # (copyleft); commercial integrators should consult licensing.
 nodriver = ["nodriver>=0.50.0"]
+# Wave 6.1a: live-view server (WebSocket frame stream + takeover). Pulls
+# aiohttp for the HTTP+WS surface; ~5 MB install footprint.
+liveview = ["aiohttp>=3.9"]
+# Wave 6.3a: credential vault + TOTP. pynacl for XSalsa20-Poly1305 AEAD;
+# keyring for OS-native key storage (gnome-keyring, macOS Keychain, etc.).
+secrets = ["pynacl>=1.5", "keyring>=24.0"]
+# Wave 6.4a: REST shim — exposes daemon verbs over HTTP for non-shell clients
+# (Docker / hosted mode / language-agnostic agents). FastAPI + uvicorn.
+rest = ["fastapi>=0.110", "uvicorn[standard]>=0.27"]
 # Convenience meta-extras
 all = ["pillow>=10.0", "anthropic>=0.40"]
 dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "pytest-timeout>=2.3", "ruff>=0.6.0"]

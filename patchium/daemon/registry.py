@@ -67,6 +67,23 @@ def get_max_sessions() -> int:
         return 4
 
 
+def get_warm_mode() -> str:
+    """Wave 6.1b: warmup strategy. Returns 'eager' | 'opportunistic' | 'both' | 'off'.
+
+    - eager: pre-start the Playwright driver at daemon init (saves ~100-150ms
+      on first session_create). Negligible RAM cost.
+    - opportunistic: on session_new <name>, spawn Chrome at that profile dir
+      in the background so a subsequent start finds it warm. ~250 MB per
+      pre-warmed session.
+    - both (default): apply both. Best end-to-end latency.
+    - off: do neither; pure on-demand (the pre-Wave-6 behavior).
+    """
+    val = os.environ.get("PATCHIUM_WARM", "both").lower()
+    if val not in {"eager", "opportunistic", "both", "off"}:
+        return "both"
+    return val
+
+
 @dataclass
 class SessionEntry:
     """All per-session state lives here.
@@ -115,10 +132,15 @@ class SessionRegistry:
         self._entries: dict[str, SessionEntry] = {}
         self.mutate_lock = asyncio.Lock()
         # Wave 5: one Playwright driver subprocess shared across all sessions.
-        # Spawned lazily on the first create/attach and torn down on full
-        # daemon shutdown. Per-session driver subprocess would saturate fds
-        # on long-running daemons with frequent session churn.
+        # Spawned lazily on the first create/attach OR eagerly at daemon init
+        # if PATCHIUM_WARM in {eager,both}. Per-session driver subprocess would
+        # saturate fds on long-running daemons with frequent session churn.
         self._pw: Playwright | None = None
+        # Wave 6.1b: opportunistic per-session pre-warm.
+        # Map name → (BrowserSession, task) of Chromes spawned via session_new
+        # in the background. start() pops from here if the warm session matches.
+        self._warm_sessions: dict[str, BrowserSession] = {}
+        self._warm_tasks: dict[str, asyncio.Task] = {}
 
     async def _ensure_pw(self) -> Playwright:
         if self._pw is None:
@@ -128,13 +150,84 @@ class SessionRegistry:
 
     async def _maybe_stop_pw(self) -> None:
         """Stop the shared Playwright driver when no sessions are running."""
-        if self._pw is not None and not self._entries:
+        if self._pw is not None and not self._entries and not self._warm_sessions:
             try:
                 await self._pw.stop()
             except Exception:  # noqa: BLE001
                 pass
             self._pw = None
             log.info("stopped shared Playwright driver (no sessions)")
+
+    # ─── Wave 6.1b: warmup ──────────────────────────────────────────────
+
+    async def warmup(self) -> None:
+        """Eager Playwright driver pre-start. Called from daemon.run() at
+        startup if PATCHIUM_WARM ∈ {eager, both}. Fast — ~150ms — and
+        non-blocking by virtue of being awaited once before serving traffic."""
+        mode = get_warm_mode()
+        if mode in {"eager", "both"}:
+            await self._ensure_pw()
+            log.info("pre-warmed Playwright driver (PATCHIUM_WARM=%s)", mode)
+
+    def schedule_prewarm(self, name: str, profile_dir: Path,
+                          headless: bool = False) -> None:
+        """Wave 6.1b opportunistic: spawn a Chrome at `profile_dir` in the
+        background so a subsequent create(name=...) finds it warm.
+
+        Cheap to call — returns immediately, work happens in a background task.
+        Idempotent: re-scheduling for the same name is a no-op while a prior
+        warm is in-flight or already done.
+        """
+        if get_warm_mode() not in {"opportunistic", "both"}:
+            return
+        if name in self._warm_sessions:
+            return  # already warm
+        if name in self._warm_tasks and not self._warm_tasks[name].done():
+            return  # already in-flight
+        if name in self._entries:
+            return  # already running for real
+
+        async def _do_prewarm():
+            try:
+                pw = await self._ensure_pw()
+                from . import backends as _backends
+                sess = await _backends.launch("patchright", profile_dir,
+                                              headless=headless, pw=pw)
+                # Only stash if still unclaimed (might race with real create)
+                if name not in self._entries and name not in self._warm_sessions:
+                    self._warm_sessions[name] = sess
+                    log.info("pre-warmed session name=%s profile=%s", name, profile_dir)
+                else:
+                    # Lost the race; discard
+                    from . import backends as _b
+                    await _b.close(sess)
+            except Exception as exc:  # noqa: BLE001
+                log.debug("prewarm %s failed: %s", name, exc)
+
+        self._warm_tasks[name] = asyncio.create_task(_do_prewarm())
+
+    async def cancel_prewarm(self, name: str) -> bool:
+        """Cancel an in-flight prewarm AND/OR discard an already-warm Chrome
+        for this name. Called by session_delete so we don't leak a warm Chrome
+        whose profile dir was just removed."""
+        cancelled = False
+        task = self._warm_tasks.pop(name, None)
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+            cancelled = True
+        sess = self._warm_sessions.pop(name, None)
+        if sess is not None:
+            from . import backends as _backends
+            try:
+                await _backends.close(sess)
+            except Exception:  # noqa: BLE001
+                pass
+            cancelled = True
+        return cancelled
 
     # ─── lookups ─────────────────────────────────────────────────────────
 
@@ -223,7 +316,44 @@ class SessionRegistry:
         pdir.mkdir(parents=True, exist_ok=True)
         pw = await self._ensure_pw()
         from . import backends as _backends
-        sess = await _backends.launch(backend, pdir, headless=headless, pw=pw)
+        # Wave 6.2a: resolve persisted per-session proxy (if any). A proxy
+        # configured via `patchium proxy set` lives in <profile_dir>/proxy.json.
+        from ..proxy import load_session_proxy, parse as _parse_proxy
+        proxy_cfg = None
+        proxy_url = load_session_proxy(pdir)
+        if proxy_url:
+            try:
+                proxy_cfg = _parse_proxy(proxy_url)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("ignoring malformed proxy for %s: %s", name, exc)
+        # Wave 6.1b: prefer a pre-warmed session if one is available for this
+        # name AND the requested config matches (backend, headless, no proxy).
+        # Proxy-configured sessions always launch fresh because the warm
+        # session was launched without the proxy.
+        #
+        # If a prewarm is in-flight (task started but not done), await it
+        # first — both that task and a fresh launch would race for the
+        # OS-level user-data-dir lock.
+        task = self._warm_tasks.pop(name, None)
+        if task is not None and not task.done():
+            try:
+                await task
+            except Exception:  # noqa: BLE001
+                pass
+        warm = self._warm_sessions.pop(name, None)
+        if (warm is not None and backend == "patchright"
+                and warm.profile_dir == pdir and proxy_cfg is None):
+            sess = warm
+            log.info("session %s claimed pre-warmed Chrome", name)
+        else:
+            if warm is not None:
+                # Pre-warm doesn't match request — close it to free RAM
+                try:
+                    await _backends.close(warm)
+                except Exception:  # noqa: BLE001
+                    pass
+            sess = await _backends.launch(backend, pdir, headless=headless,
+                                           pw=pw, proxy=proxy_cfg)
         sess.flags = getattr(sess, "flags", {}) if hasattr(sess, "flags") else {}
         if stealth_mouse:
             # If the optional stealth-mouse layer can't install, tear down the
@@ -294,26 +424,34 @@ class SessionRegistry:
     async def close_all(self) -> int:
         """Stop every running session. Returns the count closed.
 
-        Also tears down the shared Playwright driver when the last session
-        exits — frees its Node.js subprocess.
+        Also discards any pre-warmed sessions and tears down the shared
+        Playwright driver when nothing is left.
         """
         names = list(self._entries.keys())
         n = 0
         for name in names:
             if await self.close(name):
                 n += 1
+        # Wave 6.1b: drain pre-warms too
+        for name in list(self._warm_sessions.keys()) + list(self._warm_tasks.keys()):
+            await self.cancel_prewarm(name)
         await self._maybe_stop_pw()
         return n
 
     def delete_profile_dir(self, name: str) -> bool:
         """Remove the on-disk profile dir. Refuses to delete a running session
-        or the special 'default' name."""
+        or the special 'default' name. Cancels any in-flight pre-warm so we
+        don't leak a Chrome whose profile dir was just removed."""
         if name == DEFAULT_SESSION_NAME:
             raise ValueError("cannot delete the 'default' profile")
         if name in self._entries:
             raise RuntimeError(
                 f"session {name!r} is running — close it first"
             )
+        # Wave 6.1b: cancel any pre-warm (cooperative; the task will see the
+        # missing dir and drop). We can't `await` here since this is sync.
+        if name in self._warm_tasks or name in self._warm_sessions:
+            asyncio.create_task(self.cancel_prewarm(name))
         pdir = PROFILES_DIR / name
         if not pdir.exists():
             return False

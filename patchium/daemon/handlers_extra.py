@@ -181,27 +181,90 @@ def register_extra(daemon) -> None:
 
     @daemon.handler("mouse")
     async def _mouse(d, args):
+        """Pixel-coord mouse control.
+
+        Wave 6.2b: if the session has humanize enabled (via `humanize_on`),
+        `click` and `wheel` actions route through the humanization layer —
+        Bezier mouse trajectory, gaussian-sampled dwell, sinusoidal scroll
+        inertia. `move`/`dblclick`/`down`/`up` stay direct (don't make sense
+        to humanize a raw `mouse.down` event).
+        """
+        from .registry import current_session_ctx as _ctx
         s = _session(d)
+        entry = d.registry.get(_ctx.get())
+        humanize = bool(entry.flags.get("humanize")) if entry else False
         action = args["action"]
         x = float(args.get("x", 0))
         y = float(args.get("y", 0))
         button = args.get("button", "left")
         m = s.page.mouse
         if action == "click":
-            await m.click(x, y, button=button)
+            if humanize:
+                from ..humanize import humanized_click
+                cursor = entry.flags.get("_cursor")
+                new_cursor = await humanized_click(
+                    s.page, x, y, button=button, cursor_pos=cursor,
+                )
+                entry.flags["_cursor"] = new_cursor
+            else:
+                await m.click(x, y, button=button)
         elif action == "dblclick":
             await m.dblclick(x, y, button=button)
         elif action == "move":
-            await m.move(x, y, steps=int(args.get("steps", 1)))
+            if humanize:
+                from ..humanize import humanized_move
+                cursor = entry.flags.get("_cursor") if entry else None
+                await humanized_move(s.page, x, y, start=cursor)
+                if entry: entry.flags["_cursor"] = (x, y)
+            else:
+                await m.move(x, y, steps=int(args.get("steps", 1)))
         elif action == "down":
             await m.down(button=button)
         elif action == "up":
             await m.up(button=button)
         elif action == "wheel":
-            await m.wheel(float(args.get("dx", 0)), float(args.get("dy", 0)))
+            dx = float(args.get("dx", 0))
+            dy = float(args.get("dy", 0))
+            if humanize:
+                from ..humanize import humanized_scroll
+                await humanized_scroll(s.page, dx, dy)
+            else:
+                await m.wheel(dx, dy)
         else:
             raise ValueError(f"unknown mouse action: {action}")
-        return {"action": action, "x": x, "y": y}
+        return {"action": action, "x": x, "y": y, "humanized": humanize}
+
+    # ─── Wave 6.2b: humanize per-session toggle ──────────────────────────
+
+    @daemon.handler("humanize_on")
+    async def _humanize_on(d, args):
+        from .registry import current_session_ctx as _ctx
+        entry = d.registry.get(_ctx.get())
+        if entry is None:
+            raise RuntimeError(
+                "humanize requires a running session — start one first"
+            )
+        entry.flags["humanize"] = True
+        return {"humanize": True, "session": entry.name}
+
+    @daemon.handler("humanize_off")
+    async def _humanize_off(d, args):
+        from .registry import current_session_ctx as _ctx
+        entry = d.registry.get(_ctx.get())
+        if entry is None:
+            return {"humanize": False, "note": "no running session"}
+        entry.flags["humanize"] = False
+        entry.flags.pop("_cursor", None)
+        return {"humanize": False, "session": entry.name}
+
+    @daemon.handler("humanize_status")
+    async def _humanize_status(d, args):
+        from .registry import current_session_ctx as _ctx
+        entry = d.registry.get(_ctx.get())
+        if entry is None:
+            return {"humanize": False, "note": "no running session"}
+        return {"humanize": bool(entry.flags.get("humanize")),
+                "session": entry.name}
 
     # ─── upload ───────────────────────────────────────────────────────────
 
@@ -1054,6 +1117,210 @@ def register_extra(daemon) -> None:
             "self_healed": self_healed,
             "steps": executed,
         }
+
+    # ─── Wave 6.1a: live-view server ─────────────────────────────────────
+
+    @daemon.handler("liveview_start")
+    async def _liveview_start(d, args):
+        """Start the live-view HTTP+WS server. One server per daemon.
+
+        Returns the viewer URL. Idempotent — calling twice returns the
+        existing server's URL without restart.
+        """
+        if getattr(d, "_liveview_server", None) is not None:
+            srv = d._liveview_server
+            return {"already_running": True,
+                    "url": srv.url(),
+                    "host": srv.host, "port": srv.port,
+                    "takeover": srv.takeover, "fps": srv.fps}
+        from ..liveview import LiveViewServer
+        host = args.get("host", "127.0.0.1")
+        port = int(args.get("port", 9223))
+        fps = int(args.get("fps", 5))
+        jpeg_quality = int(args.get("jpeg_quality", 60))
+        takeover = bool(args.get("takeover", False))
+        # Security: refuse non-loopback bind unless explicitly opted in
+        if host not in ("127.0.0.1", "::1", "localhost") and not args.get("insecure_public"):
+            raise RuntimeError(
+                f"refusing to bind live-view to {host!r} without insecure_public=true — "
+                f"public bind exposes full browser control to anyone who connects"
+            )
+        srv = LiveViewServer(d.registry, host=host, port=port, fps=fps,
+                             jpeg_quality=jpeg_quality, takeover=takeover)
+        await srv.start()
+        d._liveview_server = srv
+        return {"started": True, "url": srv.url(),
+                "host": host, "port": port, "takeover": takeover, "fps": fps}
+
+    @daemon.handler("liveview_stop")
+    async def _liveview_stop(d, args):
+        srv = getattr(d, "_liveview_server", None)
+        if srv is None:
+            return {"already_stopped": True}
+        await srv.stop()
+        d._liveview_server = None
+        return {"stopped": True}
+
+    @daemon.handler("liveview_url")
+    async def _liveview_url(d, args):
+        """Return the viewer URL for the current (or named) session.
+        If the server isn't running, return null in `url`."""
+        srv = getattr(d, "_liveview_server", None)
+        if srv is None:
+            return {"running": False, "url": None}
+        from .registry import current_session_ctx as _ctx
+        name = args.get("session") or _ctx.get()
+        if not d.registry.has(name):
+            return {"running": True, "url": srv.url(), "session_url": None,
+                    "note": f"no session {name!r} — pass a name or start one"}
+        return {"running": True, "url": srv.url(),
+                "session_url": srv.url(name)}
+
+    # ─── Wave 6.3d: vision-first primitive ───────────────────────────────
+
+    @daemon.handler("vision_click")
+    async def _vision_click(d, args):
+        """Find a UI element matching the verbal description via Claude vision,
+        then click it. Cache hit on identical (screenshot, intent) → no API call.
+        """
+        from .. import vision as _vision
+        from collections import deque as _deque
+        s = _session(d)
+        from .registry import current_session_ctx as _ctx
+        entry = d.registry.get(_ctx.get())
+        # Per-session rate-limit log
+        cache_log = entry.flags.setdefault("vision_rate", _deque())
+        max_pm = int(args.get("max_per_minute", 30))
+        result = await _vision.find_element(
+            s.page, args["intent"],
+            min_confidence=float(args.get("min_confidence", 0.6)),
+            cache_log=cache_log, max_per_minute=max_pm,
+        )
+        # devicePixelRatio scaling: Claude sees screenshot at the device px;
+        # our screenshots are NOT scaled (they're the raw device pixels), so
+        # mouse coords need to be in CSS pixels = device_px / dpr.
+        dpr = result.get("devicePixelRatio", 1) or 1
+        cx = result["x"] / dpr
+        cy = result["y"] / dpr
+        await s.page.mouse.click(cx, cy, button=args.get("button", "left"))
+        # Update stats
+        stats = entry.flags.setdefault("vision_stats", {
+            "calls": 0, "cache_hits": 0, "input_tokens": 0,
+            "output_tokens": 0, "cost_usd": 0.0,
+        })
+        stats["calls"] += 1
+        if result["via"] == "cache":
+            stats["cache_hits"] += 1
+        else:
+            stats["input_tokens"] += result.get("tokens", {}).get("input", 0)
+            stats["output_tokens"] += result.get("tokens", {}).get("output", 0)
+            stats["cost_usd"] += result.get("cost_usd", 0)
+        return {
+            "clicked": True, "x": cx, "y": cy,
+            "confidence": result["confidence"],
+            "via": result["via"], "rationale": result.get("rationale", ""),
+        }
+
+    @daemon.handler("vision_find")
+    async def _vision_find(d, args):
+        """Like vision_click but just return coords without clicking — useful
+        for inspecting what the vision model sees."""
+        from .. import vision as _vision
+        from collections import deque as _deque
+        s = _session(d)
+        from .registry import current_session_ctx as _ctx
+        entry = d.registry.get(_ctx.get())
+        cache_log = entry.flags.setdefault("vision_rate", _deque())
+        result = await _vision.find_element(
+            s.page, args["intent"],
+            min_confidence=float(args.get("min_confidence", 0.6)),
+            cache_log=cache_log,
+            max_per_minute=int(args.get("max_per_minute", 30)),
+        )
+        return result
+
+    @daemon.handler("vision_type")
+    async def _vision_type(d, args):
+        """vision_click + type the given text into whatever was clicked."""
+        from .. import vision as _vision
+        from collections import deque as _deque
+        s = _session(d)
+        from .registry import current_session_ctx as _ctx
+        entry = d.registry.get(_ctx.get())
+        cache_log = entry.flags.setdefault("vision_rate", _deque())
+        result = await _vision.find_element(
+            s.page, args["intent"],
+            min_confidence=float(args.get("min_confidence", 0.6)),
+            cache_log=cache_log,
+            max_per_minute=int(args.get("max_per_minute", 30)),
+        )
+        dpr = result.get("devicePixelRatio", 1) or 1
+        cx = result["x"] / dpr
+        cy = result["y"] / dpr
+        await s.page.mouse.click(cx, cy)
+        await s.page.keyboard.type(args["text"])
+        return {"typed": True, "x": cx, "y": cy,
+                "confidence": result["confidence"], "via": result["via"]}
+
+    @daemon.handler("vision_stats")
+    async def _vision_stats(d, args):
+        """Return cumulative vision API usage stats for the current session."""
+        from .registry import current_session_ctx as _ctx
+        entry = d.registry.get(_ctx.get())
+        if entry is None:
+            return {"calls": 0, "cache_hits": 0,
+                    "input_tokens": 0, "output_tokens": 0, "cost_usd": 0.0}
+        return entry.flags.get("vision_stats", {
+            "calls": 0, "cache_hits": 0,
+            "input_tokens": 0, "output_tokens": 0, "cost_usd": 0.0,
+        })
+
+    @daemon.handler("vision_clear_cache")
+    async def _vision_clear_cache(d, args):
+        from .. import vision as _vision
+        cleared = _vision.cache_clear()
+        return {"cleared": cleared}
+
+    # ─── Wave 6.3c: prompt-injection safety ──────────────────────────────
+
+    @daemon.handler("safety_set")
+    async def _safety_set(d, args):
+        """Set safety mode for the current session.
+
+        mode: 'off' (default) | 'flag-only' | 'wrap' | 'redact'
+          - flag-only: add prompt_injection_risk + signals to responses
+          - wrap: wrap suspicious regions in <UNTRUSTED_CONTENT> tags
+          - redact: replace suspicious regions with [REDACTED-PROMPT-INJECTION-N]
+        """
+        from .registry import current_session_ctx as _ctx
+        entry = d.registry.get(_ctx.get())
+        if entry is None:
+            raise RuntimeError("no running session")
+        mode = args.get("mode", "off")
+        if mode not in ("off", "flag-only", "wrap", "redact"):
+            raise ValueError(
+                f"unknown safety mode {mode!r}; "
+                "valid: off | flag-only | wrap | redact"
+            )
+        entry.flags["safety_mode"] = mode
+        return {"safety_mode": mode, "session": entry.name}
+
+    @daemon.handler("safety_status")
+    async def _safety_status(d, args):
+        from .registry import current_session_ctx as _ctx
+        entry = d.registry.get(_ctx.get())
+        if entry is None:
+            return {"safety_mode": "off", "note": "no running session"}
+        return {"safety_mode": entry.flags.get("safety_mode", "off"),
+                "session": entry.name}
+
+    @daemon.handler("safety_scan")
+    async def _safety_scan(d, args):
+        """Scan an arbitrary string and return the classifier result without
+        mutating any content. Useful for testing patterns."""
+        from .. import safety as _safety
+        text = args.get("text", "")
+        return _safety.classify(text)
 
     # ─── Wave 5.4b: fingerprint scorer ───────────────────────────────────
 

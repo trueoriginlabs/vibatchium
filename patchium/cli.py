@@ -556,13 +556,26 @@ def click_cmd(ctx, target, timeout_ms, auto_dismiss_banners):
 
 @cli.command()
 @click.argument("target")
-@click.argument("text_arg", metavar="TEXT")
+@click.argument("text_arg", metavar="TEXT", required=False)
 @click.option("--timeout", "timeout_ms", default=30_000, type=int)
+@click.option("--use-secret", "use_secret", default=None,
+              help="Resolve value from vault: 'site:key' (or 'site:totp' for TOTP).")
 @click.pass_context
-def fill(ctx, target, text_arg, timeout_ms):
-    """Clear an input and fill it with text (React-input-safe via Locator.fill)."""
-    _emit(call("fill", {"target": target, "text": text_arg, "timeout_ms": timeout_ms}),
-          ctx.obj["json"], "filled")
+def fill(ctx, target, text_arg, timeout_ms, use_secret):
+    """Clear an input and fill it with text (React-input-safe via Locator.fill).
+
+    With --use-secret site:key, value comes from the encrypted vault — never
+    appears in command line, response, or logs.
+    """
+    args = {"target": target, "timeout_ms": timeout_ms}
+    if use_secret:
+        args["use_secret"] = use_secret
+    else:
+        if not text_arg:
+            click.echo("error: TEXT or --use-secret required", err=True)
+            sys.exit(2)
+        args["text"] = text_arg
+    _emit(call("fill", args), ctx.obj["json"], "filled")
 
 
 @cli.command(name="type")
@@ -1198,6 +1211,515 @@ def logs(ctx, lines, follow):
     _sub.call(cmd)
 
 
+# ─── Wave 6.3d: vision-first primitives ──────────────────────────────────
+
+@cli.command("vision-click")
+@click.argument("intent")
+@click.option("--min-confidence", default=0.6, type=float)
+@click.option("--button", default="left", type=click.Choice(["left", "right", "middle"]))
+@click.option("--max-per-minute", default=30, type=int)
+@click.pass_context
+def vision_click(ctx, intent, min_confidence, button, max_per_minute):
+    """Find a UI element by description (via Claude vision) and click it.
+
+    Use when the AX-tree is useless (canvas UIs, Flutter, Unity WebGL).
+    Requires ANTHROPIC_API_KEY + `pip install patchium[llm]`.
+
+        patchium vision-click "the blue submit button"
+        patchium vision-click "the OK button in the modal" --min-confidence 0.8
+    """
+    _emit(call("vision_click", {
+        "intent": intent, "min_confidence": min_confidence,
+        "button": button, "max_per_minute": max_per_minute,
+    }), ctx.obj["json"])
+
+
+@cli.command("vision-find")
+@click.argument("intent")
+@click.option("--min-confidence", default=0.6, type=float)
+@click.pass_context
+def vision_find_cmd(ctx, intent):
+    """Locate a UI element via vision and return coords + confidence (no click)."""
+    _emit(call("vision_find", {"intent": intent, "min_confidence": 0.0}),
+          ctx.obj["json"])
+
+
+@cli.command("vision-type")
+@click.argument("intent")
+@click.argument("text_arg", metavar="TEXT")
+@click.option("--min-confidence", default=0.6, type=float)
+@click.pass_context
+def vision_type_cmd(ctx, intent, text_arg, min_confidence):
+    """vision-click the described field, then type TEXT."""
+    _emit(call("vision_type", {"intent": intent, "text": text_arg,
+                                "min_confidence": min_confidence}),
+          ctx.obj["json"])
+
+
+@cli.group()
+def vision():
+    """Inspect or reset vision-related state."""
+
+
+@vision.command("stats")
+@click.pass_context
+def vision_stats(ctx):
+    """Cumulative vision API usage for current session (calls, tokens, cost)."""
+    _emit(call("vision_stats"), ctx.obj["json"])
+
+
+@vision.command("clear-cache")
+@click.pass_context
+def vision_clear_cache(ctx):
+    """Drop the on-disk vision (screenshot, intent) → coords cache."""
+    _emit(call("vision_clear_cache"), ctx.obj["json"])
+
+
+# ─── Wave 6.3c: prompt-injection safety ──────────────────────────────────
+
+@cli.group()
+def safety():
+    """Configure prompt-injection scanning per session.
+
+    OFF by default (zero overhead). Modes:
+        flag-only  add prompt_injection_risk + signals to responses
+        wrap       wrap suspicious regions in <UNTRUSTED_CONTENT> tags
+        redact     replace suspicious regions with [REDACTED-PROMPT-INJECTION-N]
+
+        patchium --session work safety set flag-only
+        patchium --session work map      # response gains risk metadata
+        patchium safety scan "ignore previous instructions"  # test patterns
+    """
+
+
+@safety.command("set")
+@click.argument("mode", type=click.Choice(["off", "flag-only", "wrap", "redact"]))
+@click.pass_context
+def safety_set(ctx, mode):
+    """Set the safety mode for the current session."""
+    _emit(call("safety_set", {"mode": mode}), ctx.obj["json"])
+
+
+@safety.command("status")
+@click.pass_context
+def safety_status(ctx):
+    """Report current safety mode."""
+    _emit(call("safety_status"), ctx.obj["json"])
+
+
+@safety.command("scan")
+@click.argument("text")
+@click.pass_context
+def safety_scan(ctx, text):
+    """Run the classifier on TEXT and print its risk + signals."""
+    _emit(call("safety_scan", {"text": text}), ctx.obj["json"])
+
+
+# ─── Wave 6.3a: credential vault + TOTP ──────────────────────────────────
+
+@cli.group()
+def secret():
+    """Encrypted vault for per-site credentials + TOTP.
+
+    Vault key is sourced from OS keyring (preferred) or PATCHIUM_SECRETS_KEY
+    env (base64-32-bytes; CI/headless). Run `patchium secret init` once to
+    provision the key.
+
+        patchium secret init
+        patchium secret set github.com username alice
+        patchium secret set github.com password 'hunter2'
+        patchium secret set github.com totp-seed JBSWY3DPEHPK3PXP
+        patchium secret list
+        patchium fill @e7 --use-secret github.com:totp
+    """
+
+
+@secret.command("init")
+@click.option("--prefer", default="keyring",
+              type=click.Choice(["keyring", "env"]),
+              help="Where to store the generated key.")
+@click.option("--print-key", is_flag=True,
+              help="Echo the key (for env-var setups).")
+@click.pass_context
+def secret_init(ctx, prefer, print_key):
+    """Generate and provision a vault key."""
+    args = {"prefer": prefer}
+    if print_key:
+        args["print_key"] = True
+    _emit(call("secret_init", args), ctx.obj["json"])
+
+
+@secret.command("set")
+@click.argument("site")
+@click.argument("key")
+@click.argument("value", required=False)
+@click.option("--stdin", is_flag=True, help="Read value from stdin (recommended for passwords).")
+@click.pass_context
+def secret_set(ctx, site, key, value, stdin):
+    """Store a secret. Use --stdin to avoid shell history."""
+    if stdin:
+        value = sys.stdin.read().strip()
+    if not value:
+        click.echo("error: value required (use VALUE arg or --stdin)", err=True)
+        sys.exit(2)
+    _emit(call("secret_set", {"site": site, "key": key, "value": value}),
+          ctx.obj["json"])
+
+
+@secret.command("list")
+@click.argument("site", required=False)
+@click.pass_context
+def secret_list(ctx, site):
+    """List secrets in masked form."""
+    args = {"site": site} if site else {}
+    _emit(call("secret_list", args), ctx.obj["json"])
+
+
+@secret.command("delete")
+@click.argument("site")
+@click.argument("key", required=False)
+@click.confirmation_option(prompt="really delete this secret?")
+@click.pass_context
+def secret_delete(ctx, site, key):
+    """Delete a single key, or all keys for the site if KEY omitted."""
+    args = {"site": site}
+    if key:
+        args["key"] = key
+    _emit(call("secret_delete", args), ctx.obj["json"])
+
+
+@secret.command("totp")
+@click.argument("site")
+@click.pass_context
+def secret_totp(ctx, site):
+    """Print the current TOTP code for SITE's stored totp-seed."""
+    _emit(call("secret_totp", {"site": site}), ctx.obj["json"], "code")
+
+
+@cli.command("wait-email-code")
+@click.argument("site")
+@click.option("--timeout", default=60, type=int)
+@click.option("--max-age", default=300, type=int,
+              help="Skip emails older than this many seconds.")
+@click.option("--mark-read", is_flag=True, help="Mark the source email as read.")
+@click.pass_context
+def wait_email_code(ctx, site, timeout, max_age, mark_read):
+    """Poll IMAP for an email matching SITE's stored email-poll filter,
+    return the extracted code.
+
+    Set the poll URL once via:
+        patchium secret set example.com email-poll \\
+          'imaps://user:pass@imap.gmail.com:993?regex=\\d{6}&from=*@example.com'
+    """
+    args = {"site": site, "timeout": timeout, "max_age": max_age,
+            "mark_read": mark_read}
+    _emit(call("wait_email_code", args, timeout=timeout + 10),
+          ctx.obj["json"], "code")
+
+
+# ─── Wave 6.2c: evals benchmark suite ────────────────────────────────────
+
+@cli.group()
+def evals():
+    """Run the stealth-eval benchmark matrix and emit markdown/JSON tables.
+
+    Replaces the README's '70-90%' guesses with measured numbers per backend
+    and per humanize-on/off. Use in CI with --min-score to catch regressions.
+
+        patchium evals run                                # default matrix → markdown
+        patchium evals run --backends patchright,nodriver --humanize on,off
+        patchium evals run --json --out evals.json
+        patchium evals run --update-readme                # patches README in-place
+        patchium evals run --min-score 80                 # exit 1 if any cell <80
+    """
+
+
+@evals.command("run")
+@click.option("--targets", default="sannysoft",
+              help="Comma-separated target names or URLs (default: sannysoft).")
+@click.option("--backends", default="patchright",
+              help="Comma-separated backend names. nodriver requires patchium[nodriver].")
+@click.option("--humanize", default="off",
+              help="Comma-separated 'on','off' modes (default: off).")
+@click.option("--settle-ms", default=5000, type=int)
+@click.option("--out", "out_path", default=None, type=click.Path(),
+              help="Write output to file instead of stdout.")
+@click.option("--json", "as_json", is_flag=True, help="Emit JSON instead of markdown.")
+@click.option("--update-readme", "update_readme_flag", is_flag=True,
+              help="Patch README.md between <!-- patchium-evals --> markers.")
+@click.option("--min-score", "min_score_arg", default=None, type=int,
+              help="Exit non-zero if any cell scored below this (CI gate).")
+@click.pass_context
+def evals_run(ctx, targets, backends, humanize, settle_ms, out_path,
+              as_json, update_readme_flag, min_score_arg):
+    """Run the eval matrix and emit a results table."""
+    from . import evals as _evals
+    targets_list = [t.strip() for t in targets.split(",") if t.strip()]
+    backends_list = [b.strip() for b in backends.split(",") if b.strip()]
+    humanize_modes = []
+    for m in humanize.split(","):
+        m = m.strip().lower()
+        if m == "on": humanize_modes.append(True)
+        elif m == "off": humanize_modes.append(False)
+    if not humanize_modes:
+        humanize_modes = [False]
+
+    rows = _evals.run_eval_matrix(
+        call, targets=targets_list, backends=backends_list,
+        humanize_modes=humanize_modes, settle_ms=settle_ms,
+    )
+
+    if as_json:
+        output = _evals.render_json(rows)
+    else:
+        output = _evals.render_markdown(rows)
+
+    if update_readme_flag:
+        from pathlib import Path as _P
+        readme = _P.cwd() / "README.md"
+        if not readme.exists():
+            # Try relative to the package install (dev mode)
+            import patchium as _pm
+            readme = _P(_pm.__file__).resolve().parent.parent / "README.md"
+        if readme.exists():
+            changed = _evals.update_readme(readme, _evals.render_markdown(rows))
+            click.echo(f"README updated: {changed} ({readme})", err=True)
+        else:
+            click.echo(f"README.md not found", err=True)
+
+    if out_path:
+        from pathlib import Path as _P
+        _P(out_path).write_text(output)
+        click.echo(f"wrote {out_path}", err=True)
+    else:
+        click.echo(output)
+
+    if min_score_arg is not None:
+        lowest = _evals.min_score(rows)
+        if lowest is None:
+            click.echo("error: no scored cells (all errored)", err=True)
+            sys.exit(1)
+        if lowest < min_score_arg:
+            click.echo(f"FAIL: min score {lowest} < {min_score_arg}", err=True)
+            sys.exit(1)
+
+
+# ─── Wave 6.2b: humanization ─────────────────────────────────────────────
+
+@cli.group()
+def humanize():
+    """Toggle human-like mouse trajectories + dwell + scroll inertia per session.
+
+    OFF by default (Bezier paths are visible entropy — only enable when the
+    target actually fingerprints mouse behavior, e.g. DataDome, PerimeterX).
+
+        patchium --session work humanize on
+        patchium --session work click @e3       # uses humanized click
+        patchium --session work humanize off
+    """
+
+
+@humanize.command("on")
+@click.pass_context
+def humanize_on(ctx):
+    _emit(call("humanize_on"), ctx.obj["json"])
+
+
+@humanize.command("off")
+@click.pass_context
+def humanize_off(ctx):
+    _emit(call("humanize_off"), ctx.obj["json"])
+
+
+@humanize.command("status")
+@click.pass_context
+def humanize_status(ctx):
+    _emit(call("humanize_status"), ctx.obj["json"])
+
+
+# ─── Wave 6.2a: per-session proxy ────────────────────────────────────────
+
+@cli.group()
+def proxy():
+    """Per-session proxy configuration.
+
+    Set a proxy that will be applied next time the session launches:
+
+        patchium --session work proxy set "http://user:pass@127.0.0.1:8888"
+        patchium --session work proxy set --path ~/.config/patchium-proxy.txt
+        patchium --session work start          # uses the configured proxy
+        patchium --session work proxy info     # exit IP, latency
+        patchium --session work proxy clear
+
+    Built-in providers (URL prefixes):
+      http / socks5     generic
+      brightdata        Bright Data residential/datacenter
+      iproyal           IPRoyal residential + sticky sessions
+      decodo            Decodo residential
+    """
+
+
+@proxy.command("set")
+@click.argument("url", required=False)
+@click.option("--path", default=None,
+              help="Read the proxy URL from a 0600 file (cred hygiene).")
+@click.pass_context
+def proxy_set(ctx, url, path):
+    """Persist a proxy URL for the current session."""
+    if not url and not path:
+        click.echo("error: URL or --path required", err=True); sys.exit(2)
+    args = {}
+    if url:
+        args["url"] = url
+    if path:
+        args["path"] = str(Path(path).resolve())
+    _emit(call("proxy_set", args), ctx.obj["json"])
+
+
+@proxy.command("clear")
+@click.pass_context
+def proxy_clear(ctx):
+    """Remove the proxy from the current session (takes effect on next start)."""
+    _emit(call("proxy_clear"), ctx.obj["json"])
+
+
+@proxy.command("info")
+@click.pass_context
+def proxy_info(ctx):
+    """Show configured proxy + current exit IP (if session running)."""
+    _emit(call("proxy_info"), ctx.obj["json"])
+
+
+# ─── Wave 6.1c: session checkpoint / restore ────────────────────────────
+
+@cli.group()
+def checkpoint():
+    """Save & restore complete session state — tabs, cookies, storage.
+
+    A checkpoint captures everything needed to recreate a logged-in browser
+    state later, even in a different session (Browserbase Contexts parity).
+
+        patchium --session work checkpoint save logged-in
+        patchium --session work checkpoint list
+        patchium --session work-2 checkpoint load logged-in --from-session work
+        patchium --session work checkpoint delete logged-in
+    """
+
+
+@checkpoint.command("save")
+@click.argument("name")
+@click.pass_context
+def checkpoint_save(ctx, name):
+    """Save the current session's tabs + cookies + storage as <name>."""
+    _emit(call("checkpoint_save", {"name": name}), ctx.obj["json"])
+
+
+@checkpoint.command("load")
+@click.argument("name")
+@click.option("--from-session", default=None,
+              help="Load from a different session's checkpoint dir (cross-session clone).")
+@click.pass_context
+def checkpoint_load(ctx, name, from_session):
+    """Restore checkpoint <name> into the current session."""
+    args = {"name": name}
+    if from_session:
+        args["from_session"] = from_session
+    _emit(call("checkpoint_load", args), ctx.obj["json"])
+
+
+@checkpoint.command("list")
+@click.option("--from-session", default=None, help="List a different session's checkpoints.")
+@click.pass_context
+def checkpoint_list(ctx, from_session):
+    """List checkpoints for the current (or specified) session."""
+    args = {}
+    if from_session:
+        args["from_session"] = from_session
+    res = call("checkpoint_list", args)
+    if ctx.obj["json"]:
+        _emit(res, True)
+        return
+    import time as _time
+    if not res["checkpoints"]:
+        click.echo("no checkpoints")
+        return
+    for c in res["checkpoints"]:
+        ts = _time.strftime("%Y-%m-%d %H:%M", _time.localtime(c["ts"]))
+        click.echo(f"{c['name']:24s} {ts}  {c['tabs']} tabs  {c['cookies']} cookies  {c['bytes']}B")
+
+
+@checkpoint.command("delete")
+@click.argument("name")
+@click.pass_context
+def checkpoint_delete(ctx, name):
+    """Delete checkpoint <name> from the current session."""
+    _emit(call("checkpoint_delete", {"name": name}), ctx.obj["json"])
+
+
+# ─── Wave 6.1a: live-view ────────────────────────────────────────────────
+
+@cli.group()
+def liveview():
+    """Stream browser frames over WebSocket for a regular-browser viewer.
+
+    Watch what an agent is doing in real time. Read-only by default;
+    --takeover forwards your clicks/keystrokes back into the session.
+
+        patchium liveview start                # bind 127.0.0.1:9223
+        patchium liveview start --takeover     # mouse/keyboard takeover mode
+        patchium liveview url                  # print viewer URL
+        # open the URL in any browser
+        patchium liveview stop
+    """
+
+
+@liveview.command("start")
+@click.option("--port", default=9223, type=int)
+@click.option("--host", default="127.0.0.1",
+              help="Bind address. 127.0.0.1 is the only safe default.")
+@click.option("--fps", default=5, type=int)
+@click.option("--jpeg-quality", default=60, type=int)
+@click.option("--takeover", is_flag=True,
+              help="Forward viewer clicks/keystrokes to the session.")
+@click.option("--insecure-public", is_flag=True,
+              help="Required acknowledgement to bind a non-loopback host.")
+@click.pass_context
+def liveview_start(ctx, port, host, fps, jpeg_quality, takeover, insecure_public):
+    """Start the live-view server."""
+    args = {"port": port, "host": host, "fps": fps,
+            "jpeg_quality": jpeg_quality, "takeover": takeover}
+    if insecure_public:
+        args["insecure_public"] = True
+    _emit(call("liveview_start", args), ctx.obj["json"])
+
+
+@liveview.command("stop")
+@click.pass_context
+def liveview_stop(ctx):
+    """Stop the live-view server."""
+    _emit(call("liveview_stop"), ctx.obj["json"])
+
+
+@liveview.command("url")
+@click.option("--session", "session_name", default=None,
+              help="Specific session to link (omit for current default).")
+@click.pass_context
+def liveview_url(ctx, session_name):
+    """Print the viewer URL for the current or specified session."""
+    args = {}
+    if session_name:
+        args["session"] = session_name
+    res = call("liveview_url", args)
+    if ctx.obj["json"]:
+        _emit(res, True)
+        return
+    if not res.get("running"):
+        click.echo("live-view not running — `patchium liveview start` first", err=True)
+        sys.exit(1)
+    target = res.get("session_url") or res.get("url")
+    click.echo(target)
+
+
 # ─── Wave 5.4b: fingerprint scorer ────────────────────────────────────────
 
 @cli.command()
@@ -1241,6 +1763,27 @@ def mcp(caps):
     """Run the MCP server (stdio JSON-RPC) — wires every CLI verb as an MCP tool."""
     from .mcp_server import _entrypoint
     _entrypoint(caps=caps)
+
+
+# ─── Wave 6.4a: REST shim ────────────────────────────────────────────────
+
+@cli.command()
+@click.option("--host", default="127.0.0.1",
+              help="Bind address. 127.0.0.1 is the default; --insecure-no-auth needed for 0.0.0.0.")
+@click.option("--port", default=8000, type=int)
+@click.option("--insecure-no-auth", is_flag=True,
+              help="Disable bearer-token auth (dev only).")
+def serve(host, port, insecure_no_auth):
+    """Run the FastAPI REST shim mirroring every daemon verb at POST /v1/<verb>.
+
+    Bearer token persists at ~/.cache/patchium/rest-token (mode 0600).
+    Set the same token in the Authorization header from any HTTP client.
+    """
+    if host not in ("127.0.0.1", "::1", "localhost") and not insecure_no_auth:
+        # Public bind WITH auth is fine, but we want the user to think about it
+        click.echo(f"warning: binding non-loopback {host!r}; ensure firewall is set", err=True)
+    from .rest import serve as _serve
+    _serve(host=host, port=port, require_auth=not insecure_no_auth)
 
 
 # ─── pages ────────────────────────────────────────────────────────────────

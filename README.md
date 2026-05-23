@@ -2,7 +2,7 @@
 
 Patchwright stealth backend + Vibium-style LLM-friendly CLI for agentic browser automation.
 
-> **Status: 0.2.0 — multi-session, alpha.** Cleared HackerOne's Cloudflare cold-launch. **85 MCP tools** including session management. ~6,500 LoC, 75 tests, all green. **31/31 passed on bot.sannysoft.com** (measured, not estimated). Multi-session model lets N concurrent Chrome processes share one daemon — each with its own profile/cookies/fingerprint.
+> **Status: 0.3.0 — full agentic platform, alpha.** Cleared HackerOne Cloudflare cold-launch. **108+ MCP tools** spanning multi-session, vision-first clicking, credential vault, IMAP code retrieval, prompt-injection classifier, proxy abstraction, humanization, live-view, checkpoints, evals, REST shim, Docker. ~9,500 LoC, **228 tests green** in 49 s. **31/31 passed on bot.sannysoft.com** (measured). Ten new features in Wave 6 alone.
 
 ## Why patchium
 
@@ -102,6 +102,89 @@ Buckets: `core,session,nav,content,input,element,pages,storage,network,dialogs,o
 `role[name=...]` selector first (survives DOM mutation) instead of the
 snapshot-specific `@eN`. If the durable selector fails, the cache is
 invalidated and `act` re-observes once — `self_healed: true` in the response.
+
+## Wave 6 — agentic platform (added in 0.3.0)
+
+### Live-view server (6.1a)
+```bash
+patchium liveview start --port 9223 --takeover     # WebSocket frame stream
+# open http://localhost:9223/ in any browser to watch the agent in real time
+```
+Read-only by default; `--takeover` forwards your clicks/keystrokes back into
+the session. Multi-session grid. ~50 KB/s per viewer at 5 fps.
+
+### Browser warm pool (6.1b)
+`PATCHIUM_WARM=both` (default) eagerly starts the Playwright driver and
+opportunistically pre-spawns Chrome on `session_new` so subsequent `start`
+finds it warm. `=off` disables.
+
+### Session checkpoint / restore (6.1c)
+```bash
+patchium --session work checkpoint save logged-in       # snapshot tabs + cookies + LS/SS
+patchium --session work-2 checkpoint load logged-in --from-session work   # cross-session clone
+```
+
+### Per-session proxy (6.2a)
+```bash
+patchium --session work proxy set "brightdata://customer:pw@residential?country=us&session-id=42"
+patchium --session work start                           # launches Chrome via proxy
+patchium --session work proxy info                      # exit IP, latency
+```
+Adapters: `http`, `socks5`, `brightdata`, `iproyal`, `decodo`, plus
+`--proxy-file` for cred hygiene. WebRTC leak guard auto-enabled.
+
+### Humanization (6.2b)
+```bash
+patchium --session work humanize on                     # Bezier mouse, gaussian dwell, sin scroll
+```
+OFF by default — only enable when the target actually fingerprints mouse
+behavior (DataDome, PerimeterX). Verified not to degrade sannysoft 31/31.
+
+### Evals benchmark suite (6.2c)
+```bash
+patchium evals run --targets sannysoft,creepjs --backends patchright,nodriver
+patchium evals run --min-score 80 --update-readme       # CI gate + README patch
+```
+Replaces the README's old "70-90%" guesses with measured numbers.
+
+### Credential vault + TOTP + email codes (6.3a/b)
+```bash
+patchium secret init                                    # provision vault key (OS keyring)
+patchium secret set github.com username alice
+patchium secret set github.com totp-seed JBSWY3DPEHPK3PXP
+patchium fill @e7 --use-secret github.com:totp          # current 6-digit TOTP, never echoed
+patchium secret set example.com email-poll \
+  'imaps://user:pass@imap.gmail.com:993?regex=\d{6}&from=*@example.com'
+patchium wait-email-code example.com --timeout 60       # poll IMAP, return code
+```
+XSalsa20-Poly1305 vault, NEVER appears in logs/HAR/observe-cache (grep-tested).
+
+### Prompt-injection classifier (6.3c)
+```bash
+patchium safety set flag-only                           # add risk metadata to scraped content
+patchium safety set wrap                                # mark suspicious regions
+patchium safety set redact                              # replace suspicious regions
+```
+30+ curated heuristic patterns + per-session toggle. OFF by default = zero overhead.
+≥5% false-positive rate on legit corpus (test-enforced).
+
+### Vision-first primitive (6.3d)
+```bash
+patchium vision-click "the blue submit button"          # Claude vision → coords → click
+patchium vision-find "the modal OK button"              # locate only, no click
+patchium vision-type "the search field" "hello world"   # click + type
+patchium vision stats                                   # tokens + cost per session
+```
+For canvas / Flutter / Unity WebGL pages where AX-tree is useless. Perceptual
+cache + rate limit + low-confidence safeguard. Requires `patchium[llm]`.
+
+### REST shim + Docker (6.4)
+```bash
+patchium serve                                          # FastAPI on :8000
+docker compose up -d                                    # see docker-compose.yml
+```
+Bearer-token auth by default; token persisted at `~/.cache/patchium/rest-token`.
+Multi-stage Dockerfile keeps image under 1 GB.
 
 ## Attach mode — the practical Cloudflare workaround
 

@@ -44,16 +44,25 @@ class Daemon:
         "ping", "status",
         "wait_selector", "wait_ref", "wait_url", "wait_load", "wait_fn",
         "wait_response", "sleep",
+        # Wave 6.3b: email-code polling is a long-running wait — don't hold
+        # the registry mutate lock.
+        "wait_email_code",
     })
 
     # Verbs that mutate the registry itself (create/destroy sessions, switch
     # active session, daemon-level queries that don't need a session). These
     # acquire the registry.mutate_lock instead of a per-session lock.
+    # Wave 6.2a: proxy_* verbs touch the profile dir and don't require a
+    # running session; checkpoint_list/delete are file ops on the profile.
     REGISTRY_VERBS = frozenset({
         "start", "attach", "stop", "shutdown",
         "session_new", "session_list", "session_use", "session_switch",
         "session_close", "session_close_all", "session_delete",
         "profile_list", "profile_new", "profile_use", "profile_delete",
+        "proxy_set", "proxy_clear", "proxy_info",
+        "checkpoint_list", "checkpoint_delete",
+        # Wave 6.3a: secrets are not session-scoped
+        "secret_init", "secret_set", "secret_list", "secret_delete", "secret_totp",
     })
 
     def __init__(self) -> None:
@@ -184,6 +193,14 @@ class Daemon:
                     }
                 async with entry.lock:
                     result = await self._handlers[cmd](self, args)
+            # Wave 6.3c: prompt-injection middleware. Off by default; per-session
+            # flag controls activation. Mutates content fields in-place.
+            entry = self.registry.get(session_name)
+            if entry is not None and isinstance(result, dict):
+                mode = entry.flags.get("safety_mode")
+                if mode and mode != "off":
+                    from .. import safety as _safety
+                    result = _safety.scan_response(cmd, result, mode)
             return {"id": req_id, "ok": True, "result": result}
         except Exception as exc:  # noqa: BLE001
             log.exception("handler %s failed (session=%s)", cmd, session_name)
@@ -232,6 +249,10 @@ class Daemon:
 
         log.info("daemon listening on %s pid=%s", SOCK_PATH, os.getpid())
 
+        # Wave 6.1b: eager Playwright driver pre-start (if enabled).
+        # Non-blocking from the user's perspective; happens before first conn.
+        await self.registry.warmup()
+
         async with server:
             stopper = asyncio.create_task(self._stopping.wait())
             serving = asyncio.create_task(server.serve_forever())
@@ -248,6 +269,13 @@ class Daemon:
     async def shutdown(self) -> None:
         log.info("daemon shutting down — closing %d sessions",
                  len(self.registry.list_running()))
+        # Wave 6.1a: shut down live-view server first so frame loops stop
+        # before sessions tear down (avoids "page closed" exceptions in flight).
+        lv = getattr(self, "_liveview_server", None)
+        if lv is not None:
+            with contextlib.suppress(Exception):
+                await lv.stop()
+            self._liveview_server = None
         with contextlib.suppress(Exception):
             await self.registry.close_all()
         with contextlib.suppress(Exception):

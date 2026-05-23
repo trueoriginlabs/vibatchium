@@ -92,7 +92,8 @@ def _wire_page_tracking(session: "BrowserSession") -> None:
 
 
 async def launch_session(profile_dir: Path, headless: bool = False,
-                         *, pw: Playwright | None = None) -> BrowserSession:
+                         *, pw: Playwright | None = None,
+                         proxy: dict | None = None) -> BrowserSession:
     """Cold-launch real Chrome with persistent context (canonical Patchright config).
 
     The Playwright driver (Node.js subprocess) can be shared across multiple
@@ -100,9 +101,14 @@ async def launch_session(profile_dir: Path, headless: bool = False,
     instance to N sessions to avoid spawning a Node.js subprocess per Chrome
     (which can exhaust file descriptors on long-running daemons with frequent
     session churn).
+
+    `proxy`: optional Playwright proxy config dict
+    `{server, username, password}`. When set, also injects WebRTC leak-guard
+    Chrome flags so STUN can't bypass the proxy to expose the real IP.
     """
     profile_dir.mkdir(parents=True, exist_ok=True)
-    log.info("launch persistent context profile=%s headless=%s", profile_dir, headless)
+    log.info("launch persistent context profile=%s headless=%s proxy=%s",
+             profile_dir, headless, bool(proxy))
 
     owns_pw = pw is None
     if pw is None:
@@ -114,13 +120,20 @@ async def launch_session(profile_dir: Path, headless: bool = False,
     #     manifesting as `Page.goto` timeouts on later-spawned sessions even
     #     though `launch_persistent_context` returned cleanly.
     extra_args = ["--disable-dev-shm-usage"] if headless else []
-    context = await pw.chromium.launch_persistent_context(
-        user_data_dir=str(profile_dir),
-        channel="chrome",
-        headless=headless,
-        no_viewport=True,
-        args=extra_args if extra_args else None,
-    )
+    # Wave 6.2a: WebRTC leak guard when a proxy is configured.
+    if proxy:
+        from ..proxy import webrtc_leak_guard_args
+        extra_args = list(extra_args) + webrtc_leak_guard_args()
+    launch_kwargs = {
+        "user_data_dir": str(profile_dir),
+        "channel": "chrome",
+        "headless": headless,
+        "no_viewport": True,
+        "args": extra_args if extra_args else None,
+    }
+    if proxy:
+        launch_kwargs["proxy"] = proxy
+    context = await pw.chromium.launch_persistent_context(**launch_kwargs)
     page = context.pages[0] if context.pages else await context.new_page()
     sess = BrowserSession(pw=pw, context=context, page=page, mode="launch",
                           profile_dir=profile_dir, owns_pw=owns_pw)

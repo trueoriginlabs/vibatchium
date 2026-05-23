@@ -28,6 +28,21 @@ import re as _re
 _REF_TARGET_RE = _re.compile(r"^@?(e\d+)$|^\[ref=e\d+\]$")
 
 
+def _mask_url(url: str) -> str:
+    """Return a credential-redacted version of a proxy URL safe for logging /
+    returning to callers. `http://user:pass@host:port` → `http://***@host:port`."""
+    if not url:
+        return ""
+    from urllib.parse import urlparse, urlunparse
+    p = urlparse(url)
+    if p.password or p.username:
+        netloc = "***@" + (p.hostname or "")
+        if p.port:
+            netloc += f":{p.port}"
+        return urlunparse((p.scheme, netloc, p.path, p.params, p.query, p.fragment))
+    return url
+
+
 def _need_session(daemon):
     if daemon.session is None:
         raise RuntimeError("no browser session — run `patchium start` or `patchium attach` first")
@@ -177,6 +192,11 @@ def register_all(daemon) -> None:
         Use `start --session NAME` (or `session_start`) to actually launch.
         Idempotent: re-creating an existing session is a no-op that reports
         `created=false, exists=true`.
+
+        Wave 6.1b: if PATCHIUM_WARM ∈ {opportunistic, both} (default both),
+        also schedules a background Chrome pre-spawn at this profile dir so
+        a subsequent `start` call finds it warm. Pass `prewarm=false` to opt
+        out per-call.
         """
         name = args.get("name")
         if not name or "/" in name or name.startswith("."):
@@ -184,10 +204,14 @@ def register_all(daemon) -> None:
         p = PROFILES_DIR / name
         existed = p.exists()
         p.mkdir(parents=True, exist_ok=True)
+        prewarm_requested = args.get("prewarm", True)
+        if prewarm_requested and not d.registry.has(name):
+            d.registry.schedule_prewarm(name, p, headless=bool(args.get("headless", False)))
         return {
             "created": not existed, "exists": existed, "name": name,
             "path": str(p), "profile_dir": str(p),
             "running": d.registry.has(name),
+            "prewarm_scheduled": prewarm_requested,
         }
 
     @daemon.handler("session_list")
@@ -226,6 +250,370 @@ def register_all(daemon) -> None:
     async def _session_close_all(d, args):
         n = await d.registry.close_all()
         return {"closed": n}
+
+    # ─── Wave 6.3a: credential vault + TOTP ────────────────────────────
+
+    @daemon.handler("secret_init")
+    async def _secret_init(d, args):
+        """Provision the vault key in the OS keyring (or print to stdout for
+        env-var setups). Returns the base64 key only if `print_key=true` is
+        passed — by default just confirms storage."""
+        from .. import secrets as _secrets
+        info = _secrets.init_vault_key(prefer=args.get("prefer", "keyring"))
+        if not args.get("print_key"):
+            info = {"stored_in": info["stored_in"]}
+        else:
+            info["warning"] = "key in response — store securely + redact from logs"
+        return info
+
+    @daemon.handler("secret_set")
+    async def _secret_set(d, args):
+        """Store a secret. Logs site+key but never the value."""
+        from .. import secrets as _secrets
+        site = args["site"]
+        key = args["key"]
+        value = args["value"]
+        if not (site and key and value):
+            raise ValueError("secret_set requires site, key, value")
+        _secrets.set_secret(site, key, value)
+        # NEVER include value in response
+        return {"set": True, "site": site, "key": key}
+
+    @daemon.handler("secret_list")
+    async def _secret_list(d, args):
+        """List secrets (MASKED). Returns {site: {key: '<set>'}}."""
+        from .. import secrets as _secrets
+        return {"sites": _secrets.list_secrets(args.get("site"))}
+
+    @daemon.handler("secret_delete")
+    async def _secret_delete(d, args):
+        from .. import secrets as _secrets
+        site = args["site"]
+        key = args.get("key")
+        deleted = _secrets.delete_secret(site, key)
+        return {"deleted": deleted, "site": site, "key": key}
+
+    @daemon.handler("secret_totp")
+    async def _secret_totp(d, args):
+        """Compute the current TOTP for a site's stored totp-seed.
+
+        Used internally by `fill --use-secret site:totp`. Also exposed so
+        callers can verify a TOTP setup without filling a form.
+        """
+        from .. import secrets as _secrets
+        site = args["site"]
+        seed = _secrets.get_secret(site, "totp-seed")
+        if not seed:
+            raise KeyError(f"no totp-seed set for site {site!r}")
+        return {"site": site, "code": _secrets.totp(seed)}
+
+    @daemon.handler("wait_email_code")
+    async def _wait_email_code(d, args):
+        """Poll the IMAP mailbox configured in site's `email-poll` secret
+        and return the matched code.
+
+        `timeout`: total seconds to wait (default 60).
+        `max_age`: skip messages older than this (default 300s).
+        `mark_read`: consume the message after extracting the code.
+        """
+        from .. import secrets as _secrets
+        site = args["site"]
+        url = _secrets.get_secret(site, "email-poll")
+        if not url:
+            raise KeyError(f"no email-poll configured for site {site!r}")
+        cfg = _secrets.parse_email_poll_url(url)
+        # Run the blocking IMAP poller in a worker thread so we don't block
+        # the daemon event loop.
+        import asyncio as _aio
+        code = await _aio.to_thread(
+            _secrets.wait_for_email_code, cfg,
+            timeout=int(args.get("timeout", 60)),
+            max_age_s=int(args.get("max_age", 300)),
+            mark_read=bool(args.get("mark_read", False)),
+        )
+        if code is None:
+            raise TimeoutError(f"no matching email for {site!r} within timeout")
+        return {"site": site, "code": code}
+
+    # ─── Wave 6.2a: per-session proxy ──────────────────────────────────
+
+    @daemon.handler("proxy_set")
+    async def _proxy_set(d, args):
+        """Persist a proxy URL for the current session. Takes effect on next start.
+
+        URL forms:
+          http://user:pass@host:port
+          socks5://user:pass@host:port
+          brightdata://customer-id:password@zone-name?country=us&session-id=X
+          iproyal://user:pass@geo.iproyal.com:12321?country=us&sticky=7d
+          decodo://user:pass@gate.decodo.com:7000?country=us
+        """
+        from ..proxy import save_session_proxy, parse as _parse, load_proxy_file
+        from .registry import current_session_ctx as _ctx
+        url = args.get("url")
+        path = args.get("path")
+        if path:
+            url = load_proxy_file(path)
+        if not url:
+            raise ValueError("proxy_set requires url= or path=")
+        # Validate before persisting (raises ProxyParseError on bad URL)
+        _parse(url)
+        sname = _ctx.get()
+        from .paths import PROFILES_DIR, session_dir as _sd
+        # Use the in-memory profile_dir if session is running, else resolve from disk
+        entry = d.registry.get(sname)
+        pdir = entry.profile_dir if entry else _sd(sname)
+        save_session_proxy(pdir, url)
+        return {"set": True, "session": sname, "url_preview": _mask_url(url),
+                "note": "takes effect on next `start` (close session first if running)"}
+
+    @daemon.handler("proxy_clear")
+    async def _proxy_clear(d, args):
+        from ..proxy import save_session_proxy
+        from .registry import current_session_ctx as _ctx
+        from .paths import session_dir as _sd
+        sname = _ctx.get()
+        entry = d.registry.get(sname)
+        pdir = entry.profile_dir if entry else _sd(sname)
+        save_session_proxy(pdir, None)
+        return {"cleared": True, "session": sname}
+
+    @daemon.handler("proxy_info")
+    async def _proxy_info(d, args):
+        """Report what proxy is configured + (if session running) the exit IP."""
+        from ..proxy import load_session_proxy, parse as _parse
+        from .registry import current_session_ctx as _ctx
+        from .paths import session_dir as _sd
+        sname = _ctx.get()
+        entry = d.registry.get(sname)
+        pdir = entry.profile_dir if entry else _sd(sname)
+        url = load_session_proxy(pdir)
+        out = {"session": sname, "configured": bool(url),
+               "url_preview": _mask_url(url) if url else None}
+        if url:
+            try:
+                cfg = _parse(url)
+                out["server"] = cfg.get("server")
+                out["has_auth"] = bool(cfg.get("username"))
+            except Exception as exc:  # noqa: BLE001
+                out["parse_error"] = str(exc)
+        # If session is running, probe ipify.org through the browser
+        if entry is not None:
+            try:
+                import time as _t
+                t0 = _t.time()
+                # Use a fresh page to avoid polluting the user's active page
+                page = await entry.session.context.new_page()
+                try:
+                    await page.goto("https://api.ipify.org?format=json",
+                                     timeout=10_000, wait_until="domcontentloaded")
+                    body = await page.evaluate("() => document.body.innerText")
+                    import json as _json
+                    parsed = _json.loads(body)
+                    out["exit_ip"] = parsed.get("ip")
+                    out["latency_ms"] = int((_t.time() - t0) * 1000)
+                finally:
+                    await page.close()
+            except Exception as exc:  # noqa: BLE001
+                out["exit_ip_error"] = str(exc)
+        return out
+
+    # ─── Wave 6.1c: session checkpoint / restore ───────────────────────
+
+    @daemon.handler("checkpoint_save")
+    async def _checkpoint_save(d, args):
+        """Snapshot the current session: tabs (url + scroll_y + title) +
+        storage_state (cookies + LS + SS) + viewport. Writes to
+        <profile_dir>/checkpoints/<name>.json.
+
+        For a session that's currently logged in, a checkpoint captures
+        everything needed to recreate the same logged-in state later, even
+        in a different session.
+        """
+        import json as _json
+        import time as _time
+        from .registry import current_session_ctx as _ctx
+        name = args.get("name") or "default"
+        sname = _ctx.get()
+        entry = d.registry.get(sname)
+        if entry is None:
+            raise RuntimeError(f"no running session {sname!r}")
+        s = entry.session
+        # Capture tabs
+        tabs = []
+        for p in s.context.pages:
+            if p.is_closed():
+                continue
+            try:
+                title = await p.title()
+            except Exception:  # noqa: BLE001
+                title = ""
+            try:
+                scroll_y = await p.evaluate("() => window.scrollY")
+            except Exception:  # noqa: BLE001
+                scroll_y = 0
+            tabs.append({"url": p.url, "title": title, "scroll_y": scroll_y})
+        # Capture storage state (cookies + per-origin LS/SS)
+        storage_state = await s.context.storage_state()
+        # Viewport
+        viewport = s.page.viewport_size or {}
+        doc = {
+            "version": 1,
+            "ts": _time.time(),
+            "session_source": sname,
+            "viewport": viewport,
+            "tabs": tabs,
+            "storage_state": storage_state,
+        }
+        cp_dir = entry.profile_dir / "checkpoints"
+        cp_dir.mkdir(parents=True, exist_ok=True)
+        path = cp_dir / f"{name}.json"
+        path.write_text(_json.dumps(doc, indent=2))
+        return {"saved": True, "name": name, "path": str(path),
+                "tabs": len(tabs), "cookies": len(storage_state.get("cookies", [])),
+                "bytes": path.stat().st_size}
+
+    @daemon.handler("checkpoint_load")
+    async def _checkpoint_load(d, args):
+        """Restore a checkpoint into the current session.
+
+        Apply storage_state, re-open tabs, restore viewport. The checkpoint's
+        source session is recorded so cross-session loads can be detected
+        (e.g. loading a 'work' checkpoint into 'work-2' for a clone).
+
+        Cross-tab restoration strategy:
+          - Close all currently-open tabs except the first
+          - Navigate the first to the saved tab[0].url
+          - For tabs[1:], open new pages and navigate them
+          - Apply scroll position last (per tab)
+        """
+        import json as _json
+        from .registry import current_session_ctx as _ctx
+        name = args.get("name") or "default"
+        from_session = args.get("from_session")  # optional: load from another session's profile
+
+        sname = _ctx.get()
+        entry = d.registry.get(sname)
+        if entry is None:
+            raise RuntimeError(f"no running session {sname!r}")
+        s = entry.session
+
+        # Resolve checkpoint path: by default look in current session's profile;
+        # `from_session` reads from a different session's profile dir.
+        if from_session:
+            src_entry = d.registry.get(from_session)
+            if src_entry is None:
+                from .paths import PROFILES_DIR
+                src_dir = PROFILES_DIR / from_session
+            else:
+                src_dir = src_entry.profile_dir
+        else:
+            src_dir = entry.profile_dir
+        cp_path = src_dir / "checkpoints" / f"{name}.json"
+        if not cp_path.exists():
+            raise FileNotFoundError(f"no checkpoint {name!r} at {cp_path}")
+        doc = _json.loads(cp_path.read_text())
+
+        # 1. Apply storage_state via the existing restore handler logic.
+        await d._handlers["storage_restore"](d, {"state": doc.get("storage_state", {})})
+
+        # 2. Tabs
+        tabs = doc.get("tabs", [])
+        if tabs:
+            # Close all tabs except the first one
+            for p in list(s.context.pages)[1:]:
+                try:
+                    await p.close()
+                except Exception:  # noqa: BLE001
+                    pass
+            # Navigate the first tab
+            first = s.context.pages[0] if s.context.pages else await s.context.new_page()
+            s.page = first
+            try:
+                await first.goto(tabs[0]["url"], wait_until="domcontentloaded",
+                                  timeout=30_000)
+                if tabs[0].get("scroll_y"):
+                    await first.evaluate(f"() => window.scrollTo(0, {int(tabs[0]['scroll_y'])})")
+            except Exception:  # noqa: BLE001
+                pass
+            # Open additional tabs
+            for tab in tabs[1:]:
+                np = await s.context.new_page()
+                try:
+                    await np.goto(tab["url"], wait_until="domcontentloaded",
+                                   timeout=30_000)
+                    if tab.get("scroll_y"):
+                        await np.evaluate(f"() => window.scrollTo(0, {int(tab['scroll_y'])})")
+                except Exception:  # noqa: BLE001
+                    pass
+
+        # 3. Viewport
+        vp = doc.get("viewport") or {}
+        if vp.get("width") and vp.get("height"):
+            try:
+                await s.page.set_viewport_size({"width": int(vp["width"]),
+                                                  "height": int(vp["height"])})
+            except Exception:  # noqa: BLE001
+                pass
+
+        _invalidate_snapshot(d)
+        return {
+            "loaded": True, "name": name,
+            "tabs_restored": len(tabs),
+            "from_session": doc.get("session_source", from_session or sname),
+            "to_session": sname,
+        }
+
+    @daemon.handler("checkpoint_list")
+    async def _checkpoint_list(d, args):
+        """List checkpoints for the current (or named) session."""
+        import json as _json
+        from_session = args.get("from_session")
+        from .registry import current_session_ctx as _ctx
+        sname = from_session or _ctx.get()
+        if from_session:
+            from .paths import PROFILES_DIR
+            cp_dir = PROFILES_DIR / from_session / "checkpoints"
+        else:
+            entry = d.registry.get(sname)
+            if entry is None:
+                from .paths import PROFILES_DIR
+                cp_dir = PROFILES_DIR / sname / "checkpoints"
+            else:
+                cp_dir = entry.profile_dir / "checkpoints"
+        if not cp_dir.exists():
+            return {"session": sname, "checkpoints": []}
+        out = []
+        for f in sorted(cp_dir.glob("*.json")):
+            try:
+                doc = _json.loads(f.read_text())
+                out.append({
+                    "name": f.stem, "ts": doc.get("ts"),
+                    "tabs": len(doc.get("tabs", [])),
+                    "cookies": len(doc.get("storage_state", {}).get("cookies", [])),
+                    "bytes": f.stat().st_size,
+                })
+            except Exception:  # noqa: BLE001
+                pass
+        return {"session": sname, "checkpoints": out}
+
+    @daemon.handler("checkpoint_delete")
+    async def _checkpoint_delete(d, args):
+        name = args.get("name")
+        if not name:
+            raise ValueError("checkpoint_delete requires a name")
+        from .registry import current_session_ctx as _ctx
+        sname = _ctx.get()
+        entry = d.registry.get(sname)
+        if entry is None:
+            from .paths import PROFILES_DIR
+            cp = PROFILES_DIR / sname / "checkpoints" / f"{name}.json"
+        else:
+            cp = entry.profile_dir / "checkpoints" / f"{name}.json"
+        if not cp.exists():
+            return {"deleted": False, "name": name}
+        cp.unlink()
+        return {"deleted": True, "name": name}
 
     @daemon.handler("session_delete")
     async def _session_delete(d, args):
@@ -509,7 +897,17 @@ def register_all(daemon) -> None:
 
     @daemon.handler("fill")
     async def _fill(d, args):
+        """Fill an input. Wave 6.3a: `use_secret: 'site:key'` resolves the
+        secret from the vault at fill time. The resolved value NEVER appears
+        in the response, the daemon log, or any cache."""
         loc = _resolve_target(d, args["target"])
+        if args.get("use_secret"):
+            from .. import secrets as _secrets
+            ref = args["use_secret"]
+            value = _secrets.resolve_secret_reference(ref)
+            # Use a plain fill but mask the value from any logging
+            await loc.fill(value, timeout=int(args.get("timeout_ms", 30_000)))
+            return {"filled": args["target"], "from_secret": ref}
         await loc.fill(args["text"], timeout=int(args.get("timeout_ms", 30_000)))
         return {"filled": args["target"]}
 

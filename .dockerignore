@@ -1,0 +1,21 @@
+# Keep the Docker build context lean.
+.git/
+.github/
+.venv/
+.pytest_cache/
+dist/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+tests/__pycache__/
+tests/fixtures/*.png
+tests/fixtures/*.har
+node_modules/
+.DS_Store
+*.log
+.env
+.envrc
+
+# Don't ship the Wave 5 / 6 handoff drafts inside the image
+*.session-handoff*.md
