@@ -31,7 +31,11 @@ jobs:
       - name: Install patchium + extras
         run: |
           python -m pip install -U pip
-          pip install -e ".[annotate]"
+          # [all] = annotate + llm + liveview + secrets + rest. Required so
+          # the vault, live-view, and REST tests can actually run rather than
+          # crashing on ModuleNotFoundError. GPL/AGPL extras (stealth-mouse,
+          # nodriver) remain opt-in and are not exercised by the CI suite.
+          pip install -e ".[all]"
           pip install pytest pytest-asyncio pytest-timeout
 
       - name: Install patchright Chrome
