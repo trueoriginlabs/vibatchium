@@ -728,10 +728,11 @@ def register_extra(daemon) -> None:
             pass
 
         # Write HAR file
+        from .. import __version__ as _pv
         har_doc = {
             "log": {
                 "version": "1.2",
-                "creator": {"name": "patchium", "version": "0.1.0"},
+                "creator": {"name": "patchium", "version": _pv},
                 "browser": {"name": "Chrome", "version": ""},
                 "pages": [],  # we don't track page boundaries here — could add
                 "entries": [{k: v for k, v in e.items() if not k.startswith("_")}
@@ -961,31 +962,191 @@ def register_extra(daemon) -> None:
     async def _act(d, args):
         """Execute a previously-observed (or freshly-computed) plan.
 
-        Passes daemon to observe so the snapshot gets cached for ref resolution
-        in the dispatched verbs below.
+        Wave 5.3 self-heal: on cache hit, prefer the step's `_durable` selector
+        (role+name) over the snapshot-specific @eN. If the durable selector
+        fails (page changed), invalidate the cache, re-observe, retry once
+        with the fresh plan. Reduces LLM calls for repeated intents on stable
+        pages; gracefully recovers when pages drift.
+
+        Returns include `via: durable|ref|self_healed` per step so callers
+        can see how each action resolved.
         """
         s = _session(d)
         intent = args["intent"]
         use_llm = bool(args.get("llm", False))
+
         result = await _observe_mod.observe(s.page, intent, use_llm=use_llm,
                                             force_refresh=False, daemon=d)
         plan = result.get("plan") or []
         if not plan:
             return {"executed": 0, "intent": intent, "reason": "empty plan"}
 
-        executed = []
-        for step in plan:
+        async def _do_step(step: dict, prefer_durable: bool) -> tuple:
+            """Run one step. Return (inner_result, via_label).
+
+            On cache hit (`prefer_durable=True`):
+              - Try the durable role+name selector with a TIGHT 3s timeout
+                (cache is supposed to "just work"; slow = page changed).
+              - On failure, raise — caller triggers self-heal (re-observe)
+                rather than falling back to the snapshot-specific @eN, which
+                is stale after navigation/mutation.
+
+            On cache miss (`prefer_durable=False`):
+              - Use the @eN ref directly with the verb's default timeout.
+                The snapshot was just taken in observe(), so @eN is fresh.
+            """
             verb = step["verb"]
-            target = step["target"]
-            handler_name = verb
-            args_for = {"target": target}
+            base_args = {"target": step["target"]}
             if verb == "fill" and "text" in step:
-                args_for["text"] = step["text"]
-            # dispatch via the daemon's already-registered handlers
-            inner = await d._handlers[handler_name](d, args_for)
-            executed.append({"step": step, "result": inner})
-        return {"executed": len(executed), "intent": intent,
-                "source": result.get("source"), "steps": executed}
+                base_args["text"] = step["text"]
+            if prefer_durable:
+                durable = step.get("_durable")
+                if not durable:
+                    # Cache hit but no durable info — happens for plans saved
+                    # before Wave 5.3. Force self-heal.
+                    raise RuntimeError("cached plan lacks durable selector")
+                return (
+                    await d._handlers[verb](d, {**base_args, "target": durable,
+                                               "timeout_ms": 3_000}),
+                    "durable",
+                )
+            return (await d._handlers[verb](d, base_args), "ref")
+
+        executed = []
+        self_healed = False
+        cached = bool(result.get("cached"))
+        i = 0
+        while i < len(plan):
+            step = plan[i]
+            try:
+                inner, via = await _do_step(step, prefer_durable=cached)
+                executed.append({"step": step, "result": inner, "via": via})
+                i += 1
+            except Exception as exc:  # noqa: BLE001
+                # First failure on a cached plan → invalidate + re-observe + retry once.
+                if cached and not self_healed:
+                    self_healed = True
+                    _observe_mod.cache_invalidate(s.page.url, intent)
+                    fresh = await _observe_mod.observe(
+                        s.page, intent, use_llm=use_llm,
+                        force_refresh=True, daemon=d,
+                    )
+                    fresh_plan = fresh.get("plan") or []
+                    if not fresh_plan:
+                        executed.append({"step": step, "error": str(exc),
+                                         "self_heal": "no_fresh_plan"})
+                        break
+                    # Swap to fresh plan, retry from index i (re-aligning if length differs).
+                    plan = fresh_plan
+                    result = fresh
+                    cached = False
+                    if i >= len(plan):
+                        i = 0  # short fresh plan — start over
+                    continue
+                # Already self-healed or never cached → terminal failure.
+                executed.append({"step": step, "error": str(exc)})
+                break
+
+        return {
+            "executed": len(executed),
+            "intent": intent,
+            "source": result.get("source"),
+            "self_healed": self_healed,
+            "steps": executed,
+        }
+
+    # ─── Wave 5.4b: fingerprint scorer ───────────────────────────────────
+
+    @daemon.handler("fingerprint")
+    async def _fingerprint(d, args):
+        """Open a bot-detection target and extract a numeric stealth score.
+
+        Built-in targets:
+          sannysoft  → bot.sannysoft.com (counts passed rows in the WebDriver table)
+          creepjs    → abrahamjuliot.github.io/creepjs (trust score 0..100)
+          brotector  → kaliiiiiiiiii.github.io/brotector (leak count, lower = better)
+
+        Also accepts a raw URL via `--target https://...` plus an optional
+        `--extract <js>` expression to override the score extraction.
+
+        Returns:
+          {target, url, backend, score, raw_signals}
+        """
+        s = _session(d)
+        target = args.get("target", "sannysoft").lower()
+        custom_url = args.get("url")
+        custom_extract = args.get("extract")
+        settle_ms = int(args.get("settle_ms", 5_000))
+
+        BUILTINS = {
+            "sannysoft": {
+                "url": "https://bot.sannysoft.com/",
+                "extract": """() => {
+                    // Sannysoft has multiple test tables; count green vs red cells.
+                    const cells = Array.from(document.querySelectorAll('td'));
+                    const green = cells.filter(c => /rgb\\(0,\\s?255/.test(getComputedStyle(c).backgroundColor) || c.classList.contains('passed')).length;
+                    const red = cells.filter(c => /rgb\\(255,\\s?0/.test(getComputedStyle(c).backgroundColor) || c.classList.contains('failed')).length;
+                    const total = green + red;
+                    return {
+                        score: total ? Math.round(100 * green / total) : null,
+                        passed: green, failed: red, total,
+                    };
+                }""",
+            },
+            "creepjs": {
+                "url": "https://abrahamjuliot.github.io/creepjs/",
+                "extract": """() => {
+                    // CreepJS renders a trust score percent like "47.5%" near the top
+                    const m = document.body.innerText.match(/(\\d{1,3}(?:\\.\\d+)?)\\s*%/);
+                    const score = m ? parseFloat(m[1]) : null;
+                    const lies_el = document.body.innerText.match(/(\\d+)\\s+lies/i);
+                    return {score, lies: lies_el ? parseInt(lies_el[1]) : null};
+                }""",
+            },
+            "brotector": {
+                "url": "https://kaliiiiiiiiii-vinyzu.github.io/Brotector/",
+                "extract": """() => {
+                    // Brotector lists detection signals; count those that fired.
+                    const fired = document.querySelectorAll('.detection-fired, [data-fired="true"]').length;
+                    const all = document.querySelectorAll('.detection, [data-test]').length;
+                    return {
+                        score: all ? Math.round(100 * (1 - fired / all)) : null,
+                        fired, total: all,
+                    };
+                }""",
+            },
+        }
+
+        if custom_url:
+            url = custom_url
+            extract_js = custom_extract or "() => ({raw: document.title})"
+        else:
+            spec = BUILTINS.get(target)
+            if spec is None:
+                raise ValueError(
+                    f"unknown fingerprint target {target!r}; "
+                    f"built-ins: {sorted(BUILTINS)}; or pass `url`"
+                )
+            url = spec["url"]
+            extract_js = custom_extract or spec["extract"]
+
+        await s.page.goto(url, wait_until="networkidle", timeout=60_000)
+        # Let JS detection scripts settle
+        await asyncio.sleep(settle_ms / 1000)
+        signals = await s.page.evaluate(extract_js)
+
+        # Backend tag from session entry (set by registry.create)
+        from .registry import current_session_ctx as _ctx
+        entry = d.registry.get(_ctx.get())
+        backend = entry.flags.get("backend") if entry else None
+
+        return {
+            "target": target,
+            "url": url,
+            "backend": backend,
+            "score": signals.get("score") if isinstance(signals, dict) else None,
+            "signals": signals,
+        }
 
     # ─── compact map render ──────────────────────────────────────────────
 

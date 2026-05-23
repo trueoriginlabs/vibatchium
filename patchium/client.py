@@ -72,16 +72,37 @@ def spawn_daemon(wait: float = 5.0) -> None:
     raise DaemonError(f"daemon did not come up within {wait}s")
 
 
-def call(cmd: str, args: dict[str, Any] | None = None, *, auto_spawn: bool = True, timeout: float = 120.0) -> Any:
-    """RPC call. If daemon isn't running and auto_spawn=True, spawn it first."""
+def call(cmd: str, args: dict[str, Any] | None = None, *,
+         session: str | None = None,
+         auto_spawn: bool = True, timeout: float = 120.0) -> Any:
+    """RPC call. If daemon isn't running and auto_spawn=True, spawn it first.
+
+    Args:
+      cmd: daemon verb name.
+      args: verb args dict.
+      session: target session name. None = active session (server-side default).
+               Sent as the special `_session` field — the daemon's dispatcher
+               consumes it before invoking the handler.
+      auto_spawn: spawn the daemon if it isn't running.
+      timeout: socket read timeout.
+    """
     if not daemon_is_running():
         if not auto_spawn:
             raise DaemonNotRunning("daemon not running (auto_spawn=False)")
         spawn_daemon()
 
+    payload_args = dict(args or {})
+    # Resolution: explicit kwarg → PATCHIUM_SESSION env → (omitted; daemon uses
+    # active-session file → 'default'). This mirrors `kubectl --context` /
+    # KUBECONFIG semantics.
+    if session is None:
+        session = os.environ.get("PATCHIUM_SESSION") or None
+    if session:
+        payload_args["_session"] = session
+
     s = _connect(timeout=timeout)
     try:
-        req = json.dumps({"id": uuid.uuid4().hex, "cmd": cmd, "args": args or {}}) + "\n"
+        req = json.dumps({"id": uuid.uuid4().hex, "cmd": cmd, "args": payload_args}) + "\n"
         s.sendall(req.encode())
         # readline
         buf = b""

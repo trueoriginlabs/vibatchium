@@ -55,7 +55,12 @@ def local_server():
     handler = lambda *a, **kw: http.server.SimpleHTTPRequestHandler(
         *a, directory=str(FIXTURES_DIR), **kw
     )
-    server = socketserver.TCPServer(("127.0.0.1", 0), handler)
+    # ThreadingTCPServer so multiple Chromes (multi-session tests) can fetch
+    # fixtures concurrently — the single-threaded base class queues requests,
+    # which manifests as Page.goto timeouts when wave5_sessions creates several
+    # sessions and they all hit the local server at once.
+    server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), handler)
+    server.daemon_threads = True
     port = server.server_address[1]
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()

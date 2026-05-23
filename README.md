@@ -2,7 +2,7 @@
 
 Patchwright stealth backend + Vibium-style LLM-friendly CLI for agentic browser automation.
 
-> **Status: alpha, working.** Cleared HackerOne's Cloudflare wall on a first cold-launch (no manual login, no attach). **76 MCP tools** registered. ~5,000 LoC of Python, 46 tests, all green. (Cloudflare pass-rate is **target-specific** — verified against HackerOne; sites with Cloudflare-UAM, DataDome, Akamai, or Kasada may require `attach` mode or still fail; see "Stealth posture" below.)
+> **Status: 0.2.0 — multi-session, alpha.** Cleared HackerOne's Cloudflare cold-launch. **85 MCP tools** including session management. ~6,500 LoC, 75 tests, all green. **31/31 passed on bot.sannysoft.com** (measured, not estimated). Multi-session model lets N concurrent Chrome processes share one daemon — each with its own profile/cookies/fingerprint.
 
 ## Why patchium
 
@@ -43,6 +43,65 @@ patchium screenshot -o page.png
 patchium storage export -o auth.json          # cookies + LS/SS
 patchium stop
 ```
+
+## Multi-session (Wave 5)
+
+Run N concurrent Chromes from one daemon — independent cookies/storage/fingerprint per session.
+
+```bash
+patchium session new work                     # create work profile dir
+patchium --session work start                 # launch Chrome for it
+patchium --session work go https://github.com
+# (log in interactively once — cookies persist on disk)
+
+patchium session new banking                  # parallel identity
+patchium --session banking start
+patchium --session banking go https://app.bank.com
+
+# Run them concurrently — separate Chromes, no cookie bleed
+patchium --session work click @e3 &
+patchium --session banking fill @e5 "hello" &
+wait
+
+patchium session list                         # see running + on-disk sessions
+patchium session close work                   # stop Chrome; cookies stay on disk
+patchium --session work start                 # reopens with all logins intact
+patchium session delete work                  # destroy profile dir
+```
+
+Resolution order for the active session: `--session FLAG` → `$PATCHIUM_SESSION` env → `~/.config/patchium/active-session` → `default`. Cap N via `PATCHIUM_MAX_SESSIONS=4` (default 4).
+
+## Stealth backends + fingerprint scorer (Wave 5.4)
+
+```bash
+patchium start --backend patchright           # default; 25/31 OK on 2026 Cloudflare benchmark
+patchium start --backend nodriver             # opt-in; 28/31, zero blocks. needs patchium[nodriver]
+patchium fingerprint sannysoft                # measure score against a real detector
+# {"target": "sannysoft", "score": 100, "signals": {"passed": 31, "failed": 0, "total": 31}}
+patchium fingerprint creepjs                  # CreepJS canvas/audio/timing
+patchium fingerprint brotector                # Brotector (Patchright authors' own gauntlet)
+```
+
+When `go` lands on a Cloudflare-walled page, the response surfaces `walled: cloudflare` plus an `advice` field suggesting `--backend nodriver` if you're still on `patchright`.
+
+## MCP capability gating (Wave 5.2)
+
+The full MCP surface is 85 tools. For LLMs that only need basics, gate the surface:
+
+```bash
+patchium mcp                                            # all 85 tools
+patchium mcp --caps=core,session,nav,input,agent        # compact ~30-tool surface
+patchium mcp --caps=core,nav,input,vision,network,storage  # full browsing + capture
+```
+
+Buckets: `core,session,nav,content,input,element,pages,storage,network,dialogs,overrides,vision,devtools,agent,stealth`.
+
+## Self-healing selector cache (Wave 5.3)
+
+`act` caches plans keyed by (url, intent). On cache hit, it tries a durable
+`role[name=...]` selector first (survives DOM mutation) instead of the
+snapshot-specific `@eN`. If the durable selector fails, the cache is
+invalidated and `act` re-observes once — `self_healed: true` in the response.
 
 ## Attach mode — the practical Cloudflare workaround
 

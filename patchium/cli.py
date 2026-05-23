@@ -34,24 +34,45 @@ def _emit(result, json_mode: bool, fallback_key: str | None = None):
 
 @click.group(context_settings={"help_option_names": ["-h", "--help"]})
 @click.option("--json", "json_mode", is_flag=True, help="Emit responses as JSON.")
+@click.option("--session", "session_name", default=None,
+              help="Target session name (also via PATCHIUM_SESSION env). "
+                   "Defaults to the active session on disk → 'default'.")
 @click.version_option(__version__, "--version")
 @click.pass_context
-def cli(ctx: click.Context, json_mode: bool) -> None:
-    """Patchium — agentic browser CLI (Patchwright stealth + Vibium ergonomics)."""
+def cli(ctx: click.Context, json_mode: bool, session_name: str | None) -> None:
+    """Patchium — agentic browser CLI (Patchwright stealth + Vibium ergonomics).
+
+    Multi-session: `patchium --session work click @e3` addresses the 'work'
+    session. Without --session, the active session on disk is used (default
+    'default'). Pin a session for a sub-shell via `export PATCHIUM_SESSION=work`.
+    """
+    import os as _os
     ctx.ensure_object(dict)
     ctx.obj["json"] = json_mode
+    # Export the chosen session via env so client.call() picks it up without
+    # every subcommand needing to thread `session=` explicitly. Done before
+    # any subcommand dispatch.
+    if session_name:
+        _os.environ["PATCHIUM_SESSION"] = session_name
+    ctx.obj["session"] = session_name or _os.environ.get("PATCHIUM_SESSION")
 
 
 # ─── lifecycle ─────────────────────────────────────────────────────────────
 
 @cli.command()
 @click.option("--profile", default=None,
-              help="Profile name or absolute path (defaults to active profile).")
+              help="Profile name or absolute path (defaults to active session/profile).")
 @click.option("--headless", is_flag=True, help="Headless mode (NOT recommended for stealth).")
 @click.option("--stealth-mouse", is_flag=True,
               help="Layer humanized mouse via CDP-Patches (needs patchium[stealth-mouse]).")
+@click.option("--backend", default="patchright",
+              type=click.Choice(["patchright", "nodriver", "auto"]),
+              help="Stealth backend. patchright (default) = current Patchright stack. "
+                   "nodriver = hardened launch via nodriver lib (needs patchium[nodriver]); "
+                   "better on Cloudflare Turnstile interactive challenges per 2026 benchmark. "
+                   "auto = start with patchright, advisory on first wall.")
 @click.pass_context
-def start(ctx, profile, headless, stealth_mouse):
+def start(ctx, profile, headless, stealth_mouse, backend):
     """Start a browser session (cold launch real Chrome + persistent context)."""
     args = {}
     if profile:
@@ -60,6 +81,8 @@ def start(ctx, profile, headless, stealth_mouse):
         args["headless"] = True
     if stealth_mouse:
         args["stealth_mouse"] = True
+    if backend != "patchright":
+        args["backend"] = backend
     _emit(call("start", args), ctx.obj["json"])
 
 
@@ -136,11 +159,96 @@ def install(ctx, skip_chrome):
         click.echo(json.dumps(out, indent=2))
 
 
-# ─── profile ─────────────────────────────────────────────────────────
+# ─── session (Wave 5: multi-session first-class group) ───────────────
+
+@cli.group()
+def session():
+    """Manage concurrent browser sessions (1:1 with profiles).
+
+    Sessions are independent Chrome processes — separate cookies, separate
+    fingerprint, can run in parallel. Each session is tied to a profile dir
+    under ~/.config/patchium/profiles/<name>/ that persists on disk.
+
+    Patterns:
+        patchium session new work               # create work profile dir
+        patchium --session work start           # launch Chrome for it
+        patchium --session work go https://...  # use it
+        patchium session list                   # see running + on-disk
+        patchium session close work             # stop Chrome; keep profile
+        patchium session delete work            # destroy profile dir
+    """
+
+
+@session.command("new")
+@click.argument("name")
+@click.pass_context
+def session_new(ctx, name):
+    """Create a new session/profile dir. Does NOT launch Chrome — run
+    `patchium --session NAME start` to actually open."""
+    _emit(call("session_new", {"name": name}), ctx.obj["json"])
+
+
+@session.command("list")
+@click.pass_context
+def session_list_cmd(ctx):
+    """List every on-disk session + whether it's running."""
+    res = call("session_list")
+    if ctx.obj["json"]:
+        _emit(res, True)
+        return
+    click.echo(f"active: {res['active']}")
+    for s in res["sessions"]:
+        marker = "*" if s["name"] == res["active"] else " "
+        running = "[running]" if s["running"] else "[stopped]"
+        url = f" url={s.get('url')}" if s.get("url") else ""
+        click.echo(f"{marker} {s['name']:24s} {running}{url}")
+
+
+@session.command("use")
+@click.argument("name")
+@click.pass_context
+def session_use(ctx, name):
+    """Set the active session for subsequent CLI calls (no --session needed)."""
+    _emit(call("session_use", {"name": name}), ctx.obj["json"])
+
+
+@session.command("switch")
+@click.argument("name")
+@click.pass_context
+def session_switch(ctx, name):
+    """Alias for `session use`."""
+    _emit(call("session_switch", {"name": name}), ctx.obj["json"])
+
+
+@session.command("close")
+@click.argument("name", required=False)
+@click.option("--all", "close_all", is_flag=True, help="Close every running session.")
+@click.pass_context
+def session_close(ctx, name, close_all):
+    """Stop Chrome for one session (or --all). Profile dir is preserved."""
+    if close_all:
+        _emit(call("session_close_all"), ctx.obj["json"])
+        return
+    if not name:
+        # default to the active session
+        name = ctx.obj.get("session")
+    _emit(call("session_close", {"name": name} if name else {}), ctx.obj["json"])
+
+
+@session.command("delete")
+@click.argument("name")
+@click.confirmation_option(prompt="really delete this profile dir?")
+@click.pass_context
+def session_delete(ctx, name):
+    """Delete the on-disk profile dir (cannot delete active or 'default')."""
+    _emit(call("session_delete", {"name": name}), ctx.obj["json"])
+
+
+# ─── profile (legacy aliases — kept for backwards compat) ────────────
 
 @cli.group()
 def profile():
-    """Manage named browser profiles (cookies/storage/identity isolation)."""
+    """Manage named browser profiles. Aliased to `session` (1:1 model)."""
 
 
 @profile.command("list")
@@ -1090,13 +1198,49 @@ def logs(ctx, lines, follow):
     _sub.call(cmd)
 
 
+# ─── Wave 5.4b: fingerprint scorer ────────────────────────────────────────
+
+@cli.command()
+@click.argument("target", default="sannysoft")
+@click.option("--url", default=None, help="Override the URL (for custom detectors).")
+@click.option("--extract", default=None,
+              help="JS expression to extract score (for custom detectors).")
+@click.option("--settle-ms", default=5000, type=int,
+              help="Ms to wait after networkidle for JS to render the report.")
+@click.pass_context
+def fingerprint(ctx, target, url, extract, settle_ms):
+    """Open a bot-detection page and extract a numeric stealth score.
+
+    Built-in TARGETs:
+      sannysoft  — bot.sannysoft.com
+      creepjs    — CreepJS canvas/audio/timing detector
+      brotector  — Brotector (Patchright authors' own gauntlet)
+
+    Use to replace the README's '70-90%' guesses with measured numbers per
+    backend. Run with `--backend nodriver` (via `patchium start --backend ...`)
+    to compare stealth stacks on the same target.
+    """
+    args = {"target": target, "settle_ms": settle_ms}
+    if url:
+        args["url"] = url
+    if extract:
+        args["extract"] = extract
+    _emit(call("fingerprint", args), ctx.obj["json"])
+
+
 # ─── MCP server ───────────────────────────────────────────────────────────
 
 @cli.command()
-def mcp():
+@click.option("--caps", default=None,
+              help="Comma-separated capability list to expose "
+                   "(default: all). Available: core,session,nav,content,input,"
+                   "element,pages,storage,network,dialogs,overrides,vision,"
+                   "devtools,agent. Example: `--caps=core,session,nav,input,agent` "
+                   "exposes only the basics (cuts prompt-token tax for LLMs).")
+def mcp(caps):
     """Run the MCP server (stdio JSON-RPC) — wires every CLI verb as an MCP tool."""
     from .mcp_server import _entrypoint
-    _entrypoint()
+    _entrypoint(caps=caps)
 
 
 # ─── pages ────────────────────────────────────────────────────────────────

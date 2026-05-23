@@ -12,12 +12,13 @@ import tempfile
 from pathlib import Path
 
 from . import elements
-from .browser import attach_session, close_session, launch_session
 from .paths import (
-    DEFAULT_PROFILE_DIR, PROFILES_DIR, ACTIVE_PROFILE_PATH,
+    DEFAULT_PROFILE_DIR, DEFAULT_SESSION_NAME, PROFILES_DIR, ACTIVE_PROFILE_PATH,
     get_active_profile_dir, get_active_profile_name,
-    set_active_profile_name, list_profile_names,
+    get_active_session_name, list_profile_names, list_session_names,
+    session_dir, set_active_profile_name, set_active_session_name,
 )
+from .registry import current_session_ctx
 
 log = logging.getLogger("patchium.handlers")
 
@@ -104,97 +105,199 @@ def register_all(daemon) -> None:
 
     @daemon.handler("start")
     async def _start(d, args):
-        if d.session is not None:
-            return {"already_started": True, "mode": d.session.mode}
-        # If `profile` is an absolute path, use it; if a bare name, resolve via
-        # the profile registry; otherwise use the active profile.
+        """Launch Chrome for a session.
+
+        Session resolution: dispatcher already set `current_session_ctx` from
+        the request's `_session` field (or active-session file → 'default').
+
+        Profile resolution:
+          - `profile=<abs-path>`  → use that dir as user-data-dir (test/ephemeral)
+          - `profile=<bare-name>` → PROFILES_DIR/<name>; also adopts that as session name
+                                    if the caller didn't pass `_session` explicitly
+          - neither               → session_dir(<session_name>)
+        """
+        name = current_session_ctx.get()
         raw = args.get("profile")
         if raw:
             p = Path(raw)
-            profile_dir = p if p.is_absolute() else (PROFILES_DIR / raw)
+            if p.is_absolute():
+                profile_dir = p
+            else:
+                # bare name → also makes that the session name (so the user can do
+                # `patchium start --profile work` and address it later as `--session work`)
+                if name == DEFAULT_SESSION_NAME:
+                    name = raw
+                profile_dir = PROFILES_DIR / raw
         else:
-            profile_dir = get_active_profile_dir()
-        profile_dir.mkdir(parents=True, exist_ok=True)
+            profile_dir = session_dir(name)
+
+        if d.registry.has(name):
+            entry = d.registry.get(name)
+            return {"already_started": True, "mode": entry.session.mode,
+                    "session": name, "profile": str(entry.profile_dir)}
+
         headless = bool(args.get("headless", False))
-        d.session = await launch_session(profile_dir, headless=headless)
+        stealth_mouse = bool(args.get("stealth_mouse"))
+        backend = args.get("backend") or "patchright"
+        try:
+            entry = await d.registry.create(
+                name, profile_dir=profile_dir, headless=headless,
+                stealth_mouse=stealth_mouse, backend=backend,
+            )
+        except Exception as exc:
+            # Surface stealth_mouse failures non-fatally, matching the prior
+            # opt-in behavior — if Chrome itself launched OK but stealth_mouse
+            # install failed (e.g. missing CDP-Patches), retry without it.
+            if stealth_mouse and "stealth" in str(exc).lower():
+                entry = await d.registry.create(
+                    name, profile_dir=profile_dir, headless=headless,
+                    stealth_mouse=False, backend=backend,
+                )
+                return {"started": True, "mode": "launch",
+                        "session": name, "profile": str(entry.profile_dir),
+                        "profile_name": entry.profile_dir.name,
+                        "backend": backend,
+                        "stealth_mouse": False, "stealth_mouse_error": str(exc)}
+            raise
 
-        out = {"started": True, "mode": "launch", "profile": str(profile_dir),
-               "profile_name": profile_dir.name}
-
-        # Optional stealth layer: humanized mouse via CDP-Patches
-        if args.get("stealth_mouse"):
-            from ..stealth import install_humanized_mouse
-            try:
-                await install_humanized_mouse(d.session)
-                out["stealth_mouse"] = True
-            except Exception as exc:  # noqa: BLE001
-                out["stealth_mouse"] = False
-                out["stealth_mouse_error"] = str(exc)
-
+        out = {"started": True, "mode": "launch",
+               "session": name, "profile": str(entry.profile_dir),
+               "profile_name": entry.profile_dir.name,
+               "backend": backend}
+        if stealth_mouse:
+            out["stealth_mouse"] = True
         return out
 
-    # ─── profile management ────────────────────────────────────────────
+    # ─── session management ────────────────────────────────────────────
+
+    @daemon.handler("session_new")
+    async def _session_new(d, args):
+        """Create a new on-disk session/profile dir without launching Chrome.
+
+        Use `start --session NAME` (or `session_start`) to actually launch.
+        Idempotent: re-creating an existing session is a no-op that reports
+        `created=false, exists=true`.
+        """
+        name = args.get("name")
+        if not name or "/" in name or name.startswith("."):
+            raise ValueError(f"bad session name: {name!r}")
+        p = PROFILES_DIR / name
+        existed = p.exists()
+        p.mkdir(parents=True, exist_ok=True)
+        return {
+            "created": not existed, "exists": existed, "name": name,
+            "path": str(p), "profile_dir": str(p),
+            "running": d.registry.has(name),
+        }
+
+    @daemon.handler("session_list")
+    async def _session_list(d, args):
+        """List every on-disk session + which are currently running."""
+        return {
+            "active": get_active_session_name(),
+            "sessions": d.registry.list_all(),
+        }
+
+    @daemon.handler("session_use")
+    async def _session_use(d, args):
+        name = args.get("name")
+        if not name:
+            raise ValueError("session_use requires a name")
+        if name not in list_session_names():
+            raise ValueError(
+                f"unknown session: {name!r} — create with `patchium session new {name}`"
+            )
+        set_active_session_name(name)
+        return {"active": name}
+
+    @daemon.handler("session_switch")
+    async def _session_switch(d, args):
+        """Alias for session_use (familiar to users of other automation tools)."""
+        return await d._handlers["session_use"](d, args)
+
+    @daemon.handler("session_close")
+    async def _session_close(d, args):
+        """Stop Chrome for one session; profile dir is preserved on disk."""
+        name = args.get("name") or current_session_ctx.get()
+        closed = await d.registry.close(name)
+        return {"closed": closed, "name": name}
+
+    @daemon.handler("session_close_all")
+    async def _session_close_all(d, args):
+        n = await d.registry.close_all()
+        return {"closed": n}
+
+    @daemon.handler("session_delete")
+    async def _session_delete(d, args):
+        """Delete a profile dir on disk. Refuses if the session is running,
+        active, or is the special 'default'."""
+        name = args.get("name")
+        if not name:
+            raise ValueError("session_delete requires a name")
+        if name == get_active_session_name():
+            raise ValueError(f"session {name!r} is active — switch first")
+        deleted = d.registry.delete_profile_dir(name)
+        return {"deleted": deleted, "name": name}
+
+    # ─── profile management (legacy aliases for session_* ─ 1:1 model) ──
 
     @daemon.handler("profile_list")
     async def _profile_list(d, args):
-        return {"active": get_active_profile_name(), "profiles": list_profile_names()}
+        return {
+            "active": get_active_session_name(),
+            "profiles": list_session_names(),
+        }
 
     @daemon.handler("profile_new")
     async def _profile_new(d, args):
-        name = args["name"]
-        if not name or "/" in name or name.startswith("."):
-            raise ValueError("bad profile name")
-        p = PROFILES_DIR / name
-        if p.exists():
-            return {"created": False, "exists": True, "path": str(p)}
-        p.mkdir(parents=True)
-        return {"created": True, "path": str(p)}
+        return await d._handlers["session_new"](d, args)
 
     @daemon.handler("profile_use")
     async def _profile_use(d, args):
-        name = args["name"]
-        if name not in list_profile_names():
-            raise ValueError(f"unknown profile: {name}")
-        set_active_profile_name(name)
-        return {"active": name, "note": "takes effect on next `start`"}
+        res = await d._handlers["session_use"](d, args)
+        return {**res, "note": "takes effect on next `start`"}
 
     @daemon.handler("profile_delete")
     async def _profile_delete(d, args):
-        import shutil
-        name = args["name"]
-        if name == "default":
-            raise ValueError("cannot delete the default profile")
-        if name == get_active_profile_name():
+        name = args.get("name")
+        if name == get_active_session_name():
             raise ValueError(f"profile {name!r} is active — switch first")
-        p = PROFILES_DIR / name
-        if not p.exists():
-            raise ValueError(f"no such profile: {name}")
-        shutil.rmtree(p)
-        return {"deleted": name}
+        return await d._handlers["session_delete"](d, args)
 
     @daemon.handler("attach")
     async def _attach(d, args):
-        if d.session is not None:
-            raise RuntimeError("session already active — stop first")
+        """Attach to an existing Chrome via CDP and register it as a session."""
+        name = current_session_ctx.get()
+        if d.registry.has(name):
+            raise RuntimeError(f"session {name!r} already active — stop first")
         cdp_url = args.get("cdp_url") or "http://localhost:9222"
-        d.session = await attach_session(cdp_url)
-        return {"attached": True, "mode": "attach", "cdp_url": cdp_url}
+        await d.registry.attach(name, cdp_url)
+        return {"attached": True, "mode": "attach", "cdp_url": cdp_url, "session": name}
 
     @daemon.handler("stop")
     async def _stop(d, args):
-        if d.session is None:
-            return {"already_stopped": True}
-        await close_session(d.session)
-        d.session = None
-        return {"stopped": True}
+        """Stop Chrome for the current session. Daemon stays up.
+
+        Use `session_close NAME` to stop a non-active session, or
+        `session_close_all` to stop everything.
+        """
+        name = current_session_ctx.get()
+        closed = await d.registry.close(name)
+        if not closed:
+            return {"already_stopped": True, "session": name}
+        return {"stopped": True, "session": name}
 
     @daemon.handler("status")
     async def _status(d, args):
-        sess = d.session
+        """Report on the active session + the registry's running set."""
+        name = current_session_ctx.get()
+        entry = d.registry.get(name)
         return {
-            "running": sess is not None,
-            "mode": sess.mode if sess else None,
+            "running": entry is not None,
+            "session": name,
+            "mode": entry.session.mode if entry else None,
             "pid": os.getpid(),
+            "running_sessions": d.registry.list_running(),
         }
 
     @daemon.handler("shutdown")
@@ -207,19 +310,34 @@ def register_all(daemon) -> None:
 
     @daemon.handler("go")
     async def _go(d, args):
+        """Navigate. Wave 5.4: detect Cloudflare/DataDome walls and surface
+        an advisory in the response so callers can switch backends."""
+        from . import backends as _backends
         s = _need_session(d)
         url = args["url"]
         wait_until = args.get("wait_until", "domcontentloaded")
         timeout = int(args.get("timeout_ms", 60_000))
         resp = await s.page.goto(url, wait_until=wait_until, timeout=timeout)
         _invalidate_snapshot(d)
-        # also clear any frame switch — stale frame won't survive navigation
         s.frame_ref = None
-        return {
-            "url": s.page.url,
-            "title": await s.page.title(),
-            "status": resp.status if resp else None,
-        }
+        status = resp.status if resp else None
+        title = await s.page.title()
+        out = {"url": s.page.url, "title": title, "status": status}
+        wall = _backends.is_walled(title, status)
+        if wall:
+            out["walled"] = wall
+            # Hint backend swap if we're still on patchright (nodriver beats
+            # patchright on hardest Cloudflare gates per 2026 benchmark).
+            name = current_session_ctx.get()
+            entry = d.registry.get(name)
+            current_backend = entry.flags.get("backend") if entry else None
+            if current_backend in (None, "patchright"):
+                out["advice"] = (
+                    f"page looks {wall}-walled; try "
+                    f"`patchium session close {name} && "
+                    f"patchium --session {name} start --backend nodriver`"
+                )
+        return out
 
     @daemon.handler("back")
     async def _back(d, args):

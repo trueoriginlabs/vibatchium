@@ -1,12 +1,22 @@
-"""Async Unix-socket JSON-RPC server holding the live Patchwright session.
+"""Async Unix-socket JSON-RPC server holding the live Patchwright session(s).
 
 Protocol: one JSON line per direction.
   request : {"id": "<str>", "cmd": "<verb>", "args": {<verb-specific>}}
   response: {"id": "<str>", "ok": true,  "result": <any>}
          OR {"id": "<str>", "ok": false, "error": "<str>"}
 
+Multi-session (Wave 5+): requests may include `"args": {"_session": "<name>"}`
+to address a specific session. Without the field, the request hits the active
+session (`~/.config/patchium/active-session` → 'default'). The daemon holds
+multiple BrowserSessions concurrently via SessionRegistry, with per-session
+locks so verbs on DIFFERENT sessions don't serialize.
+
+Each session runs in its own Chrome process (separate `launch_persistent_context`)
+giving real fingerprint isolation — independent TLS/GPU/audio, independent
+ephemeral ports. ~200-400 MB RAM per session; cap via PATCHIUM_MAX_SESSIONS.
+
 Clients (CLI, MCP server) connect, send one request, read one response, close.
-The browser session itself is long-lived across many such connections.
+Sessions are long-lived across many such connections.
 """
 from __future__ import annotations
 
@@ -17,52 +27,43 @@ import logging
 import os
 import signal
 import sys
-import traceback
-from pathlib import Path
-from typing import Any, Callable, Awaitable
+from typing import Any, Awaitable, Callable
 
 from . import handlers, handlers_extra
-from .browser import BrowserSession, attach_session, close_session, launch_session
-from .paths import DEFAULT_PROFILE_DIR, LOG_PATH, PID_PATH, SOCK_PATH
+from .paths import DEFAULT_SESSION_NAME, LOG_PATH, PID_PATH, SOCK_PATH, get_active_session_name
+from .registry import SessionEntry, SessionRegistry, current_session_ctx
 
 log = logging.getLogger("patchium.server")
 
 
 class Daemon:
-    # Verbs whose handlers DON'T acquire the global RPC lock. These either
+    # Verbs whose handlers DON'T acquire a per-session lock. These either
     # block on external events (waits) and need to coexist with the action
     # that triggers the event, or they're cheap read-only state queries.
-    # Running them outside the lock means: `patchium wait-response /api/foo` in
-    # one shell while `patchium click @e3` in another shell can fire the request
-    # — neither blocks on the other.
     UNLOCKED_VERBS = frozenset({
         "ping", "status",
         "wait_selector", "wait_ref", "wait_url", "wait_load", "wait_fn",
         "wait_response", "sleep",
     })
 
+    # Verbs that mutate the registry itself (create/destroy sessions, switch
+    # active session, daemon-level queries that don't need a session). These
+    # acquire the registry.mutate_lock instead of a per-session lock.
+    REGISTRY_VERBS = frozenset({
+        "start", "attach", "stop", "shutdown",
+        "session_new", "session_list", "session_use", "session_switch",
+        "session_close", "session_close_all", "session_delete",
+        "profile_list", "profile_new", "profile_use", "profile_delete",
+    })
+
     def __init__(self) -> None:
-        self.session: BrowserSession | None = None
+        self.registry = SessionRegistry()
         self._handlers: dict[str, Callable[[Daemon, dict], Awaitable[Any]]] = {}
         self._stopping = asyncio.Event()
-        # Global RPC lock — serializes mutating verbs so concurrent MCP/CLI clients
-        # don't race on session.page, session.frame_ref, _snapshot, etc.
-        # Patchright/Playwright operations aren't safe to interleave on the same
-        # Page anyway. Wait verbs (see UNLOCKED_VERBS) skip the lock so they
-        # can block on events fired by lock-holding verbs running in parallel.
-        self._lock = asyncio.Lock()
-        # `_snapshot` is the most recent aria_snapshot result; resolves @eN refs.
-        # Cleared on navigation (see _invalidate_snapshot() in handlers.py).
-        self._snapshot = None
-        self._prev_snapshot = None
-        # `_handles` — id (`h_N`) → JSHandle from eval_handle. Disposed on
-        # navigation (same as _snapshot). Allows DOM-handle traversal (shadow
-        # DOM, NodeList, passing elements between calls).
-        self._handles: dict[str, object] = {}
-        self._handle_counter = 0
-        # populated by handlers.register_all() + handlers_extra.register_extra() below
         handlers.register_all(self)
         handlers_extra.register_extra(self)
+
+    # ─── handler registration ────────────────────────────────────────────
 
     def handler(self, name: str):
         def deco(fn):
@@ -70,24 +71,127 @@ class Daemon:
             return fn
         return deco
 
+    # ─── session-routed properties (drop-in replacements for the old single-
+    #     session attributes that handlers still write to)
+    #
+    # The dispatcher sets `current_session_ctx` to the current call's session
+    # name before invoking the handler. These properties read/write the
+    # corresponding SessionEntry's state, so handlers keep using `d.session`,
+    # `d._snapshot`, etc., unchanged.
+
+    def _current_entry(self) -> SessionEntry | None:
+        return self.registry.get(current_session_ctx.get())
+
+    @property
+    def session(self):
+        entry = self._current_entry()
+        return entry.session if entry else None
+
+    @session.setter
+    def session(self, value):
+        # The only writer in legacy code was lifecycle handlers (`start`/`attach`/
+        # `stop`). Those now go through the registry; this setter exists only
+        # to satisfy any remaining attribute writes (notably `d.session = None`
+        # in the old _stop handler — now a no-op).
+        if value is None:
+            name = current_session_ctx.get()
+            entry = self.registry.get(name)
+            if entry is not None:
+                # Caller wanted to "stop" — actually close via the registry.
+                # Schedule and return; sync setter can't await, but
+                # SessionRegistry.close is the explicit path now.
+                pass
+        # Non-None assignments are unused in the new code path.
+
+    @property
+    def _snapshot(self):
+        entry = self._current_entry()
+        return entry.snapshot if entry else None
+
+    @_snapshot.setter
+    def _snapshot(self, value):
+        entry = self._current_entry()
+        if entry is not None:
+            entry.snapshot = value
+
+    @property
+    def _prev_snapshot(self):
+        entry = self._current_entry()
+        return entry.prev_snapshot if entry else None
+
+    @_prev_snapshot.setter
+    def _prev_snapshot(self, value):
+        entry = self._current_entry()
+        if entry is not None:
+            entry.prev_snapshot = value
+
+    @property
+    def _handles(self) -> dict:
+        entry = self._current_entry()
+        if entry is None:
+            # Return a throwaway dict so handlers that do `d._handles[hid] = h`
+            # don't blow up when there's no session — the write will simply be
+            # lost (which matches the "no session" precondition error we'd
+            # raise anyway in the session-needing handler).
+            return {}
+        return entry.handles
+
+    @property
+    def _handle_counter(self) -> int:
+        entry = self._current_entry()
+        return entry.handle_counter if entry else 0
+
+    @_handle_counter.setter
+    def _handle_counter(self, value: int) -> None:
+        entry = self._current_entry()
+        if entry is not None:
+            entry.handle_counter = value
+
+    # ─── dispatch ────────────────────────────────────────────────────────
+
     async def dispatch(self, req: dict) -> dict:
         req_id = req.get("id", "")
         cmd = req.get("cmd")
         args = req.get("args") or {}
+        # Extract + consume the session selector; default to active session.
+        session_name = args.pop("_session", None) or get_active_session_name()
         if cmd not in self._handlers:
             return {"id": req_id, "ok": False, "error": f"unknown command: {cmd}"}
+
+        # Push the selected session into the contextvar so handlers (via the
+        # session-routed properties above) operate on the right SessionEntry.
+        tok = current_session_ctx.set(session_name)
         try:
-            if cmd in self.UNLOCKED_VERBS:
-                # Wait verbs and read-only state queries run without the lock so
-                # they can block on events triggered by lock-holding verbs.
+            if cmd in self.REGISTRY_VERBS:
+                # Registry mutation — serialized by the registry's mutate_lock
+                # so concurrent session_new / start can't race on the dict.
+                async with self.registry.mutate_lock:
+                    result = await self._handlers[cmd](self, args)
+            elif cmd in self.UNLOCKED_VERBS:
+                # Cheap reads + waits — no lock.
                 result = await self._handlers[cmd](self, args)
             else:
-                async with self._lock:
+                # Session-scoped verb — needs the per-session lock so concurrent
+                # mutations on the SAME session don't trash session.page / snapshot.
+                # Different-session mutations run in parallel because each has its own lock.
+                entry = self.registry.get(session_name)
+                if entry is None:
+                    return {
+                        "id": req_id, "ok": False,
+                        "error": f"no session {session_name!r} — "
+                                 f"run `patchium start"
+                                 f"{' --session ' + session_name if session_name != DEFAULT_SESSION_NAME else ''}` first",
+                    }
+                async with entry.lock:
                     result = await self._handlers[cmd](self, args)
             return {"id": req_id, "ok": True, "result": result}
         except Exception as exc:  # noqa: BLE001
-            log.exception("handler %s failed", cmd)
+            log.exception("handler %s failed (session=%s)", cmd, session_name)
             return {"id": req_id, "ok": False, "error": f"{type(exc).__name__}: {exc}"}
+        finally:
+            current_session_ctx.reset(tok)
+
+    # ─── socket plumbing ─────────────────────────────────────────────────
 
     async def handle_conn(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:
@@ -109,9 +213,6 @@ class Daemon:
 
     async def run(self) -> None:
         if SOCK_PATH.exists():
-            # check if a live daemon is already using it; catch broadly because
-            # OSError (and subclasses) can arrive when the socket file is stale
-            # but readable, e.g. orphaned across reboots
             try:
                 _, w = await asyncio.open_unix_connection(str(SOCK_PATH))
                 w.close()
@@ -137,7 +238,6 @@ class Daemon:
             done, pending = await asyncio.wait(
                 {stopper, serving}, return_when=asyncio.FIRST_COMPLETED
             )
-            # cancel any still-pending task and await its cancellation cleanly
             for t in pending:
                 t.cancel()
                 with contextlib.suppress(asyncio.CancelledError, Exception):
@@ -146,11 +246,10 @@ class Daemon:
         await self.shutdown()
 
     async def shutdown(self) -> None:
-        log.info("daemon shutting down")
-        if self.session is not None:
-            with contextlib.suppress(Exception):
-                await close_session(self.session)
-            self.session = None
+        log.info("daemon shutting down — closing %d sessions",
+                 len(self.registry.list_running()))
+        with contextlib.suppress(Exception):
+            await self.registry.close_all()
         with contextlib.suppress(Exception):
             SOCK_PATH.unlink()
         with contextlib.suppress(Exception):

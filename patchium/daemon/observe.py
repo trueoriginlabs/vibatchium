@@ -150,13 +150,69 @@ def heuristic_plan(intent: str, entries: list[SnapEntry]) -> list[dict]:
         "rationale": f"name {best.name!r} overlaps with intent on: {sorted(overlap)}",
         "confidence": round(min(0.85, score), 2),  # heuristic caps at 0.85
     }
+    # Self-heal metadata: stash the role+name so `act` can rebuild a durable
+    # selector that survives snapshot invalidation (Wave 5.3).
+    if best.role:
+        step["_role"] = best.role
+    if best.name:
+        step["_name"] = best.name
+    durable = build_durable_selector(best.role, best.name)
+    if durable:
+        step["_durable"] = durable
     if verb == "fill":
-        # extract "type X" / "fill X with Y" tail as the value
-        m = re.search(r"(?:type|fill|enter|input|write)\s+(?:in\s+|into\s+)?[\"']?([^\"']+?)[\"']?\s*$",
+        # extract "type X" / "fill X with Y" tail as the value. Two-pass:
+        # 1. "fill X with Y" / "fill X into Y" → Y
+        # 2. tail-only: "type|fill|enter|input|write <Y>"
+        m = re.search(r"(?:fill|type|enter|input|write)\s+\S+\s+with\s+[\"']?([^\"']+?)[\"']?\s*$",
                       intent, re.I)
+        if not m:
+            m = re.search(r"(?:type|fill|enter|input|write)\s+[\"']?([^\"']+?)[\"']?\s+(?:in|into)\s+",
+                          intent, re.I)
+        if not m:
+            m = re.search(r"(?:type|fill|enter|input|write)\s+(?:in\s+|into\s+)?[\"']?([^\"']+?)[\"']?\s*$",
+                          intent, re.I)
         if m:
             step["text"] = m.group(1).strip()
     return [step]
+
+
+# ─── self-healing selector derivation (Wave 5.3) ─────────────────────────
+
+
+def build_durable_selector(role: str | None, name: str | None) -> str | None:
+    """Build a Playwright selector that survives across snapshots.
+
+    `@eN` refs are snapshot-specific — they're invalid after navigation or
+    significant DOM mutation. For cache hits we want a selector that resolves
+    against the LIVE page, not a frozen snapshot.
+
+    Preference order:
+      1. `role=R[name="N"]`  — most resilient; survives DOM reorder
+      2. `text="N"`          — fallback for unnamed-role elements with text
+      3. None                — caller falls back to re-observe + @eN
+    """
+    if not name:
+        return None
+    safe_name = name.replace('"', '\\"')
+    if role:
+        return f'role={role}[name="{safe_name}"]'
+    return f'text="{safe_name}"'
+
+
+def cache_invalidate(url: str, intent: str) -> bool:
+    """Remove a single (url, intent) entry from the on-disk cache.
+
+    Called by `act` when a cached durable selector fails to resolve — the
+    page has likely changed, so we drop the stale plan and re-observe.
+    Returns True if an entry was removed.
+    """
+    data = cache_load()
+    key = _cache_key(url, intent)
+    if key in data:
+        data.pop(key)
+        cache_save(data)
+        return True
+    return False
 
 
 # ─── llm backend ──────────────────────────────────────────────────────────
@@ -259,9 +315,13 @@ async def observe(page, intent: str, *, use_llm: bool = False,
 
     Side-effect: when `daemon` is supplied, writes the freshly-taken AX snapshot
     to `daemon._snapshot` so that subsequent `act`-style verb dispatch (`click @eN`)
-    can resolve refs without a separate `map` call. Without this, observe→act
-    chains would refuse with "snapshot invalidated" since the daemon's snapshot
-    cache is cleared on navigation by design.
+    can resolve refs without a separate `map` call.
+
+    Wave 5.3 (self-heal): every returned plan step gets enriched with
+    `_role`, `_name`, and `_durable` metadata derived from the current
+    snapshot. `act` uses `_durable` to replay cached plans without trusting
+    the snapshot-specific @eN ref, and falls back to re-observe if the
+    durable selector fails (the page changed).
     """
     snap = await elements.take_snapshot(page)
     yaml_text = snap.text(indent=True)
@@ -286,6 +346,23 @@ async def observe(page, intent: str, *, use_llm: bool = False,
     if not plan:
         entries = parse_snapshot(yaml_text)
         plan = heuristic_plan(intent, entries)
+
+    # Enrich every plan step with durable-selector metadata for self-heal.
+    # Heuristic_plan already does this; LLM plans don't, so look up role+name
+    # for each step's @eN against the current snapshot.
+    snap_by_ref = {e.ref: e for e in parse_snapshot(yaml_text)}
+    for step in plan:
+        if "_durable" in step:
+            continue  # heuristic_plan already enriched
+        tgt = step.get("target", "")
+        ref_key = tgt if tgt.startswith("@") else ("@" + tgt)
+        entry = snap_by_ref.get(ref_key)
+        if entry:
+            step.setdefault("_role", entry.role)
+            step.setdefault("_name", entry.name)
+            d = build_durable_selector(entry.role, entry.name)
+            if d:
+                step["_durable"] = d
 
     result = {
         "intent": intent,

@@ -1,0 +1,177 @@
+"""Pluggable stealth backends (Wave 5.4).
+
+Two backends ship today:
+
+- **patchright** (default): canonical Patchright stack — `launch_persistent_context`
+  + `channel='chrome'` + headed + no-viewport. The 2026 Cloudflare benchmark
+  (Paterson) puts it at 25 OK / 3 gated / 3 blocked across 31 targets.
+
+- **nodriver** (optional, opt-in via `pip install patchium[nodriver]`): uses
+  the `nodriver` library to spawn Chrome with its hardened launch flags
+  (no chromedriver injection, expert-mode CDP), then patchium connects via
+  Patchright `connect_over_cdp` for the action layer. Same 2026 benchmark:
+  28 OK / 3 gated / 0 blocked — the only tool with zero hard blocks. Useful
+  when Patchright hits Cloudflare Turnstile interactive challenges.
+
+The two backends ALWAYS produce the same `BrowserSession` object, so every
+existing handler keeps working unchanged — the difference is in *how* Chrome
+was launched, not the API surface.
+
+`Backend.auto` picks `patchright` by default and surfaces an advisory in the
+response when a Cloudflare wall is detected (status 403 / "Just a moment"
+title) suggesting the user re-launch with `--backend nodriver`.
+"""
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+from typing import Optional
+
+from patchright.async_api import Playwright
+
+from .browser import BrowserSession, attach_session, launch_session
+
+log = logging.getLogger("patchium.backends")
+
+
+VALID_BACKENDS = {"patchright", "nodriver", "auto"}
+DEFAULT_BACKEND = "patchright"
+
+
+# Page titles / status codes Cloudflare and DataDome serve when walling a
+# scraper. Used by the `_go` handler's auto-escalation hint.
+CLOUDFLARE_TITLES = (
+    "just a moment",
+    "attention required",
+    "verifying you are human",
+    "checking your browser",
+)
+DATADOME_TITLES = (
+    "blocked - datadome",
+    "you've been blocked",
+)
+WALL_TITLES = CLOUDFLARE_TITLES + DATADOME_TITLES
+
+
+def is_walled(title: str, status: int | None) -> Optional[str]:
+    """Return a defender name if the response looks like a bot wall, else None.
+
+    Used by `_go` to surface `cloudflare_walled: <defender>` in the result
+    when a navigation seems blocked. Caller can then advise switching to the
+    nodriver backend (which sometimes gets through where patchright doesn't).
+    """
+    if status == 403 or status == 429:
+        # status alone isn't conclusive — many legit 403/429 responses exist
+        pass
+    tl = (title or "").lower()
+    for needle in CLOUDFLARE_TITLES:
+        if needle in tl:
+            return "cloudflare"
+    for needle in DATADOME_TITLES:
+        if needle in tl:
+            return "datadome"
+    return None
+
+
+async def launch_patchright_session(
+    profile_dir: Path,
+    *,
+    headless: bool = False,
+    pw: Playwright | None = None,
+) -> BrowserSession:
+    """Canonical Patchright launch (current default)."""
+    return await launch_session(profile_dir, headless=headless, pw=pw)
+
+
+async def launch_nodriver_session(
+    profile_dir: Path,
+    *,
+    headless: bool = False,
+    pw: Playwright | None = None,
+) -> BrowserSession:
+    """Launch Chrome via nodriver, then connect Patchright over CDP.
+
+    Why two-layer: nodriver's launcher avoids the chromedriver injection
+    surface entirely and sets stealth flags that Patchright doesn't (or sets
+    differently). Patchright then connects via `connect_over_cdp` so the
+    daemon's existing handlers (which call Playwright APIs) keep working.
+    Patchright's CDP-message patches still apply over CDP (per the project
+    README — they're at the client protocol layer, not the launch layer).
+
+    Requires `pip install patchium[nodriver]` (which pulls the `nodriver` lib).
+    """
+    try:
+        import nodriver as uc  # noqa: F401
+    except ImportError as exc:
+        raise RuntimeError(
+            "nodriver backend requires `pip install patchium[nodriver]`. "
+            f"(import error: {exc})"
+        ) from exc
+
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    log.info("nodriver launch persistent context profile=%s headless=%s",
+             profile_dir, headless)
+
+    # Pick a free port via OS — nodriver wants a concrete port
+    import socket as _sk
+    sk = _sk.socket()
+    sk.bind(("127.0.0.1", 0))
+    port = sk.getsockname()[1]
+    sk.close()
+
+    browser = await uc.start(
+        user_data_dir=str(profile_dir),
+        headless=headless,
+        port=port,
+        no_sandbox=False,
+    )
+    cdp_url = f"http://127.0.0.1:{port}"
+
+    # Now connect Patchright over CDP and wrap as a BrowserSession.
+    # We use attach_session for the Patchright side, but the underlying
+    # Chrome process is owned by nodriver and must be closed via the
+    # nodriver Browser handle on session teardown.
+    sess = await attach_session(cdp_url, pw=pw)
+    sess.mode = "launch"          # treat as launch (we own the Chrome process)
+    sess.profile_dir = profile_dir
+    sess._nodriver_browser = browser  # keep handle for cleanup
+    return sess
+
+
+async def launch(
+    backend: str,
+    profile_dir: Path,
+    *,
+    headless: bool = False,
+    pw: Playwright | None = None,
+) -> BrowserSession:
+    """Dispatch to the requested backend's launcher."""
+    if backend not in VALID_BACKENDS:
+        raise ValueError(
+            f"unknown backend {backend!r}; valid: {sorted(VALID_BACKENDS)}"
+        )
+    if backend in ("patchright", "auto"):
+        return await launch_patchright_session(profile_dir, headless=headless, pw=pw)
+    if backend == "nodriver":
+        return await launch_nodriver_session(profile_dir, headless=headless, pw=pw)
+    raise AssertionError(f"unreachable backend: {backend}")
+
+
+async def close(session: BrowserSession) -> None:
+    """Tear down the Chrome process appropriately for its backend.
+
+    For the patchright backend, defer to `browser.close_session`. For the
+    nodriver backend, also stop the underlying `nodriver.Browser` to actually
+    kill the Chrome process (Patchright's CDP disconnect alone doesn't).
+    """
+    from .browser import close_session as _close
+
+    nd = getattr(session, "_nodriver_browser", None)
+    try:
+        await _close(session)
+    finally:
+        if nd is not None:
+            try:
+                nd.stop()  # nodriver Browser.stop is sync in current versions
+            except Exception:  # noqa: BLE001
+                pass

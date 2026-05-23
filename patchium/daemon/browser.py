@@ -37,6 +37,9 @@ class BrowserSession:
     dialog_policy: dict = field(default_factory=lambda: {"action": "dismiss"})
     downloads: list = field(default_factory=list)
     network: dict = field(default_factory=lambda: {"capturing": False, "events": [], "max": 500})
+    # Wave 5: when False, this session does NOT own its Playwright driver
+    # subprocess — the daemon does (shared). close_session won't `.stop()` it.
+    owns_pw: bool = True
 
     @property
     def target(self):
@@ -88,25 +91,44 @@ def _wire_page_tracking(session: "BrowserSession") -> None:
         p.on("close", make_handler(p))
 
 
-async def launch_session(profile_dir: Path, headless: bool = False) -> BrowserSession:
-    """Cold-launch real Chrome with persistent context (canonical Patchright config)."""
+async def launch_session(profile_dir: Path, headless: bool = False,
+                         *, pw: Playwright | None = None) -> BrowserSession:
+    """Cold-launch real Chrome with persistent context (canonical Patchright config).
+
+    The Playwright driver (Node.js subprocess) can be shared across multiple
+    sessions when `pw` is supplied — Wave 5 multi-session passes one driver
+    instance to N sessions to avoid spawning a Node.js subprocess per Chrome
+    (which can exhaust file descriptors on long-running daemons with frequent
+    session churn).
+    """
     profile_dir.mkdir(parents=True, exist_ok=True)
     log.info("launch persistent context profile=%s headless=%s", profile_dir, headless)
 
-    pw = await async_playwright().start()
+    owns_pw = pw is None
+    if pw is None:
+        pw = await async_playwright().start()
+    # Chrome args for multi-session reliability:
+    #   --disable-dev-shm-usage: write shared-memory files to /tmp instead of
+    #     /dev/shm. /dev/shm defaults to 64MB in many containers/distros and
+    #     is exhausted quickly when running ≥2 headless Chromes concurrently,
+    #     manifesting as `Page.goto` timeouts on later-spawned sessions even
+    #     though `launch_persistent_context` returned cleanly.
+    extra_args = ["--disable-dev-shm-usage"] if headless else []
     context = await pw.chromium.launch_persistent_context(
         user_data_dir=str(profile_dir),
         channel="chrome",
         headless=headless,
         no_viewport=True,
+        args=extra_args if extra_args else None,
     )
     page = context.pages[0] if context.pages else await context.new_page()
-    sess = BrowserSession(pw=pw, context=context, page=page, mode="launch", profile_dir=profile_dir)
+    sess = BrowserSession(pw=pw, context=context, page=page, mode="launch",
+                          profile_dir=profile_dir, owns_pw=owns_pw)
     _wire_page_tracking(sess)
     return sess
 
 
-async def attach_session(cdp_url: str) -> BrowserSession:
+async def attach_session(cdp_url: str, *, pw: Playwright | None = None) -> BrowserSession:
     """Attach to an already-running Chrome via `--remote-debugging-port=<port>`.
 
     The user's normal Chrome carries its real fingerprint (TLS, profile, cookies),
@@ -115,22 +137,29 @@ async def attach_session(cdp_url: str) -> BrowserSession:
     side regardless of how the browser was launched.
     """
     log.info("attach over CDP cdp_url=%s", cdp_url)
-    pw = await async_playwright().start()
+    owns_pw = pw is None
+    if pw is None:
+        pw = await async_playwright().start()
     browser = await pw.chromium.connect_over_cdp(cdp_url)
     if not browser.contexts:
         raise RuntimeError("attached browser has no contexts — open a tab in Chrome first")
     context = browser.contexts[0]
     page = context.pages[0] if context.pages else await context.new_page()
-    sess = BrowserSession(pw=pw, context=context, page=page, mode="attach", cdp_url=cdp_url)
+    sess = BrowserSession(pw=pw, context=context, page=page, mode="attach",
+                          cdp_url=cdp_url, owns_pw=owns_pw)
     _wire_page_tracking(sess)
     return sess
 
 
 async def close_session(session: BrowserSession) -> None:
-    log.info("closing session mode=%s", session.mode)
+    log.info("closing session mode=%s owns_pw=%s", session.mode, session.owns_pw)
     try:
         if session.mode == "launch":
             await session.context.close()
         # attach mode: don't close the user's Chrome, just disconnect
     finally:
-        await session.pw.stop()
+        # Only stop the Playwright driver if THIS session owns it.
+        # In multi-session mode, the daemon owns a shared driver and stops it
+        # on full daemon shutdown.
+        if session.owns_pw:
+            await session.pw.stop()

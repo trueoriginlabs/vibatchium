@@ -52,6 +52,9 @@ TOOLS: list[tuple[str, str, dict, str, Any]] = [
      {"type": "object", "properties": {
          "profile": _str("Persistent profile dir (default: cache dir)."),
          "headless": _bool("Headless mode (not recommended for stealth)."),
+         "backend": _str("Stealth backend: patchright (default) | nodriver | auto. "
+                         "nodriver needs `pip install patchium[nodriver]`."),
+         "stealth_mouse": _bool("Layer CDP-Patches humanized mouse.", False),
      }},
      "start", None),
     ("attach", "Attach to an existing Chrome via CDP (use after manual login on a Cloudflare-walled site).",
@@ -313,20 +316,55 @@ TOOLS: list[tuple[str, str, dict, str, Any]] = [
                      "llm": _bool("Use Claude.", False)},
       "required": ["intent"]},
      "act", None),
-    ("profile_list", "List all profiles and the active one.",
+    ("profile_list", "List all profiles and the active one (alias of session_list).",
      {"type": "object", "properties": {}}, "profile_list", None),
-    ("profile_new", "Create a new named profile.",
+    ("profile_new", "Create a new named profile (alias of session_new).",
      {"type": "object", "properties": {"name": _str("Profile name.")},
       "required": ["name"]},
      "profile_new", None),
-    ("profile_use", "Set the active profile (takes effect on next start).",
+    ("profile_use", "Set the active profile (alias of session_use).",
      {"type": "object", "properties": {"name": _str("Profile name.")},
       "required": ["name"]},
      "profile_use", None),
-    ("profile_delete", "Delete a profile directory (not the active or default).",
+    ("profile_delete", "Delete a profile directory (alias of session_delete).",
      {"type": "object", "properties": {"name": _str("Profile name.")},
       "required": ["name"]},
      "profile_delete", None),
+    # ─── Wave 5: session management (multi-session) ────────────────────
+    ("session_new", "Create a new on-disk session/profile dir (does NOT launch Chrome).",
+     {"type": "object", "properties": {"name": _str("Session name.")},
+      "required": ["name"]},
+     "session_new", None),
+    ("session_list", "List every on-disk session + which are currently running.",
+     {"type": "object", "properties": {}}, "session_list", None),
+    ("session_use", "Set the active session (persisted to active-session file).",
+     {"type": "object", "properties": {"name": _str("Session name.")},
+      "required": ["name"]},
+     "session_use", None),
+    ("session_switch", "Alias for session_use.",
+     {"type": "object", "properties": {"name": _str("Session name.")},
+      "required": ["name"]},
+     "session_switch", None),
+    ("session_close", "Stop Chrome for one session (profile dir preserved).",
+     {"type": "object", "properties": {"name": _str("Session name.")}},
+     "session_close", None),
+    ("session_close_all", "Stop Chrome for every running session.",
+     {"type": "object", "properties": {}}, "session_close_all", None),
+    ("session_delete", "Delete a session's profile dir on disk (not active/default).",
+     {"type": "object", "properties": {"name": _str("Session name.")},
+      "required": ["name"]},
+     "session_delete", None),
+    # ─── Wave 5.4b: fingerprint scorer ─────────────────────────────────
+    ("fingerprint",
+     "Open a bot-detection target and return a numeric stealth score. "
+     "Built-ins: sannysoft, creepjs, brotector. Use to measure backend stealth.",
+     {"type": "object", "properties": {
+         "target": _str("sannysoft | creepjs | brotector (default sannysoft)."),
+         "url": _str("Override URL for a custom detector."),
+         "extract": _str("JS expression to extract the score."),
+         "settle_ms": _int("Ms to wait after networkidle.", 5_000),
+     }},
+     "fingerprint", None),
     ("route_add", "Add a request-interception rule (abort/fulfill/passthrough).",
      {"type": "object",
       "properties": {"pattern": _str("Playwright URL glob, e.g. **/*.png"),
@@ -390,28 +428,138 @@ TOOLS: list[tuple[str, str, dict, str, Any]] = [
 _TOOL_BY_NAME = {t[0]: t for t in TOOLS}
 
 
+# ─── Wave 5.2: capability gating ─────────────────────────────────────────
+#
+# Group tools into named buckets so MCP clients can opt out of large surface
+# areas (cuts prompt-token tax for LLMs that only need a subset). Mirrors
+# microsoft/playwright-mcp's --caps system.
+#
+# Pass via `patchium mcp --caps=core,session,nav,input,agent` to expose ONLY
+# those buckets. Omit --caps (or pass `--caps=all`) for the full 80+ surface.
+#
+# A tool can belong to MULTIPLE caps; it's exposed if any of its caps is selected.
+
+_CAP_BUCKETS: dict[str, set[str]] = {
+    "core":     {"start", "attach", "stop", "status"},
+    "session":  {"session_new", "session_list", "session_use", "session_switch",
+                 "session_close", "session_close_all", "session_delete",
+                 "profile_list", "profile_new", "profile_use", "profile_delete"},
+    "nav":      {"go", "back", "forward", "reload", "url", "title",
+                 "wait_url", "wait_load", "wait_fn"},
+    "content":  {"text", "html", "eval", "attr", "value", "content", "count", "find"},
+    "input":    {"click", "fill", "type", "hover", "press", "keys",
+                 "check", "uncheck", "scroll", "is_state", "mouse", "upload"},
+    "element":  {"map", "map_compact", "diff_map", "highlight"},
+    "pages":    {"pages", "page_new", "page_switch", "frames", "frame"},
+    "storage":  {"storage_export", "storage_restore", "cookies"},
+    "network":  {"network_start", "network_stop", "network_dump",
+                 "route_add", "route_list", "route_clear", "wait_response",
+                 "har_start", "har_stop"},
+    "dialogs":  {"dialog_policy", "download_arm", "download_list", "download_save"},
+    "overrides":{"geolocation", "media", "viewport"},
+    "vision":   {"screenshot", "screenshot_annotate", "pdf"},
+    "devtools": {"record_start", "record_stop",
+                 "eval_handle", "handle_eval", "handle_list",
+                 "handle_dispose", "handle_dispose_all"},
+    "agent":    {"observe", "act", "dismiss_banners"},
+    # Wave 5.4b: backend / stealth tooling. Separate bucket so headless agents
+    # don't get tempted to run stealth scorers as part of regular browsing.
+    "stealth":  {"fingerprint"},
+}
+
+# Tools every cap-filtered surface always retains — necessities for LLMs that
+# need to know what to do when nothing else matches.
+_ALWAYS_EXPOSED: set[str] = {"status"}
+
+
+def _resolve_caps(caps_spec: str | None) -> set[str] | None:
+    """Parse a `--caps=a,b,c` string into a bucket set; None means 'expose all'."""
+    if not caps_spec:
+        return None
+    parts = {p.strip().lower() for p in caps_spec.split(",") if p.strip()}
+    if "all" in parts:
+        return None  # all == no filter
+    bad = parts - set(_CAP_BUCKETS.keys())
+    if bad:
+        raise ValueError(
+            f"unknown capability bucket(s): {sorted(bad)}. "
+            f"Available: {sorted(_CAP_BUCKETS.keys())}"
+        )
+    return parts
+
+
+def _filter_tools(caps: set[str] | None) -> list[tuple]:
+    """Return the TOOLS subset for the requested cap set (None = no filter)."""
+    if caps is None:
+        return TOOLS
+    allowed_names = set(_ALWAYS_EXPOSED)
+    for bucket in caps:
+        allowed_names |= _CAP_BUCKETS.get(bucket, set())
+    # `sleep`/`ping` always make sense for any cap; include them
+    allowed_names |= {"sleep", "ping"} & {t[0] for t in TOOLS}
+    return [t for t in TOOLS if t[0] in allowed_names]
+
+
+# Module-level state set by _entrypoint(caps=...) before the server runs.
+# list_tools / call_tool read this; default None = expose everything.
+_ACTIVE_CAPS: set[str] | None = None
+
+
+def _augment_schema_with_session(schema: dict) -> dict:
+    """Add an optional `session` property to a tool input schema (in-place clone).
+
+    Every Wave 5+ MCP tool accepts a `session` arg so a multi-agent setup can
+    drive several browser sessions in parallel from one MCP server. None or
+    omitted → uses the daemon's active session ('default' on first call).
+    """
+    new = {**schema}
+    props = dict(new.get("properties") or {})
+    props.setdefault("session", _str(
+        "Optional session name to target (omit for the active session)."
+    ))
+    new["properties"] = props
+    return new
+
+
 @server.list_tools()
 async def list_tools() -> list[types.Tool]:
+    tools = _filter_tools(_ACTIVE_CAPS)
     return [
-        types.Tool(name=name, description=desc, inputSchema=schema)
-        for (name, desc, schema, _cmd, _mapper) in TOOLS
+        types.Tool(name=name, description=desc,
+                   inputSchema=_augment_schema_with_session(schema))
+        for (name, desc, schema, _cmd, _mapper) in tools
     ]
 
 
 @server.call_tool()
 async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.Content]:
+    # If caps are active, refuse calls to tools outside the filter — protects
+    # against an LLM hallucinating a tool name that wasn't in list_tools.
+    if _ACTIVE_CAPS is not None:
+        allowed = {t[0] for t in _filter_tools(_ACTIVE_CAPS)}
+        if name not in allowed:
+            return [types.TextContent(
+                type="text",
+                text=f"tool {name!r} is not in the enabled capabilities "
+                     f"({sorted(_ACTIVE_CAPS)})",
+            )]
     entry = _TOOL_BY_NAME.get(name)
     if entry is None:
         return [types.TextContent(type="text", text=f"unknown tool: {name}")]
     _name, _desc, _schema, cmd, mapper = entry
-    args = mapper(arguments) if mapper else (arguments or {})
+    args = mapper(arguments) if mapper else dict(arguments or {})
+
+    # Extract the optional session arg — passed to daemon_call as session=
+    # rather than threaded through args (the daemon's dispatcher consumes
+    # `_session` from args, but the client.call wrapper handles that translation).
+    session = args.pop("session", None)
 
     # Auto-spawn the daemon if it isn't running.
     if not daemon_is_running():
         spawn_daemon()
 
     try:
-        result = await asyncio.to_thread(daemon_call, cmd, args)
+        result = await asyncio.to_thread(daemon_call, cmd, args, session=session)
     except Exception as exc:  # noqa: BLE001
         return [types.TextContent(type="text", text=f"error: {type(exc).__name__}: {exc}")]
 
@@ -434,7 +582,11 @@ async def main() -> None:
         )
 
 
-def _entrypoint() -> None:
+def _entrypoint(caps: str | None = None) -> None:
+    """Run the MCP server (stdio). `caps` is a comma-separated list of
+    capability buckets to expose; None = expose all."""
+    global _ACTIVE_CAPS
+    _ACTIVE_CAPS = _resolve_caps(caps)
     asyncio.run(main())
 
 
