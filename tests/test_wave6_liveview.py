@@ -100,7 +100,8 @@ def test_liveview_viewer_404s_for_unknown_session():
     _stop_lv()
     _start_lv()
     try:
-        import urllib.request, urllib.error
+        import urllib.request
+        import urllib.error
         with pytest.raises(urllib.error.HTTPError) as exc:
             urllib.request.urlopen(f"http://127.0.0.1:{PORT}/viewer/no-such-session",
                                    timeout=2)
@@ -147,7 +148,7 @@ def test_liveview_websocket_streams_frames(local_server):
                     while time.time() < deadline:
                         try:
                             msg = await asyncio.wait_for(ws.receive(), timeout=0.5)
-                        except asyncio.TimeoutError:
+                        except TimeoutError:
                             continue
                         if msg.type == WSMsgType.TEXT:
                             payload = json.loads(msg.data)

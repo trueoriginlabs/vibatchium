@@ -27,7 +27,6 @@ fields to scan.
 from __future__ import annotations
 
 import re
-from typing import Any
 
 # Verb → list of response-dict keys whose values are content worth scanning
 # for prompt injection.

@@ -1178,24 +1178,46 @@ def register_extra(daemon) -> None:
 
     # ─── Wave 6.3d: vision-first primitive ───────────────────────────────
 
-    @daemon.handler("vision_click")
-    async def _vision_click(d, args):
-        """Find a UI element matching the verbal description via Claude vision,
-        then click it. Cache hit on identical (screenshot, intent) → no API call.
-        """
+    def _bump_vision_stats(entry, result):
+        """Wave 7.2: shared per-session vision accounting. Called by every
+        vision_* handler so `vision stats` reflects all vision usage, not
+        only vision_click."""
+        stats = entry.flags.setdefault("vision_stats", {
+            "calls": 0, "cache_hits": 0, "input_tokens": 0,
+            "output_tokens": 0, "cost_usd": 0.0,
+        })
+        stats["calls"] += 1
+        if result.get("via") == "cache":
+            stats["cache_hits"] += 1
+        else:
+            tok = result.get("tokens", {}) or {}
+            stats["input_tokens"] += tok.get("input", 0)
+            stats["output_tokens"] += tok.get("output", 0)
+            stats["cost_usd"] += result.get("cost_usd", 0)
+
+    async def _vision_locate(d, args):
+        """Shared vision_find/_click/_type body — returns (entry, result)."""
         from .. import vision as _vision
         from collections import deque as _deque
         s = _session(d)
         from .registry import current_session_ctx as _ctx
         entry = d.registry.get(_ctx.get())
-        # Per-session rate-limit log
         cache_log = entry.flags.setdefault("vision_rate", _deque())
-        max_pm = int(args.get("max_per_minute", 30))
         result = await _vision.find_element(
             s.page, args["intent"],
             min_confidence=float(args.get("min_confidence", 0.6)),
-            cache_log=cache_log, max_per_minute=max_pm,
+            cache_log=cache_log,
+            max_per_minute=int(args.get("max_per_minute", 30)),
         )
+        _bump_vision_stats(entry, result)
+        return s, result
+
+    @daemon.handler("vision_click")
+    async def _vision_click(d, args):
+        """Find a UI element matching the verbal description via Claude vision,
+        then click it. Cache hit on identical (screenshot, intent) → no API call.
+        """
+        s, result = await _vision_locate(d, args)
         # devicePixelRatio scaling: Claude sees screenshot at the device px;
         # our screenshots are NOT scaled (they're the raw device pixels), so
         # mouse coords need to be in CSS pixels = device_px / dpr.
@@ -1203,18 +1225,6 @@ def register_extra(daemon) -> None:
         cx = result["x"] / dpr
         cy = result["y"] / dpr
         await s.page.mouse.click(cx, cy, button=args.get("button", "left"))
-        # Update stats
-        stats = entry.flags.setdefault("vision_stats", {
-            "calls": 0, "cache_hits": 0, "input_tokens": 0,
-            "output_tokens": 0, "cost_usd": 0.0,
-        })
-        stats["calls"] += 1
-        if result["via"] == "cache":
-            stats["cache_hits"] += 1
-        else:
-            stats["input_tokens"] += result.get("tokens", {}).get("input", 0)
-            stats["output_tokens"] += result.get("tokens", {}).get("output", 0)
-            stats["cost_usd"] += result.get("cost_usd", 0)
         return {
             "clicked": True, "x": cx, "y": cy,
             "confidence": result["confidence"],
@@ -1225,35 +1235,13 @@ def register_extra(daemon) -> None:
     async def _vision_find(d, args):
         """Like vision_click but just return coords without clicking — useful
         for inspecting what the vision model sees."""
-        from .. import vision as _vision
-        from collections import deque as _deque
-        s = _session(d)
-        from .registry import current_session_ctx as _ctx
-        entry = d.registry.get(_ctx.get())
-        cache_log = entry.flags.setdefault("vision_rate", _deque())
-        result = await _vision.find_element(
-            s.page, args["intent"],
-            min_confidence=float(args.get("min_confidence", 0.6)),
-            cache_log=cache_log,
-            max_per_minute=int(args.get("max_per_minute", 30)),
-        )
+        _s, result = await _vision_locate(d, args)
         return result
 
     @daemon.handler("vision_type")
     async def _vision_type(d, args):
         """vision_click + type the given text into whatever was clicked."""
-        from .. import vision as _vision
-        from collections import deque as _deque
-        s = _session(d)
-        from .registry import current_session_ctx as _ctx
-        entry = d.registry.get(_ctx.get())
-        cache_log = entry.flags.setdefault("vision_rate", _deque())
-        result = await _vision.find_element(
-            s.page, args["intent"],
-            min_confidence=float(args.get("min_confidence", 0.6)),
-            cache_log=cache_log,
-            max_per_minute=int(args.get("max_per_minute", 30)),
-        )
+        s, result = await _vision_locate(d, args)
         dpr = result.get("devicePixelRatio", 1) or 1
         cx = result["x"] / dpr
         cy = result["y"] / dpr

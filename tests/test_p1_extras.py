@@ -1,5 +1,4 @@
 """Tests for Wave 3 P1 additions: route, wait_response, dismiss_banners."""
-import time
 
 from patchium.client import call
 

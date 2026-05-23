@@ -11,11 +11,9 @@ Verifies:
 from __future__ import annotations
 
 import json
-import re
 import tempfile
 from pathlib import Path
 
-import pytest
 
 from patchium.evals import (
     render_markdown, render_json, min_score, update_readme,

@@ -4,7 +4,6 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
 
 from patchright.async_api import (
     BrowserContext,
@@ -31,8 +30,8 @@ class BrowserSession:
     context: BrowserContext
     page: Page
     mode: str  # "launch" | "attach"
-    profile_dir: Optional[Path] = None
-    cdp_url: Optional[str] = None
+    profile_dir: Path | None = None
+    cdp_url: str | None = None
     frame_ref: object = None         # patchright.Frame | None
     dialog_policy: dict = field(default_factory=lambda: {"action": "dismiss"})
     downloads: list = field(default_factory=list)
@@ -48,7 +47,7 @@ class BrowserSession:
         return self.frame_ref if self.frame_ref is not None else self.page
 
 
-def _wire_page_tracking(session: "BrowserSession") -> None:
+def _wire_page_tracking(session: BrowserSession) -> None:
     """Auto-track new pages (popups, target=_blank) and recover from page close.
 
     Without this, `s.page` becomes stale when:

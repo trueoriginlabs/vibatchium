@@ -52,7 +52,6 @@ import os
 import struct
 import time
 from pathlib import Path
-from typing import Optional
 
 log = logging.getLogger("patchium.secrets")
 
@@ -399,7 +398,7 @@ def wait_for_email_code(cfg: EmailPollConfig, *, timeout: int = 60,
                                 import datetime as _dt
                                 parsed_dt = email.utils.parsedate_to_datetime(date_str)
                                 if parsed_dt.tzinfo is None:
-                                    parsed_dt = parsed_dt.replace(tzinfo=_dt.timezone.utc)
+                                    parsed_dt = parsed_dt.replace(tzinfo=_dt.UTC)
                                 ts = parsed_dt.timestamp()
                                 if time.time() - ts > max_age_s:
                                     continue

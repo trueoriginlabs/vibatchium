@@ -30,7 +30,6 @@ import asyncio
 import json as _json
 import logging
 import re
-import shutil
 import time
 import uuid
 from pathlib import Path

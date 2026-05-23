@@ -16,15 +16,10 @@ from __future__ import annotations
 import base64
 import json
 import os
-import re
-import shutil
-import subprocess
-import tempfile
-from pathlib import Path
 
 import pytest
 
-from patchium.client import call, DaemonError
+from patchium.client import call
 from patchium import secrets as _vault
 
 

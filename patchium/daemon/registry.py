@@ -34,18 +34,15 @@ import time
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
 
 from patchright.async_api import Playwright, async_playwright
 
-from .browser import BrowserSession, attach_session, close_session, launch_session
+from .browser import BrowserSession, attach_session
 from .paths import (
     DEFAULT_SESSION_NAME,
     PROFILES_DIR,
-    get_active_session_name,
     list_session_names,
     session_dir,
-    set_active_session_name,
 )
 
 log = logging.getLogger("patchium.registry")
@@ -186,6 +183,15 @@ class SessionRegistry:
             return  # already in-flight
         if name in self._entries:
             return  # already running for real
+        # Wave 7 fix: warm pre-spawns must count toward PATCHIUM_MAX_SESSIONS
+        # (each one is a real Chrome holding ~200-400 MB). The cap is enforced
+        # in create() but opportunistic prewarms previously slipped past it.
+        cap = get_max_sessions()
+        in_flight = sum(1 for t in self._warm_tasks.values() if not t.done())
+        if len(self._entries) + len(self._warm_sessions) + in_flight >= cap:
+            log.debug("skipping prewarm of %s — at PATCHIUM_MAX_SESSIONS=%d",
+                      name, cap)
+            return
 
         async def _do_prewarm():
             try:
@@ -231,7 +237,7 @@ class SessionRegistry:
 
     # ─── lookups ─────────────────────────────────────────────────────────
 
-    def get(self, name: str) -> Optional[SessionEntry]:
+    def get(self, name: str) -> SessionEntry | None:
         entry = self._entries.get(name)
         if entry is not None:
             entry.touch()

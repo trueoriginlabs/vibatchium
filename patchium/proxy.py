@@ -30,7 +30,7 @@ import logging
 import os
 import stat
 from pathlib import Path
-from typing import Callable
+from collections.abc import Callable
 from urllib.parse import parse_qsl, urlparse
 
 log = logging.getLogger("patchium.proxy")

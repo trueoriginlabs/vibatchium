@@ -230,7 +230,7 @@ class LiveViewServer:
     """One server per daemon. Manages a frame-loop task per active session
     and broadcasts JPEG frames to any connected WebSocket clients."""
 
-    def __init__(self, registry: "SessionRegistry", *, host: str = "127.0.0.1",
+    def __init__(self, registry: SessionRegistry, *, host: str = "127.0.0.1",
                  port: int = 9223, fps: int = 5, jpeg_quality: int = 60,
                  takeover: bool = False) -> None:
         self.registry = registry

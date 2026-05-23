@@ -25,16 +25,15 @@ from __future__ import annotations
 import asyncio
 import math
 import random
-from typing import Tuple
 
 
 def humanized_path(
-    start: Tuple[float, float],
-    end: Tuple[float, float],
+    start: tuple[float, float],
+    end: tuple[float, float],
     *,
     n_points: int | None = None,
     seed: int | None = None,
-) -> list[Tuple[float, float]]:
+) -> list[tuple[float, float]]:
     """Cubic-Bezier mouse path from `start` to `end` with jittered control points.
 
     Generates an organic, non-straight trajectory by placing two control
@@ -86,7 +85,7 @@ def humanized_path(
     return pts
 
 
-def path_curviness(path: list[Tuple[float, float]]) -> float:
+def path_curviness(path: list[tuple[float, float]]) -> float:
     """Sum of absolute angle changes along the path (radians). 0 = straight line.
 
     Used by tests to verify the Bezier path actually curves (catches bugs
@@ -121,7 +120,7 @@ def sample_dwell_ms(mean_ms: float = 100, stdev_ms: float = 25,
 
 
 def sinusoidal_scroll(total_dy: float, *, duration_ms: float = 300,
-                       tick_ms: float = 16) -> list[Tuple[float, float]]:
+                       tick_ms: float = 16) -> list[tuple[float, float]]:
     """Break a single scroll-wheel into stepped events whose deltas follow a
     sin-curve — mimics a real mouse-wheel flick (fast onset → peak → decay).
 
@@ -151,7 +150,7 @@ def sinusoidal_scroll(total_dy: float, *, duration_ms: float = 300,
 
 
 async def humanized_move(page, end_x: float, end_y: float,
-                          *, start: Tuple[float, float] | None = None,
+                          *, start: tuple[float, float] | None = None,
                           step_delay_ms: float = 5.0) -> None:
     """Move the mouse along a Bezier path to (end_x, end_y).
 
@@ -171,8 +170,8 @@ async def humanized_move(page, end_x: float, end_y: float,
 
 async def humanized_click(page, x: float, y: float, *,
                            button: str = "left",
-                           cursor_pos: Tuple[float, float] | None = None
-                           ) -> Tuple[float, float]:
+                           cursor_pos: tuple[float, float] | None = None
+                           ) -> tuple[float, float]:
     """Move humanlike to (x,y), pause briefly, mouse-down, dwell, mouse-up.
     Returns the new cursor position."""
     await humanized_move(page, x, y, start=cursor_pos)

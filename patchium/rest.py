@@ -29,7 +29,6 @@ import logging
 import os
 import secrets
 from pathlib import Path
-from typing import Any, Optional
 
 log = logging.getLogger("patchium.rest")
 
@@ -48,7 +47,7 @@ def get_or_create_token() -> str:
     return token
 
 
-def build_app(*, require_auth: bool = True, token: Optional[str] = None):
+def build_app(*, require_auth: bool = True, token: str | None = None):
     """Build the FastAPI app. `token` defaults to the persisted token."""
     try:
         from fastapi import FastAPI, HTTPException, Request, WebSocket
@@ -257,7 +256,7 @@ def build_app(*, require_auth: bool = True, token: Optional[str] = None):
 
 
 def serve(*, host: str = "127.0.0.1", port: int = 8000,
-           require_auth: bool = True, token: Optional[str] = None) -> None:
+           require_auth: bool = True, token: str | None = None) -> None:
     """Run the REST shim. Blocks until interrupted."""
     try:
         import uvicorn
@@ -273,6 +272,6 @@ def serve(*, host: str = "127.0.0.1", port: int = 8000,
         print(f"  token file:   {TOKEN_PATH}\n", flush=True)
     elif not require_auth:
         print(f"\n  WARNING: REST shim listening on http://{host}:{port} WITHOUT AUTH", flush=True)
-        print(f"  Don't expose to a public network!\n", flush=True)
+        print("  Don't expose to a public network!\n", flush=True)
     app = build_app(require_auth=require_auth, token=token)
     uvicorn.run(app, host=host, port=port, log_level="info")

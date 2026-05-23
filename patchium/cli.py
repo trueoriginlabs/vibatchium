@@ -94,7 +94,6 @@ def start(ctx, profile, headless, stealth_mouse, backend):
 def install(ctx, skip_chrome):
     """One-time setup: install Chrome via patchright, check Xvfb/display, verify deps."""
     import os
-    import shutil
     import subprocess
     from .daemon.paths import CACHE_DIR, PROFILES_DIR, CONFIG_DIR, DEFAULT_PROFILE_DIR
 
@@ -1501,7 +1500,7 @@ def evals_run(ctx, targets, backends, humanize, settle_ms, out_path,
             changed = _evals.update_readme(readme, _evals.render_markdown(rows))
             click.echo(f"README updated: {changed} ({readme})", err=True)
         else:
-            click.echo(f"README.md not found", err=True)
+            click.echo("README.md not found", err=True)
 
     if out_path:
         from pathlib import Path as _P

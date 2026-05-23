@@ -27,7 +27,8 @@ import logging
 import os
 import signal
 import sys
-from typing import Any, Awaitable, Callable
+from typing import Any
+from collections.abc import Awaitable, Callable
 
 from . import handlers, handlers_extra
 from .paths import DEFAULT_SESSION_NAME, LOG_PATH, PID_PATH, SOCK_PATH, get_active_session_name

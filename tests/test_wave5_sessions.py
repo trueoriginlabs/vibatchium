@@ -17,7 +17,6 @@ import os
 import shutil
 import time
 import threading
-from pathlib import Path
 
 import pytest
 

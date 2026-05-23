@@ -10,12 +10,10 @@ Verifies:
 """
 from __future__ import annotations
 
-import asyncio
 import os
 import shutil
 import time
 
-import pytest
 
 from patchium.client import call, DaemonError
 from patchium.daemon.paths import PROFILES_DIR

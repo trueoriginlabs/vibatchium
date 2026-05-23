@@ -15,7 +15,7 @@ import pytest
 
 from patchium.client import call
 from patchium.safety import (
-    PATTERNS, CONTENT_FIELDS, classify, apply_wrap, apply_redact,
+    classify, apply_wrap, apply_redact,
     scan_and_apply, scan_response,
 )
 

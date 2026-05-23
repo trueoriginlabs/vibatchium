@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Optional
 
 from patchright.async_api import Playwright
 
@@ -53,7 +52,7 @@ DATADOME_TITLES = (
 WALL_TITLES = CLOUDFLARE_TITLES + DATADOME_TITLES
 
 
-def is_walled(title: str, status: int | None) -> Optional[str]:
+def is_walled(title: str, status: int | None) -> str | None:
     """Return a defender name if the response looks like a bot wall, else None.
 
     Used by `_go` to surface `cloudflare_walled: <defender>` in the result

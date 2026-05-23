@@ -42,7 +42,6 @@ import re
 import time
 from collections import deque
 from pathlib import Path
-from typing import Any
 
 log = logging.getLogger("patchium.vision")
 
@@ -359,6 +358,14 @@ async def find_element(page, intent: str, *,
     # Cache miss → Claude
     locator = _claude_locate or claude_locate
     result = await locator(screenshot_bytes, intent)
+    # Wave 7.2 correctness: record spend FIRST. The API call has already
+    # billed us by the time we get here, so a subsequent confidence-check
+    # raise must not skip the accounting (would silently undercount the
+    # daily/lifetime budget against low-confidence failures).
+    cost = estimate_cost_usd(
+        result["tokens"]["input"], result["tokens"]["output"],
+    )
+    add_spend(cost)
     if result["confidence"] < min_confidence:
         raise VisionLowConfidence(
             f"low confidence {result['confidence']:.2f} for {intent!r}: "
@@ -369,11 +376,6 @@ async def find_element(page, intent: str, *,
         "confidence": result["confidence"],
         "rationale": result.get("rationale", ""),
     })
-    cost = estimate_cost_usd(
-        result["tokens"]["input"], result["tokens"]["output"],
-    )
-    # Persist actual spend (post-call, with real token counts)
-    add_spend(cost)
     try:
         dpr = await page.evaluate("() => window.devicePixelRatio || 1")
     except Exception:  # noqa: BLE001

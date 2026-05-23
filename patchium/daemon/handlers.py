@@ -8,15 +8,12 @@ from __future__ import annotations
 import base64
 import logging
 import os
-import tempfile
 from pathlib import Path
 
 from . import elements
 from .paths import (
-    DEFAULT_PROFILE_DIR, DEFAULT_SESSION_NAME, PROFILES_DIR, ACTIVE_PROFILE_PATH,
-    get_active_profile_dir, get_active_profile_name,
-    get_active_session_name, list_profile_names, list_session_names,
-    session_dir, set_active_profile_name, set_active_session_name,
+    DEFAULT_SESSION_NAME, PROFILES_DIR, get_active_session_name, list_session_names,
+    session_dir, set_active_session_name,
 )
 from .registry import current_session_ctx
 
@@ -359,7 +356,7 @@ def register_all(daemon) -> None:
         # Validate before persisting (raises ProxyParseError on bad URL)
         _parse(url)
         sname = _ctx.get()
-        from .paths import PROFILES_DIR, session_dir as _sd
+        from .paths import session_dir as _sd
         # Use the in-memory profile_dir if session is running, else resolve from disk
         entry = d.registry.get(sname)
         pdir = entry.profile_dir if entry else _sd(sname)

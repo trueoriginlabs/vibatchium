@@ -9,7 +9,6 @@ import subprocess
 import sys
 import time
 import uuid
-from pathlib import Path
 from typing import Any
 
 from .daemon.paths import SOCK_PATH

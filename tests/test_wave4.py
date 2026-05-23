@@ -1,6 +1,5 @@
 """Tests for Wave 4: HAR export, eval_handle, stealth-mouse fallback."""
 import json
-from pathlib import Path
 
 from patchium.client import call
 

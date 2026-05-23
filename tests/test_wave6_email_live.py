@@ -20,7 +20,7 @@ import time
 import pytest
 
 from patchium.secrets import (
-    EmailPollConfig, parse_email_poll_url, wait_for_email_code,
+    parse_email_poll_url, wait_for_email_code,
 )
 from ._imap_server import MiniIMAPServer
 

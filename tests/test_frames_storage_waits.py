@@ -1,6 +1,4 @@
 """Frames, storage round-trip, waits, network capture, multi-page."""
-import os
-from pathlib import Path
 
 from patchium.client import call
 

@@ -20,7 +20,6 @@ from __future__ import annotations
 import asyncio
 import re
 import threading
-from typing import List, Tuple
 
 
 class MiniIMAPServer:
@@ -36,9 +35,9 @@ class MiniIMAPServer:
         self.host = host
         self.port = port
         self.actual_port: int | None = None
-        self.messages: List[Tuple[int, bytes]] = []  # (uid, raw RFC 822)
+        self.messages: list[tuple[int, bytes]] = []  # (uid, raw RFC 822)
         self.flagged_read: set[int] = set()
-        self.login_attempts: List[Tuple[str, str]] = []
+        self.login_attempts: list[tuple[str, str]] = []
         self._next_uid = 1
         self._loop: asyncio.AbstractEventLoop | None = None
         self._server: asyncio.AbstractServer | None = None

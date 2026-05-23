@@ -10,15 +10,13 @@ Verifies:
 """
 from __future__ import annotations
 
-import base64
 import time
 from email.message import EmailMessage
-from typing import List, Tuple
 
 import pytest
 
 from patchium.secrets import (
-    EmailPollConfig, parse_email_poll_url, wait_for_email_code,
+    parse_email_poll_url, wait_for_email_code,
 )
 
 
@@ -70,9 +68,9 @@ def test_parse_url_custom_mailbox():
 class MockIMAP:
     """Minimal imaplib.IMAP4 shim — accepts login, select, search, fetch, store."""
     # Class-level mailbox: list of (uid_bytes, raw_message_bytes, age_seconds)
-    mailbox: List[Tuple[bytes, bytes, int]] = []
-    flagged_read: List[bytes] = []
-    login_called: List[Tuple[str, str]] = []
+    mailbox: list[tuple[bytes, bytes, int]] = []
+    flagged_read: list[bytes] = []
+    login_called: list[tuple[str, str]] = []
 
     def __init__(self, server, port):
         self.server = server

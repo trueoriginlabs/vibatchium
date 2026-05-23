@@ -73,7 +73,7 @@ def smoke() -> int:
 
         print("[?] ambiguous: neither CF markers nor success markers found.")
         page.screenshot(path="/tmp/patchium-smoke-ambiguous.png")
-        print(f"[?] screenshot: /tmp/patchium-smoke-ambiguous.png")
+        print("[?] screenshot: /tmp/patchium-smoke-ambiguous.png")
         print(f"[?] first 500 chars of body: {body[:500]}")
         ctx.close()
         return 2

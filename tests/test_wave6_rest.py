@@ -151,7 +151,6 @@ def test_stream_rejects_bad_token(client_auth, local_server):
 def test_stream_sends_hello_and_frames(client_auth, local_server):
     """With a valid token, we should get a hello envelope + at least one JPEG/PNG."""
     # Navigate so the screenshot has content
-    import urllib.request
     # We can't use the daemon client directly here — the test client uses
     # the SAME daemon (via daemon_call inside the handler). Tell that
     # daemon to navigate via the REST shim itself.

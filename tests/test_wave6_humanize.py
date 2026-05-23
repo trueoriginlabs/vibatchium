@@ -10,11 +10,8 @@ Verifies:
 """
 from __future__ import annotations
 
-import asyncio
-import math
 import statistics
 
-import pytest
 
 from patchium.client import call
 from patchium.humanize import (
