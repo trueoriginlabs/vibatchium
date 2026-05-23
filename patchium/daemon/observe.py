@@ -283,7 +283,10 @@ def cache_load() -> dict:
 
 
 def cache_save(data: dict) -> None:
-    CACHE_PATH.write_text(json.dumps(data, indent=2))
+    # Wave 7.5d: observe cache holds (url, intent) → plan tuples. Intents
+    # can be sensitive ("log in as admin", "find the SSN field"). 0600.
+    from .paths import secure_write as _sw
+    _sw(CACHE_PATH, json.dumps(data, indent=2))
 
 
 def cache_get(url: str, intent: str) -> dict | None:

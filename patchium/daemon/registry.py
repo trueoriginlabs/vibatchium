@@ -331,7 +331,11 @@ class SessionRegistry:
             try:
                 proxy_cfg = _parse_proxy(proxy_url)
             except Exception as exc:  # noqa: BLE001
-                log.warning("ignoring malformed proxy for %s: %s", name, exc)
+                # Wave 7.5d: exception message from proxy.parse contains the
+                # raw URL, which may include `user:pass@host` credentials.
+                # Log only the exception class — don't leak creds into logs.
+                log.warning("ignoring malformed proxy for %s: %s",
+                            name, type(exc).__name__)
         # Wave 6.1b: prefer a pre-warmed session if one is available for this
         # name AND the requested config matches (backend, headless, no proxy).
         # Proxy-configured sessions always launch fresh because the warm

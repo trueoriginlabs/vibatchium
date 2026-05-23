@@ -71,7 +71,9 @@ def _allowed_verbs(caps: str | None) -> set[str] | None:
     if not caps:
         return None  # unrestricted
     from .mcp_server import _CAP_BUCKETS, _ALWAYS_EXPOSED
-    parts = {p.strip() for p in caps.split(",") if p.strip()}
+    parts = {p.strip().lower() for p in caps.split(",") if p.strip()}
+    if "all" in parts:
+        return None
     bad = parts - set(_CAP_BUCKETS.keys())
     if bad:
         raise ValueError(

@@ -296,6 +296,13 @@ def test_caps_unknown_bucket_raises():
         build_app(require_auth=True, token="x", caps="bogus_bucket")
 
 
+def test_caps_all_is_unrestricted():
+    """REST caps match MCP semantics: `all` disables filtering."""
+    from patchium.rest import _allowed_verbs
+    assert _allowed_verbs("all") is None
+    assert _allowed_verbs("all,core") is None
+
+
 def test_caps_stream_requires_vision(client_caps_minimal, local_server):
     """Without `vision` cap, the WebSocket stream must close immediately."""
     from starlette.websockets import WebSocketDisconnect

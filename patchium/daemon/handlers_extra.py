@@ -644,7 +644,11 @@ def register_extra(daemon) -> None:
         path = args.get("path")
         events = s.network.get("events", [])
         if path:
-            Path(path).write_text(_json.dumps(events, indent=2))
+            # Wave 7.5d: network dumps contain request bodies + Authorization
+            # headers + cookies. 0600 instead of inheriting umask (typically
+            # 0644/0664).
+            from .paths import secure_write as _sw
+            _sw(Path(path), _json.dumps(events, indent=2))
             return {"path": path, "events": len(events)}
         return {"events": events}
 
@@ -802,7 +806,10 @@ def register_extra(daemon) -> None:
                             for e in har_state["entries"]],
             }
         }
-        Path(har_state["path"]).write_text(_json.dumps(har_doc, indent=2))
+        # Wave 7.5d: HAR contains every request body + Authorization header
+        # + cookie. Same threat as a session cookie jar — 0600 always.
+        from .paths import secure_write as _sw
+        _sw(Path(har_state["path"]), _json.dumps(har_doc, indent=2))
         s._har_state = {"recording": False, "path": har_state["path"]}
         return {
             "recording": False,

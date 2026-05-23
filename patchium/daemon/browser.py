@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -123,6 +124,16 @@ async def launch_session(profile_dir: Path, headless: bool = False,
     if proxy:
         from ..proxy import webrtc_leak_guard_args
         extra_args = list(extra_args) + webrtc_leak_guard_args()
+    # Wave 7.5c stealth fix: Playwright defaults inject `--no-sandbox`, which
+    # (a) triggers Chrome's visible yellow "unsupported command-line flag"
+    # infobar — readable in every screenshot and obviously bot-shaped —
+    # and (b) is a strong fingerprint signal that real users rarely show.
+    # On any working Linux user-namespace setup the sandbox runs fine; only
+    # disable as an explicit opt-out via PATCHIUM_DISABLE_SANDBOX=1 (Docker
+    # images / restricted environments).
+    ignore_default_args = None
+    if os.environ.get("PATCHIUM_DISABLE_SANDBOX", "0") not in ("1", "true", "yes"):
+        ignore_default_args = ["--no-sandbox"]
     launch_kwargs = {
         "user_data_dir": str(profile_dir),
         "channel": "chrome",
@@ -130,9 +141,22 @@ async def launch_session(profile_dir: Path, headless: bool = False,
         "no_viewport": True,
         "args": extra_args if extra_args else None,
     }
+    if ignore_default_args:
+        launch_kwargs["ignore_default_args"] = ignore_default_args
     if proxy:
         launch_kwargs["proxy"] = proxy
     context = await pw.chromium.launch_persistent_context(**launch_kwargs)
+    # Wave 7.5d stealth note: bare Patchright leaves `window.chrome.runtime`
+    # undefined, which IS a known fingerprint signal — but Patchright
+    # deliberately filters `Page.addScriptToEvaluateOnNewDocument` (the CDP
+    # method `add_init_script` calls into) because the presence of an
+    # init-script-on-new-document IS itself a stronger fingerprint signal
+    # than the missing runtime object. Verified empirically: calling
+    # `context.add_init_script(...)` against a Patchright context is a
+    # silent no-op. We accept the trade-off: chrome.runtime stays
+    # undefined, but no CDP automation-shape leaks. Sites that hard-require
+    # chrome.runtime can use `--backend nodriver` (which doesn't filter)
+    # or attach mode (real user Chrome).
     page = context.pages[0] if context.pages else await context.new_page()
     sess = BrowserSession(pw=pw, context=context, page=page, mode="launch",
                           profile_dir=profile_dir, owns_pw=owns_pw)

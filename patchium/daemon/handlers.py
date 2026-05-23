@@ -13,7 +13,8 @@ from pathlib import Path
 from . import elements
 from .paths import (
     DEFAULT_SESSION_NAME, PROFILES_DIR, get_active_session_name, list_session_names,
-    session_dir, set_active_session_name, validate_name,
+    secure_mkdir, secure_write, session_dir, set_active_session_name,
+    validate_name,
 )
 from .registry import current_session_ctx
 
@@ -459,10 +460,9 @@ def register_all(daemon) -> None:
             "tabs": tabs,
             "storage_state": storage_state,
         }
-        cp_dir = entry.profile_dir / "checkpoints"
-        cp_dir.mkdir(parents=True, exist_ok=True)
+        cp_dir = secure_mkdir(entry.profile_dir / "checkpoints")
         path = cp_dir / f"{name}.json"
-        path.write_text(_json.dumps(doc, indent=2))
+        secure_write(path, _json.dumps(doc, indent=2))
         return {"saved": True, "name": name, "path": str(path),
                 "tabs": len(tabs), "cookies": len(storage_state.get("cookies", [])),
                 "bytes": path.stat().st_size}

@@ -65,13 +65,28 @@ else:
     CACHE_DIR = Path.home() / ".cache" / "patchium"
 
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
+# Wave 7.5d: enforce 0700 on the cache root so other system users can't
+# browse session names / cached data. (mkdir respects umask, which is
+# typically 0022 → 0755; we narrow it explicitly.)
+try:
+    os.chmod(CACHE_DIR, 0o700)
+except OSError:
+    pass
 
 # Profiles live OUTSIDE the runtime dir so they survive reboots. Sock+pid stay
 # in the runtime dir so a stale socket doesn't persist across reboots.
 CONFIG_DIR = Path.home() / ".config" / "patchium"
 CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+try:
+    os.chmod(CONFIG_DIR, 0o700)
+except OSError:
+    pass
 PROFILES_DIR = CONFIG_DIR / "profiles"
 PROFILES_DIR.mkdir(parents=True, exist_ok=True)
+try:
+    os.chmod(PROFILES_DIR, 0o700)
+except OSError:
+    pass
 ACTIVE_PROFILE_PATH = CONFIG_DIR / "active-profile"
 ACTIVE_SESSION_PATH = CONFIG_DIR / "active-session"
 
@@ -80,8 +95,61 @@ PID_PATH = CACHE_DIR / "daemon.pid"
 LOG_PATH = CACHE_DIR / "daemon.log"
 DEFAULT_PROFILE_DIR = PROFILES_DIR / "default"
 DEFAULT_PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+try:
+    os.chmod(DEFAULT_PROFILE_DIR, 0o700)
+except OSError:
+    pass
 
 DEFAULT_SESSION_NAME = "default"
+
+
+# ─── Wave 7.5d: secure write helper ──────────────────────────────────────
+
+def secure_write(path: Path, content: str | bytes) -> None:
+    """Write a file with 0600 perms regardless of umask.
+
+    Use this for every file patchium produces that could carry sensitive
+    data (cookies, auth headers, request bodies, cached intents, secrets).
+    Caller-controlled output paths (`patchium screenshot -o foo.png`) are
+    explicitly NOT routed through this — the user picked the path and
+    may want to share the artifact; for those, document the perms model
+    instead of forcing it.
+
+    Atomic: writes to a temp file in the same directory, fchmods to 0600
+    *before* the rename, then renames. Eliminates the brief window where
+    the file could be world-readable after creation but before chmod.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # Tempfile in same dir so rename is atomic on the same fs.
+    tmp = path.with_suffix(path.suffix + f".tmp.{os.getpid()}")
+    mode = "wb" if isinstance(content, (bytes, bytearray)) else "w"
+    try:
+        # os.open with mode lets us chmod-on-open atomically.
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+        fd = os.open(str(tmp), flags, 0o600)
+        with os.fdopen(fd, mode) as f:
+            f.write(content)
+        os.replace(str(tmp), str(path))
+    except Exception:
+        # Best-effort cleanup
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
+
+
+def secure_mkdir(path: Path) -> Path:
+    """mkdir -p with 0700 perms — for any dir patchium creates that may
+    hold sensitive children (checkpoints, network dumps, vision cache)."""
+    path = Path(path)
+    path.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(path, 0o700)
+    except OSError:
+        pass
+    return path
 
 
 # ─── session naming + registry ───────────────────────────────────────────────
@@ -110,8 +178,8 @@ def get_active_session_name() -> str:
 def set_active_session_name(name: str) -> None:
     """Persist the active session. Mirrors to ACTIVE_PROFILE_PATH so the legacy
     `profile_use` verb stays in sync (1:1 model)."""
-    ACTIVE_SESSION_PATH.write_text(name)
-    ACTIVE_PROFILE_PATH.write_text(name)
+    secure_write(ACTIVE_SESSION_PATH, name)
+    secure_write(ACTIVE_PROFILE_PATH, name)
 
 
 def session_dir(name: str) -> Path:

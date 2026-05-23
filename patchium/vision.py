@@ -85,7 +85,11 @@ def cache_load() -> dict:
 
 
 def cache_save(data: dict) -> None:
-    _cache_path().write_text(json.dumps(data))
+    # Wave 7.5d: vision cache holds screenshot hashes + intent strings +
+    # element coords. URLs aren't stored here but the intent corpus can
+    # reveal what the user was doing. 0600 always.
+    from .daemon.paths import secure_write as _sw
+    _sw(_cache_path(), json.dumps(data))
 
 
 def cache_get(screenshot_bytes: bytes, intent: str,
@@ -234,8 +238,10 @@ def _load_spend() -> dict:
 
 def _save_spend(data: dict) -> None:
     p = _spend_path()
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(data))
+    # Wave 7.5d: spend log is low-sensitivity but kept consistent at 0600
+    # so a future audit doesn't have to special-case it.
+    from .daemon.paths import secure_write as _sw
+    _sw(p, json.dumps(data))
 
 
 def get_today_spend() -> float:
