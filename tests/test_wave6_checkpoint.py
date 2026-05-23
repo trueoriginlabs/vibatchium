@@ -153,3 +153,53 @@ def test_checkpoint_multi_tab_restore(local_server):
     assert any("simple.html" in u for u in urls_after)
     assert any("second.html" in u for u in urls_after)
     call("checkpoint_delete", {"name": "multi_tab"})
+
+
+# ─── Wave 7.5b: path-traversal hardening ───────────────────────────────
+
+
+@pytest.mark.parametrize("bad_name", [
+    "../escape",
+    "..",
+    ".",
+    ".hidden",
+    "foo/bar",
+    "foo\\bar",
+    "name with spaces",
+    "name;rm -rf",
+    # NOTE: empty string is intentionally allowed on save — it resolves
+    # to "default" for caller convenience. delete validates the raw arg.
+    "a" * 65,  # over the 64-char cap
+])
+def test_checkpoint_rejects_unsafe_names(local_server, bad_name):
+    """Checkpoint names that could escape the checkpoints/ dir or pollute
+    the filesystem must be rejected at the verb boundary."""
+    call("go", {"url": f"{local_server}/simple.html"})
+    with pytest.raises(DaemonError):
+        call("checkpoint_save", {"name": bad_name})
+    with pytest.raises(DaemonError):
+        call("checkpoint_delete", {"name": bad_name})
+
+
+@pytest.mark.parametrize("bad_name", ["../etc", "..", "foo/bar"])
+def test_checkpoint_load_rejects_unsafe_from_session(local_server, bad_name):
+    """`from_session` is a name spliced into a PROFILES_DIR path — same
+    rules apply as for the checkpoint name itself."""
+    call("go", {"url": f"{local_server}/simple.html"})
+    call("checkpoint_save", {"name": "trav_probe"})
+    try:
+        with pytest.raises(DaemonError):
+            call("checkpoint_load", {
+                "name": "trav_probe", "from_session": bad_name,
+            })
+    finally:
+        call("checkpoint_delete", {"name": "trav_probe"})
+
+
+@pytest.mark.parametrize("bad_name", [
+    "../escape", "..", ".hidden", "foo/bar", "name with spaces", "",
+])
+def test_session_new_rejects_unsafe_names(bad_name):
+    """session_new tightened to the same validator."""
+    with pytest.raises(DaemonError):
+        call("session_new", {"name": bad_name})

@@ -15,15 +15,30 @@ Bearer-token by default. Token is generated on first launch + persisted at
 ### Endpoints
 
   GET  /v1/health                 — health check; no auth
-  GET  /v1/tools                  — list every available verb + schema
+  GET  /v1/tools                  — list available verbs (post-caps filter)
   POST /v1/<verb>                 — invoke verb; body is the args dict
   POST /v1/<verb>?session=<name>  — invoke verb on a specific session
+  WS   /v1/stream/<session>       — live JPEG frames (token via ?token=...)
 
 ### Long-running verbs
 
 `act`, `vision_click`, `wait_email_code`, etc. can take many seconds.
 The shim awaits them inline (FastAPI is async); set the client timeout
 appropriately.
+
+### Capability gating (Wave 7.5b)
+
+By default the REST shim exposes every daemon verb to authenticated
+clients — including `eval`, `secret_*`, `wait_email_code`, and the file-
+writing verbs (`screenshot` with path, `storage_export`, `download_save`,
+`pdf`, `har_stop`, `network_dump`, `record_stop`). That gives any client
+holding the bearer token **local-code-equivalent** access on the host.
+
+For untrusted clients / hosted-mode deployments, restrict the surface
+with `caps=<bucket,...>` (same bucket names as `mcp --caps`). Verbs
+outside the allowed set return HTTP 403. The WebSocket stream also
+respects caps: `vision` is required for screenshots; `input` is required
+to forward clicks / keys back into the browser.
 """
 import logging
 import os
@@ -47,8 +62,36 @@ def get_or_create_token() -> str:
     return token
 
 
-def build_app(*, require_auth: bool = True, token: str | None = None):
-    """Build the FastAPI app. `token` defaults to the persisted token."""
+def _allowed_verbs(caps: str | None) -> set[str] | None:
+    """Resolve caps spec → set of allowed verb names, or None for unrestricted.
+
+    Reuses the MCP capability buckets so the two surfaces stay aligned.
+    `status` is always exposed (matches MCP behavior).
+    """
+    if not caps:
+        return None  # unrestricted
+    from .mcp_server import _CAP_BUCKETS, _ALWAYS_EXPOSED
+    parts = {p.strip() for p in caps.split(",") if p.strip()}
+    bad = parts - set(_CAP_BUCKETS.keys())
+    if bad:
+        raise ValueError(
+            f"unknown REST caps: {sorted(bad)}. "
+            f"Available: {sorted(_CAP_BUCKETS.keys())}"
+        )
+    allowed: set[str] = set(_ALWAYS_EXPOSED)
+    for bucket in parts:
+        allowed |= _CAP_BUCKETS[bucket]
+    return allowed
+
+
+def build_app(*, require_auth: bool = True, token: str | None = None,
+              caps: str | None = None):
+    """Build the FastAPI app. `token` defaults to the persisted token.
+
+    Args:
+      caps: comma-separated capability buckets (`core,nav,input,...`).
+            None = unrestricted (every verb exposed). Same buckets as MCP.
+    """
     try:
         from fastapi import FastAPI, HTTPException, Request, WebSocket
         from fastapi.responses import JSONResponse
@@ -64,6 +107,7 @@ def build_app(*, require_auth: bool = True, token: str | None = None):
     if require_auth and token is None:
         token = get_or_create_token()
     _expected_token = token  # closure
+    _allowed = _allowed_verbs(caps)  # None = unrestricted
 
     app = FastAPI(title="patchium", version="0.3.0",
                   description="REST shim over the patchium daemon")
@@ -78,6 +122,15 @@ def build_app(*, require_auth: bool = True, token: str | None = None):
         if not secrets.compare_digest(provided, _expected_token):
             raise HTTPException(status_code=403, detail="invalid token")
 
+    def _check_cap(verb: str) -> None:
+        """Wave 7.5b: capability gate. 403 if verb isn't in the allowed set."""
+        if _allowed is not None and verb not in _allowed:
+            raise HTTPException(
+                status_code=403,
+                detail=f"verb {verb!r} not in allowed caps: "
+                       f"add the bucket via --caps to expose it"
+            )
+
     @app.get("/v1/health")
     async def health():
         return {"status": "ok", "daemon": daemon_is_running()}
@@ -89,7 +142,9 @@ def build_app(*, require_auth: bool = True, token: str | None = None):
             "tools": [
                 {"name": t[0], "description": t[1], "input_schema": t[2]}
                 for t in TOOLS
+                if _allowed is None or t[0] in _allowed
             ],
+            "caps": caps,
         }
 
     @app.websocket("/v1/stream/{session_name}")
@@ -105,9 +160,9 @@ def build_app(*, require_auth: bool = True, token: str | None = None):
         `{type:scroll,dx,dy}` events from the client and forwards them
         through `daemon_call('mouse'|'keys'|...)`.
 
-        Implementation: pulls screenshots via the existing RPC, so the REST
-        shim and daemon stay decoupled (REST can even run in a sibling
-        container as long as it has socket access).
+        Wave 7.5b: capability-aware. Requires `vision` bucket for frame
+        capture (calls `screenshot`); requires `input` bucket to accept
+        takeover events (calls `mouse`/`keys`).
         """
         # Query-param auth
         if require_auth:
@@ -116,18 +171,30 @@ def build_app(*, require_auth: bool = True, token: str | None = None):
                 # 1008 = policy violation — closest to HTTP 403 for WS
                 await websocket.close(code=1008, reason="bad token")
                 return
+        # Capability gate: stream requires `vision` (for screenshot calls).
+        # Takeover additionally requires `input` (for mouse/keys forwarding).
+        if _allowed is not None and "screenshot" not in _allowed:
+            await websocket.close(code=1008, reason="vision cap required for /v1/stream")
+            return
         try:
             fps = int(websocket.query_params.get("fps", "5"))
         except ValueError:
             fps = 5
         fps = max(1, min(fps, 30))
-        takeover = websocket.query_params.get("takeover") == "1"
+        takeover_requested = websocket.query_params.get("takeover") == "1"
+        takeover_allowed = _allowed is None or {"mouse", "keys"} <= _allowed
+        takeover = takeover_requested and takeover_allowed
         await websocket.accept()
         # Send hello envelope first (client expects this to set up scaling)
         try:
             await websocket.send_json({
                 "type": "hello", "session": session_name,
                 "fps": fps, "takeover": takeover,
+                # Surface denial reason so a misconfigured client gets a hint
+                "takeover_denied_reason": (
+                    "input cap required"
+                    if takeover_requested and not takeover_allowed else None
+                ),
             })
         except Exception:  # noqa: BLE001
             return
@@ -170,7 +237,7 @@ def build_app(*, require_auth: bool = True, token: str | None = None):
                     stop.set()
                     return
                 if not takeover:
-                    continue  # discard; takeover mode off
+                    continue  # discard; takeover mode off or denied
                 try:
                     ev = _json.loads(msg)
                 except Exception:  # noqa: BLE001
@@ -231,6 +298,7 @@ def build_app(*, require_auth: bool = True, token: str | None = None):
     @app.post("/v1/{verb}")
     async def invoke(verb: str, request: Request):
         _check_auth(request)
+        _check_cap(verb)
         try:
             body = await request.json()
         except Exception:  # noqa: BLE001
@@ -249,14 +317,15 @@ def build_app(*, require_auth: bool = True, token: str | None = None):
                                               session=session)
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=500,
-                                detail=f"{type(exc).__name__}: {exc}")
+                                detail=f"{type(exc).__name__}: {exc}") from exc
         return JSONResponse({"ok": True, "result": result})
 
     return app
 
 
 def serve(*, host: str = "127.0.0.1", port: int = 8000,
-           require_auth: bool = True, token: str | None = None) -> None:
+           require_auth: bool = True, token: str | None = None,
+           caps: str | None = None) -> None:
     """Run the REST shim. Blocks until interrupted."""
     try:
         import uvicorn
@@ -269,9 +338,14 @@ def serve(*, host: str = "127.0.0.1", port: int = 8000,
         token = get_or_create_token()
         print(f"\n  patchium REST listening on http://{host}:{port}", flush=True)
         print(f"  bearer token: {token}", flush=True)
-        print(f"  token file:   {TOKEN_PATH}\n", flush=True)
+        print(f"  token file:   {TOKEN_PATH}", flush=True)
+        if caps:
+            print(f"  caps:         {caps}", flush=True)
+        else:
+            print("  caps:         (unrestricted — clients have local-code-equivalent access)", flush=True)
+        print(flush=True)
     elif not require_auth:
         print(f"\n  WARNING: REST shim listening on http://{host}:{port} WITHOUT AUTH", flush=True)
         print("  Don't expose to a public network!\n", flush=True)
-    app = build_app(require_auth=require_auth, token=token)
+    app = build_app(require_auth=require_auth, token=token, caps=caps)
     uvicorn.run(app, host=host, port=port, log_level="info")

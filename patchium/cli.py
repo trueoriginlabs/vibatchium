@@ -1788,7 +1788,14 @@ def mcp(caps):
 @click.option("--port", default=8000, type=int)
 @click.option("--insecure-no-auth", is_flag=True,
               help="Disable bearer-token auth (dev only).")
-def serve(host, port, insecure_no_auth):
+@click.option("--caps", default=None,
+              help="Restrict the REST surface to these capability buckets "
+                   "(comma-separated, same names as `mcp --caps`). Without "
+                   "this flag, any authenticated client can invoke every verb "
+                   "including `eval`, `secret_*`, and file-writing verbs "
+                   "(local-code-equivalent access). Example: "
+                   "--caps=core,nav,input,vision")
+def serve(host, port, insecure_no_auth, caps):
     """Run the FastAPI REST shim mirroring every daemon verb at POST /v1/<verb>.
 
     Bearer token persists at ~/.cache/patchium/rest-token (mode 0600).
@@ -1798,7 +1805,7 @@ def serve(host, port, insecure_no_auth):
         # Public bind WITH auth is fine, but we want the user to think about it
         click.echo(f"warning: binding non-loopback {host!r}; ensure firewall is set", err=True)
     from .rest import serve as _serve
-    _serve(host=host, port=port, require_auth=not insecure_no_auth)
+    _serve(host=host, port=port, require_auth=not insecure_no_auth, caps=caps)
 
 
 # ─── pages ────────────────────────────────────────────────────────────────

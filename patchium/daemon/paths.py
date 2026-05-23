@@ -18,7 +18,45 @@ for the corresponding `session_*` verbs.
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
+
+# ─── name validation (Wave 7.5b — path-traversal hardening) ──────────────
+
+# Single allowed-name regex shared by every verb that interpolates a
+# caller-supplied identifier into a filesystem path. Rejects path separators,
+# leading dot, parent-dir segments, and any control characters.
+_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+# Hard cap so a 4 KB name can't blow out a path on filesystems with PATH_MAX.
+_NAME_MAX_LEN = 64
+
+
+def validate_name(name: str | None, *, kind: str = "name") -> str:
+    """Validate a session/profile/checkpoint identifier.
+
+    Raises ValueError if the name would be unsafe to splice into a path:
+      - empty / non-string
+      - longer than 64 characters
+      - contains anything outside [A-Za-z0-9._-]
+      - starts with a dot (would create a hidden file, or be `..`)
+      - is exactly `.` or `..`
+
+    Returns the name unchanged on success — caller-friendly chaining.
+    """
+    if not isinstance(name, str) or not name:
+        raise ValueError(f"bad {kind}: must be a non-empty string")
+    if len(name) > _NAME_MAX_LEN:
+        raise ValueError(
+            f"bad {kind} {name!r}: max {_NAME_MAX_LEN} characters"
+        )
+    if name in {".", ".."}:
+        raise ValueError(f"bad {kind} {name!r}: reserved")
+    if not _NAME_RE.match(name):
+        raise ValueError(
+            f"bad {kind} {name!r}: only [A-Za-z0-9._-] allowed, "
+            f"must not start with '.'"
+        )
+    return name
 
 _xdg_runtime = os.environ.get("XDG_RUNTIME_DIR")
 if _xdg_runtime and Path(_xdg_runtime).is_dir():

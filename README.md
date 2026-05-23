@@ -364,12 +364,15 @@ Patchright's protocol-layer patches (`Runtime.enable` avoidance, CDP message scr
 ## REST shim + Docker
 
 ```bash
-patchium serve                                  # FastAPI on 127.0.0.1:8000
-patchium serve --host 0.0.0.0 --port 8000       # bind public
-patchium serve --insecure-no-auth               # disable bearer-token auth (explicit opt-in)
+patchium serve                                          # FastAPI on 127.0.0.1:8000, unrestricted
+patchium serve --caps=core,nav,input,vision             # restrict to a safer subset
+patchium serve --host 0.0.0.0 --port 8000               # bind public
+patchium serve --insecure-no-auth                       # disable bearer-token auth (explicit opt-in)
 ```
 
 Bearer token is generated on first launch and persisted at `~/.cache/patchium/rest-token` (mode 0600). Every daemon verb is reachable at `POST /v1/<verb>` with the same JSON body. Routing to a session: `?session=<name>` query string or `session` body field. WebSocket live-view at `/v1/stream/<session>?token=<TOKEN>&fps=10&takeover=1`.
+
+> ⚠️ **REST security model — local-code-equivalent access.** Without `--caps`, any client holding the bearer token can invoke **every** daemon verb. That includes `eval` (run arbitrary JavaScript in the browser), `secret_*` (read every stored credential), `wait_email_code` (poll the user's mailbox), and the file-writing verbs (`screenshot path=...`, `storage_export`, `download_save`, `pdf`, `har_stop`, `network_dump`, `record_stop`) — all of which write to caller-supplied paths on the **host filesystem**. This is intentional for trusted local use but means a leaked token is equivalent to shell access. For hosted-mode / multi-tenant deployments, **always** pass `--caps=...` to restrict the surface. The capability buckets are the same as `mcp --caps` (see the [MCP capability gating](#mcp-capability-gating) table). The WebSocket stream is also caps-aware: `vision` is required for frame capture, `input` is required to accept takeover events.
 
 ```bash
 TOKEN=$(cat ~/.cache/patchium/rest-token)

@@ -29,7 +29,7 @@ def _connect(timeout: float = 2.0) -> socket.socket:
         s.connect(str(SOCK_PATH))
     except (FileNotFoundError, ConnectionRefusedError) as exc:
         s.close()
-        raise DaemonNotRunning(f"daemon not running ({exc})")
+        raise DaemonNotRunning(f"daemon not running ({exc})") from exc
     return s
 
 

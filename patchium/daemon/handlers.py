@@ -13,7 +13,7 @@ from pathlib import Path
 from . import elements
 from .paths import (
     DEFAULT_SESSION_NAME, PROFILES_DIR, get_active_session_name, list_session_names,
-    session_dir, set_active_session_name,
+    session_dir, set_active_session_name, validate_name,
 )
 from .registry import current_session_ctx
 
@@ -195,9 +195,7 @@ def register_all(daemon) -> None:
         a subsequent `start` call finds it warm. Pass `prewarm=false` to opt
         out per-call.
         """
-        name = args.get("name")
-        if not name or "/" in name or name.startswith("."):
-            raise ValueError(f"bad session name: {name!r}")
+        name = validate_name(args.get("name"), kind="session name")
         p = PROFILES_DIR / name
         existed = p.exists()
         p.mkdir(parents=True, exist_ok=True)
@@ -221,9 +219,7 @@ def register_all(daemon) -> None:
 
     @daemon.handler("session_use")
     async def _session_use(d, args):
-        name = args.get("name")
-        if not name:
-            raise ValueError("session_use requires a name")
+        name = validate_name(args.get("name"), kind="session name")
         if name not in list_session_names():
             raise ValueError(
                 f"unknown session: {name!r} — create with `patchium session new {name}`"
@@ -240,6 +236,7 @@ def register_all(daemon) -> None:
     async def _session_close(d, args):
         """Stop Chrome for one session; profile dir is preserved on disk."""
         name = args.get("name") or current_session_ctx.get()
+        name = validate_name(name, kind="session name")
         closed = await d.registry.close(name)
         return {"closed": closed, "name": name}
 
@@ -430,7 +427,7 @@ def register_all(daemon) -> None:
         import json as _json
         import time as _time
         from .registry import current_session_ctx as _ctx
-        name = args.get("name") or "default"
+        name = validate_name(args.get("name") or "default", kind="checkpoint name")
         sname = _ctx.get()
         entry = d.registry.get(sname)
         if entry is None:
@@ -486,8 +483,10 @@ def register_all(daemon) -> None:
         """
         import json as _json
         from .registry import current_session_ctx as _ctx
-        name = args.get("name") or "default"
+        name = validate_name(args.get("name") or "default", kind="checkpoint name")
         from_session = args.get("from_session")  # optional: load from another session's profile
+        if from_session is not None:
+            from_session = validate_name(from_session, kind="from_session")
 
         sname = _ctx.get()
         entry = d.registry.get(sname)
@@ -566,6 +565,8 @@ def register_all(daemon) -> None:
         """List checkpoints for the current (or named) session."""
         import json as _json
         from_session = args.get("from_session")
+        if from_session is not None:
+            from_session = validate_name(from_session, kind="from_session")
         from .registry import current_session_ctx as _ctx
         sname = from_session or _ctx.get()
         if from_session:
@@ -596,9 +597,7 @@ def register_all(daemon) -> None:
 
     @daemon.handler("checkpoint_delete")
     async def _checkpoint_delete(d, args):
-        name = args.get("name")
-        if not name:
-            raise ValueError("checkpoint_delete requires a name")
+        name = validate_name(args.get("name"), kind="checkpoint name")
         from .registry import current_session_ctx as _ctx
         sname = _ctx.get()
         entry = d.registry.get(sname)
@@ -616,9 +615,7 @@ def register_all(daemon) -> None:
     async def _session_delete(d, args):
         """Delete a profile dir on disk. Refuses if the session is running,
         active, or is the special 'default'."""
-        name = args.get("name")
-        if not name:
-            raise ValueError("session_delete requires a name")
+        name = validate_name(args.get("name"), kind="session name")
         if name == get_active_session_name():
             raise ValueError(f"session {name!r} is active — switch first")
         deleted = d.registry.delete_profile_dir(name)
