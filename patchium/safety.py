@@ -132,7 +132,256 @@ PATTERNS: list[tuple[re.Pattern, str, str]] = [
                 r"(admin|root|god|developer|jailbreak|unrestricted)\s+"
                 r"(mode|override|access)\b", re.I),
      "jailbreak", "high"),
+
+    # ─── Wave 7.7: patterns derived from Gray Swan IPI Q2 2026 wins ────
+    # The agent-redteam-skill project documented 23+ attack families with
+    # validated breaks on flagship models. The patterns below cover the
+    # families that have the highest hit rate AND aren't already caught
+    # above — specifically §19 task-coupling, the most-used pattern in
+    # the validated-payload library, and the pseudo-XML platform-voice
+    # tag forgery that powered every documented win to date.
+
+    # §19a — auth/handshake gate framing. "Lightweight handshake required
+    # for assistant agents", "auth protocol to unlock full content", etc.
+    # The agent's "don't take off-task actions" gate doesn't fire because
+    # the action is reframed as in-task prerequisite. Pattern allows up
+    # to ~30 chars between the auth-shape noun and the gate-shape word
+    # (covers "auth handshake is required for ...").
+    (re.compile(r"\b(?:auth(?:entication)?|handshake|verification)\b"
+                r"[\s\S]{0,30}\b"
+                r"(?:required|needed|gated?|protocol|handshake|"
+                r"mandatory|enforced)\b", re.I),
+     "auth_gate_framing", "high"),
+
+    # §19b — pre-consent / ToS authorization reframe. Claims user already
+    # consented at signup, fake TOS version references. Alone weak,
+    # paired with task-coupling becomes a strong reinforcer.
+    (re.compile(r"\b(?:pre-?consent(?:ed)?|already\s+consented|opted[\-\s]?in|"
+                r"signup\s+agreement)\b[\s\S]{0,80}\b"
+                r"(?:signup|tos|terms|registration|onboarding)\b", re.I),
+     "preconsent_reframe", "high"),
+
+    # §19c — task-incomplete coupling. "Summary would be misleading
+    # without auth", "summarization produces misleading rating",
+    # "answer is incomplete without unlock". The pattern that makes the
+    # agent's helpfulness prior pull toward the action.
+    (re.compile(r"\b(?:summary|summari[sz]ation|answer|response|"
+                r"recommendation|rating|score|result|output)\b"
+                r"[\s\S]{0,40}\b"
+                r"(?:would\s+be|will\s+be|is|produces?|yields?|gives?|"
+                r"returns?)\b[\s\S]{0,20}\b"
+                r"(?:misleading|incomplete|inaccurate|wrong|partial|"
+                r"missing|stale|out[\-\s]?of[\-\s]?date)\b", re.I),
+     "task_incomplete_coupling", "high"),
+
+    # §19d — platform-voice authority forgery. `<seller_grading_note>`,
+    # `<forum_policy_note>`, `<service_notice>`, etc. Pseudo-XML tags
+    # impersonating venue-level authoritative content. Generic structure:
+    # snake_case + descriptive suffix in element name.
+    (re.compile(r"<[a-z][a-z_]+_(?:notice|note|policy|advisory|directive|"
+                r"update|disclaimer|context|clarification|"
+                r"announcement|warning|grading|rule)>", re.I),
+     "platform_voice_forgery", "high"),
+
+    # §19e — user-voice impersonation with timestamp. `<user_update
+    # timestamp="2026-05-21T11:29Z">` — the timestamp attribute pretends
+    # to be a fresh in-band user message, bypassing the system/user
+    # boundary. Requires timestamp attr to avoid false-positives on
+    # docs that mention `<user>` schemas.
+    (re.compile(r"<user_(?:update|clarification|note|directive|"
+                r"preference|context|message|input|request)\b[^>]{0,80}"
+                r"\btimestamp\b", re.I),
+     "user_voice_impersonation", "high"),
+
+    # §19f — signature forgery at end of block. `— Platform team`,
+    # `— ServiceNotes platform`, `— Admin`. Allows an optional capitalized
+    # proper noun before the authority word so brand+role works
+    # ("— ServiceNotes platform") not just role-only ("— Platform team").
+    (re.compile(r"(?:^|\n)\s*[—–\-]{1,2}\s+"
+                r"(?:[A-Z][A-Za-z]{2,25}\s+)?"
+                r"(?:platform|moderator|admin|system|official|operator|"
+                r"site|service|host|team|notes?|notice|staff|"
+                r"moderators?|support)\b",
+                re.M),
+     "authority_signature_forgery", "low"),
+
+    # §5 — faux structured tool output. `<tool_response>...`,
+    # `<observation>...`, `<function_response>...`. Common LLM scaffold
+    # tags an attacker uses to impersonate prior turn's tool result.
+    (re.compile(r"<\s*(?:tool_response|tool_result|tool_output|observation|"
+                r"function_response|system_response|action_result)\b", re.I),
+     "faux_tool_output", "high"),
+
+    # §4 — faux code comment system override. `// system: ignore`,
+    # `# admin: override`, `-- SYSTEM:`, `/* prompt: */`. Strict —
+    # requires authority noun adjacent.
+    (re.compile(r"(?:^|\s)(?://|--|/\*)\s*"
+                r"(?:system|admin|prompt|jailbreak|override|root)\s*[:;]\s*\S",
+                re.I | re.M),
+     "code_comment_override", "high"),
+
+    # §19g — numbered protocol with action-on-credentials reframe. Strict
+    # 3-step protocol where step 2 is a sensitive op and step 3 contains
+    # an unlock/grant verb. Tightened so the mere presence of a numbered
+    # list doesn't fire — both an exfil verb in step 2 AND an unlock-
+    # shape verb anywhere in step 3 must appear.
+    (re.compile(r"\b1\.\s+\w[^\n]{0,120}\n\s*2\.\s+"
+                r"(?:post|send|submit|share|forward|reveal|expose|email|"
+                r"retrieve|fetch|read)\b[\s\S]{0,200}\b3\.\s+"
+                r"[^\n]{0,200}\b"
+                r"(?:unlocks?|completes?|enables?|grants?|authorizes?|"
+                r"allows?|provides?|gives?\s+access|opens?)\b", re.I),
+     "numbered_exfil_protocol", "high"),
 ]
+
+
+# ─── Wave 7.7: hidden-DOM smuggling detector (§7 from gray swan) ──────
+
+
+def extract_hidden_text(html: str) -> dict:
+    """Pull text that would NOT render to a human but a DOM-traversing
+    agent (text/html extraction in patchium's case) would still see.
+
+    Vectors covered:
+      - HTML comments (<!-- ... -->)
+      - inline style `display:none` / `visibility:hidden` /
+        `opacity:0` / `font-size:0px` / negative `text-indent` /
+        off-screen `position:absolute; left:-9999px`
+      - `aria-hidden="true"` elements (visible to AT, hidden to sighted)
+      - `alt`, `title`, `aria-label` attribute text (rendered by AT only)
+      - `hidden` HTML attribute on any element
+      - Zero-width characters (U+200B/C/D, U+FEFF, U+2060)
+
+    Returns:
+      {hidden_text, vectors: {comments: int, hidden_style: int,
+       aria_hidden: int, alt_text: int, hidden_attr: int,
+       zero_width: int}, total_chars: int}
+
+    Pure stdlib — uses html.parser, no BeautifulSoup dep.
+    """
+    if not html or not isinstance(html, str):
+        return {"hidden_text": "", "vectors": {}, "total_chars": 0}
+
+    import html as _html
+    from html.parser import HTMLParser
+
+    vectors = {"comments": 0, "hidden_style": 0, "aria_hidden": 0,
+                "alt_text": 0, "hidden_attr": 0, "zero_width": 0}
+    chunks: list[str] = []
+
+    _HIDE_STYLE_RX = re.compile(
+        r"\b(display\s*:\s*none|visibility\s*:\s*hidden|opacity\s*:\s*0"
+        r"|font-size\s*:\s*0(?:px|pt|em)?|text-indent\s*:\s*-\d{3,}"
+        r"|left\s*:\s*-\d{3,}px)",
+        re.I,
+    )
+
+    class _Extractor(HTMLParser):
+        def __init__(self):
+            super().__init__(convert_charrefs=True)
+            self._stack: list[bool] = []  # truthy = inside-hidden block
+            self._hidden_reasons: list[str] = []
+
+        def _is_hidden(self, attrs: dict) -> tuple[bool, str | None]:
+            if "hidden" in attrs:
+                return True, "hidden_attr"
+            if attrs.get("aria-hidden") == "true":
+                return True, "aria_hidden"
+            style = attrs.get("style", "")
+            if style and _HIDE_STYLE_RX.search(style):
+                return True, "hidden_style"
+            return False, None
+
+        def handle_starttag(self, tag, attrs_list):
+            attrs = {k.lower(): (v or "") for k, v in attrs_list}
+            # Hidden block start
+            hidden, reason = self._is_hidden(attrs)
+            self._stack.append(hidden)
+            if hidden and reason:
+                vectors[reason] += 1
+                self._hidden_reasons.append(reason)
+            # AT-only attribute text — record regardless of visibility
+            # (alt text is rendered by screen readers, not sighted users;
+            # an attacker can hide a payload in an alt attribute on an
+            # otherwise-visible image)
+            for key in ("alt", "title", "aria-label"):
+                if attrs.get(key):
+                    val = attrs[key].strip()
+                    if val:
+                        chunks.append(val)
+                        vectors["alt_text"] += 1
+
+        def handle_endtag(self, tag):
+            if self._stack:
+                self._stack.pop()
+
+        def handle_data(self, data):
+            if any(self._stack):
+                stripped = data.strip()
+                if stripped:
+                    chunks.append(stripped)
+
+        def handle_comment(self, data):
+            stripped = data.strip()
+            if stripped:
+                chunks.append(stripped)
+                vectors["comments"] += 1
+
+    try:
+        _Extractor().feed(html)
+    except Exception:  # noqa: BLE001
+        # Malformed HTML — best-effort recovery via regex fallback below
+        pass
+
+    # Regex fallback for things the parser may have missed (always run
+    # so a parser failure doesn't silently lose comments / zero-widths)
+    for m in re.finditer(r"<!--([\s\S]*?)-->", html):
+        c = m.group(1).strip()
+        if c and c not in chunks:
+            chunks.append(c)
+            vectors["comments"] += 1
+
+    # Zero-width char detector — separate count
+    zw_count = len(re.findall(r"[​‌‍﻿⁠]", html))
+    vectors["zero_width"] = zw_count
+    if zw_count:
+        chunks.append(f"[{zw_count} zero-width chars in HTML]")
+
+    hidden_text = _html.unescape("\n".join(chunks))
+    return {"hidden_text": hidden_text, "vectors": vectors,
+            "total_chars": len(hidden_text)}
+
+
+def classify_html(html: str) -> dict:
+    """Two-pass classifier for raw HTML — runs `classify()` on visible
+    text AND on hidden text separately, so a payload smuggled into a
+    `display:none` block or `aria-label` is caught even if the visible
+    body is clean.
+
+    Returns:
+      {risk: combined risk,
+       visible: classify() result on visible text,
+       hidden: classify() result on extracted hidden text,
+       vectors: extract_hidden_text vectors,
+       any_hidden_payload: bool}
+    """
+    hidden_doc = extract_hidden_text(html)
+    hidden_class = classify(hidden_doc["hidden_text"])
+    # Best-effort visible: strip tags + comments + extract text
+    visible = re.sub(r"<!--[\s\S]*?-->", "", html)
+    visible = re.sub(r"<[^>]+>", " ", visible)
+    visible_class = classify(visible)
+    # Combined risk = max of the two
+    ranks = {"none": 0, "low": 1, "high": 2}
+    combined = max(visible_class["risk"], hidden_class["risk"],
+                    key=lambda r: ranks.get(r, 0))
+    return {
+        "risk": combined,
+        "visible": visible_class,
+        "hidden": hidden_class,
+        "vectors": hidden_doc["vectors"],
+        "any_hidden_payload": hidden_class["risk"] != "none",
+    }
 
 
 # ─── classifier ────────────────────────────────────────────────────────
