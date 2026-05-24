@@ -87,6 +87,21 @@ class Daemon:
         # Wave 7.6: pure utilities — no session, no registry mutation
         "verify_url",      # DNS / HTTP pre-check before committing to `go`
         "set_log_verbs",   # runtime toggle for the per-verb DEBUG audit log
+        # Wave 7.7.5: high-level orchestration verbs that manage their own
+        # session lifecycle — they call into other handlers explicitly
+        # (auto-start, go, text, stop) so they don't need the session lock
+        # held at this layer.
+        "explore",
+    })
+
+    # Wave 7.7.5: verbs that can auto-start a session when one isn't
+    # running yet. The dispatcher's "no session" rejection is bypassed for
+    # these — they handle the missing-session case themselves (typically
+    # by calling into `start` first). The per-session lock IS still
+    # acquired after auto-start completes, so concurrent same-session
+    # mutations stay safe.
+    SESSION_AUTOSTART_VERBS = frozenset({
+        "go",  # auto-starts headless when called without a prior `start`
     })
 
     # Verbs that mutate the registry itself (create/destroy sessions, switch
@@ -241,14 +256,23 @@ class Daemon:
                 # Different-session mutations run in parallel because each has its own lock.
                 entry = self.registry.get(session_name)
                 if entry is None:
-                    return {
-                        "id": req_id, "ok": False,
-                        "error": f"no session {session_name!r} — "
-                                 f"run `patchium start"
-                                 f"{' --session ' + session_name if session_name != DEFAULT_SESSION_NAME else ''}` first",
-                    }
-                async with entry.lock:
-                    result = await self._handlers[cmd](self, args)
+                    # Wave 7.7.5: auto-start verbs handle the missing session
+                    # themselves by calling into `start` from within the
+                    # handler. Skip the dispatcher-level rejection so the
+                    # handler can fire; the registry lookup will succeed
+                    # on a follow-up dispatcher call once `start` returns.
+                    if cmd in self.SESSION_AUTOSTART_VERBS:
+                        result = await self._handlers[cmd](self, args)
+                    else:
+                        return {
+                            "id": req_id, "ok": False,
+                            "error": f"no session {session_name!r} — "
+                                     f"run `patchium start"
+                                     f"{' --session ' + session_name if session_name != DEFAULT_SESSION_NAME else ''}` first",
+                        }
+                else:
+                    async with entry.lock:
+                        result = await self._handlers[cmd](self, args)
             # Wave 6.3c: prompt-injection middleware. Off by default; per-session
             # flag controls activation. Mutates content fields in-place.
             entry = self.registry.get(session_name)

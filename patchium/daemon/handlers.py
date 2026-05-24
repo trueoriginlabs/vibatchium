@@ -800,6 +800,88 @@ def register_all(daemon) -> None:
             "running_sessions": d.registry.list_running(),
         }
 
+    # ─── Wave 7.7.5: high-level "just works" verbs ───────────────────────
+
+    @daemon.handler("explore")
+    async def _explore(d, args):
+        """One-call "go look at this URL and tell me what's there."
+
+        Does: verify_url (DNS pre-check) → auto-start session if needed
+        → go → extract text + screenshot → optionally close session.
+        Closes the most common "I just want to look at a page" workflow
+        into a single MCP call instead of 4-6.
+
+        Args:
+          url           (str)  target URL — required
+          intent        (str)  optional natural-language description of
+                               what to look for (not used in v0, future
+                               hook for `act` integration)
+          keep_open     (bool) leave session open for follow-up calls
+                               (default: false — auto-close after extract)
+          screenshot    (bool) include a base64 PNG of the landing page
+                               (default: true)
+          full_page     (bool) full-page screenshot vs viewport
+                               (default: true)
+          skip_verify   (bool) skip the verify_url DNS pre-check
+                               (default: false; turn on for trusted URLs)
+
+        Returns:
+          {url, title, status, text, walled?, screenshot_b64?, session,
+           closed (bool), elapsed_ms}
+        """
+        import time as _time
+        t0 = _time.time()
+        url = args.get("url")
+        if not isinstance(url, str) or not url:
+            raise ValueError("explore requires `url`")
+        keep_open = bool(args.get("keep_open", False))
+        want_screenshot = bool(args.get("screenshot", True))
+        full_page = bool(args.get("full_page", True))
+        skip_verify = bool(args.get("skip_verify", False))
+        # DNS pre-check unless skipped — saves 30s on dead-DNS guesses
+        if not skip_verify:
+            v = await d._handlers["verify_url"](d, {"url": url})
+            if not v.get("ok"):
+                return {
+                    "url": url, "verified": False,
+                    "error": v.get("error"),
+                    "elapsed_ms": int((_time.time() - t0) * 1000),
+                }
+        # Navigate (auto-start happens inside _go thanks to 7.7.5)
+        go_res = await d._handlers["go"](d, {"url": url})
+        # Extract text
+        text_res = await d._handlers["text"](d, {})
+        text = text_res.get("text", "") if isinstance(text_res, dict) else str(text_res)
+        out = {
+            "url": go_res.get("url", url),
+            "title": go_res.get("title"),
+            "status": go_res.get("status"),
+            "text": text,
+            "session": current_session_ctx.get(),
+        }
+        if go_res.get("walled"):
+            out["walled"] = go_res["walled"]
+            out["advice"] = go_res.get("advice")
+        # Screenshot
+        if want_screenshot:
+            try:
+                shot = await d._handlers["screenshot"](
+                    d, {"full_page": full_page})
+                if isinstance(shot, dict) and shot.get("png_b64"):
+                    out["screenshot_b64"] = shot["png_b64"]
+            except Exception as exc:  # noqa: BLE001
+                out["screenshot_error"] = f"{type(exc).__name__}: {exc}"
+        # Optional auto-close
+        out["closed"] = False
+        if not keep_open:
+            try:
+                await d._handlers["stop"](d, {})
+                out["closed"] = True
+            except Exception:  # noqa: BLE001
+                pass
+        out["elapsed_ms"] = int((_time.time() - t0) * 1000)
+        return out
+
     @daemon.handler("shutdown")
     async def _shutdown(d, args):
         # caller wants the whole daemon process to exit
@@ -811,8 +893,22 @@ def register_all(daemon) -> None:
     @daemon.handler("go")
     async def _go(d, args):
         """Navigate. Wave 5.4: detect Cloudflare/DataDome walls and surface
-        an advisory in the response so callers can switch backends."""
+        an advisory in the response so callers can switch backends.
+
+        Wave 7.7.5 ergonomic: if no session is running for the current
+        session-name, auto-spawn one (headless by default for `go`-first
+        callers — the assumption is they're using patchium for content
+        extraction, not visual debugging). Set PATCHIUM_NO_AUTO_START=1
+        to disable and require explicit `start` first.
+        """
         from . import backends as _backends
+        # Wave 7.7.5: auto-start if no session present
+        name = current_session_ctx.get()
+        if (d.registry.get(name) is None
+                and os.environ.get("PATCHIUM_NO_AUTO_START", "0").lower()
+                    not in ("1", "true", "yes")):
+            log.info("auto-start session=%s (no existing session for `go`)", name)
+            await d._handlers["start"](d, {"headless": True})
         s = _need_session(d)
         url = args["url"]
         wait_until = args.get("wait_until", "domcontentloaded")

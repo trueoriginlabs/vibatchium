@@ -79,6 +79,17 @@ TOOLS: list[tuple[str, str, dict, str, Any]] = [
       "properties": {"on": _bool("True to enable, false to disable.", False)},
       "required": ["on"]},
      "set_log_verbs", None),
+    ("explore",
+     "ONE-CALL 'look at this URL'. Does verify_url → auto-start session if needed (headless) → go → extract text + screenshot → close session. Replaces the start/go/text/stop sequence for the 80% case of 'just show me what's on this page'. Use this instead of separate start/go/text calls unless you specifically need multi-step interaction in one session.",
+     {"type": "object",
+      "properties": {"url": _str("Target URL — required."),
+                     "intent": _str("Optional natural-language description (reserved for future)."),
+                     "keep_open": _bool("Leave session open for follow-up calls.", False),
+                     "screenshot": _bool("Include a base64 PNG of the landing page.", True),
+                     "full_page": _bool("Full-page vs viewport screenshot.", True),
+                     "skip_verify": _bool("Skip DNS pre-check (trusted URLs only).", False)},
+      "required": ["url"]},
+     "explore", None),
     ("go", "Navigate to a URL.",
      {"type": "object",
       "properties": {"url": _str("Target URL."),
@@ -622,7 +633,11 @@ _TOOL_BY_NAME = {t[0]: t for t in TOOLS}
 # A tool can belong to MULTIPLE caps; it's exposed if any of its caps is selected.
 
 _CAP_BUCKETS: dict[str, set[str]] = {
-    "core":     {"start", "attach", "stop", "status", "set_log_verbs"},
+    "core":     {"start", "attach", "stop", "status", "set_log_verbs",
+                 # Wave 7.7.5: explore is the canonical "just look at a URL"
+                 # entry point; belongs in core so it's exposed in every
+                 # cap-gated MCP surface
+                 "explore"},
     "session":  {"session_new", "session_list", "session_use", "session_switch",
                  "session_close", "session_close_all", "session_delete",
                  "profile_list", "profile_new", "profile_use", "profile_delete"},
@@ -753,6 +768,17 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.Content]
         return [types.TextContent(type="text", text=f"unknown tool: {name}")]
     _name, _desc, _schema, cmd, mapper = entry
     args = mapper(arguments) if mapper else dict(arguments or {})
+
+    # Wave 7.7.5: MCP-specific default overrides. CLI users get the
+    # canonical Patchright headed default (visual debugging); MCP-driven
+    # agents almost always want headless (background scraping, fan-out,
+    # no desktop clutter). Per-call `headless: false` still wins. Set
+    # PATCHIUM_MCP_HEADED_DEFAULT=1 to disable this override.
+    if cmd == "start" and "headless" not in args:
+        import os as _os
+        if _os.environ.get("PATCHIUM_MCP_HEADED_DEFAULT", "0").lower() \
+                not in ("1", "true", "yes"):
+            args["headless"] = True
 
     # Extract the optional session arg — passed to daemon_call as session=
     # rather than threaded through args (the daemon's dispatcher consumes
