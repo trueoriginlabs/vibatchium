@@ -64,6 +64,17 @@ def get_max_sessions() -> int:
         return 4
 
 
+def _default_safety_mode() -> str:
+    """Wave 7.7.1: default safety mode for new sessions. Reads PATCHIUM_DEFAULT_SAFETY
+    (off | flag-only | wrap | redact). Defaults to `flag-only` — every scraped
+    content field gets risk metadata, no content mutation, ~1ms overhead. To
+    silence entirely set PATCHIUM_DEFAULT_SAFETY=off."""
+    val = os.environ.get("PATCHIUM_DEFAULT_SAFETY", "flag-only").lower()
+    if val in ("off", "flag-only", "wrap", "redact"):
+        return val
+    return "flag-only"
+
+
 def get_warm_mode() -> str:
     """Wave 6.1b: warmup strategy. Returns 'eager' | 'opportunistic' | 'both' | 'off'.
 
@@ -101,8 +112,16 @@ class SessionEntry:
     # JSHandle table (was Daemon._handles / _handle_counter)
     handles: dict = field(default_factory=dict)
     handle_counter: int = 0
-    # Misc per-session flags (extensible)
-    flags: dict = field(default_factory=dict)
+    # Misc per-session flags (extensible).
+    # Wave 7.7.1: default safety_mode is `flag-only` — every scraped
+    # content field gets `prompt_injection_risk` + `signals` metadata
+    # without any content mutation. ~1ms per scraped paragraph; no
+    # behavioral change for agents that don't read the metadata. To
+    # disable: `patchium safety set off` per session, or set the
+    # PATCHIUM_DEFAULT_SAFETY env var.
+    flags: dict = field(default_factory=lambda: {
+        "safety_mode": _default_safety_mode(),
+    })
     # Bookkeeping
     created_at: float = field(default_factory=time.time)
     last_used_at: float = field(default_factory=time.time)
