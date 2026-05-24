@@ -1341,6 +1341,38 @@ def register_extra(daemon) -> None:
         text = args.get("text", "")
         return _safety.classify(text)
 
+    @daemon.handler("safety_scan_html")
+    async def _safety_scan_html(d, args):
+        """Wave 7.7: HTML-aware classifier. Catches §7 hidden-DOM smuggling
+        (display:none / aria-hidden / alt-text / HTML comments / zero-width
+        chars) that pure text classification misses.
+
+        Two-pass: classifies visible text AND extracted hidden text
+        separately, returns combined risk + per-vector hidden counts so
+        the caller can see WHERE the smuggling came from.
+
+        Args:
+          html (str)  raw HTML to scan
+          target (str) optional — if present, fetch the element's outerHTML
+                      from the current session instead of using `html`.
+
+        Returns:
+          {risk, visible, hidden, vectors, any_hidden_payload}
+        """
+        from .. import safety as _safety
+        html = args.get("html")
+        if html is None and args.get("target"):
+            # Fetch from current page so callers can do
+            # `safety_scan_html target=@e3` without round-tripping html themselves
+            _session(d)  # validate session exists (raises if not)
+            target = args["target"]
+            from .handlers import _resolve_target as _rt
+            loc = _rt(d, target)
+            html = await loc.evaluate("el => el.outerHTML")
+        if not isinstance(html, str):
+            raise ValueError("safety_scan_html requires `html` or `target`")
+        return _safety.classify_html(html)
+
     # ─── Wave 5.4b: fingerprint scorer ───────────────────────────────────
 
     @daemon.handler("fingerprint")

@@ -519,6 +519,13 @@ TOOLS: list[tuple[str, str, dict, str, Any]] = [
      {"type": "object", "properties": {"text": _str("Text to classify.")},
       "required": ["text"]},
      "safety_scan", None),
+    ("safety_scan_html",
+     "HTML-aware classifier. Catches hidden-DOM smuggling (display:none / aria-hidden / alt-text / comments / zero-width) that pure text-regex misses. Two-pass: classifies visible AND hidden text separately, returns combined risk + per-vector counts.",
+     {"type": "object",
+      "properties": {"html": _str("Raw HTML to scan (or use `target` instead)."),
+                     "target": _str("@eN ref / selector to fetch outerHTML from current page.")},
+      "required": []},
+     "safety_scan_html", None),
     # ─── Wave 6.1a: live-view server ─────────────────────────────────
     ("liveview_start",
      "Start the live-view HTTP+WS server. Streams JPEG frames to any browser "
@@ -662,7 +669,7 @@ _CAP_BUCKETS: dict[str, set[str]] = {
     "secrets":  {"secret_init", "secret_set", "secret_list", "secret_delete",
                  "secret_totp", "wait_email_code"},
     # Wave 6.3c: safety toggle
-    "safety":   {"safety_set", "safety_status", "safety_scan"},
+    "safety":   {"safety_set", "safety_status", "safety_scan", "safety_scan_html"},
 }
 
 # Tools every cap-filtered surface always retains — necessities for LLMs that
