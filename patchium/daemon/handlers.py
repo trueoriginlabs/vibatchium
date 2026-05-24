@@ -247,7 +247,17 @@ def register_all(daemon) -> None:
             return {"already_started": True, "mode": entry.session.mode,
                     "session": name, "profile": str(entry.profile_dir)}
 
-        headless = bool(args.get("headless", False))
+        # Wave 7.7.4: PATCHIUM_DEFAULT_HEADLESS env flips the start default
+        # from headed → headless. Use case: fan-out background scraping
+        # workflows (research / parallel sessions) where headed Chrome
+        # windows pollute the operator's desktop. Set once at daemon init,
+        # never think about it again. Explicit `headless=true|false` in
+        # args still wins (per-call override).
+        if "headless" in args:
+            headless = bool(args["headless"])
+        else:
+            env_default = os.environ.get("PATCHIUM_DEFAULT_HEADLESS", "0").lower()
+            headless = env_default in ("1", "true", "yes", "on")
         stealth_mouse = bool(args.get("stealth_mouse"))
         backend = args.get("backend") or "patchright"
         try:
@@ -300,7 +310,17 @@ def register_all(daemon) -> None:
         p.mkdir(parents=True, exist_ok=True)
         prewarm_requested = args.get("prewarm", True)
         if prewarm_requested and not d.registry.has(name):
-            d.registry.schedule_prewarm(name, p, headless=bool(args.get("headless", False)))
+            # Wave 7.7.4: respect PATCHIUM_DEFAULT_HEADLESS for prewarm too,
+            # so the pre-spawned Chrome matches what `start` will eventually
+            # use. Otherwise a default-headless setup would get a headed
+            # prewarm that doesn't claim cleanly.
+            if "headless" in args:
+                _prewarm_headless = bool(args["headless"])
+            else:
+                _prewarm_headless = os.environ.get(
+                    "PATCHIUM_DEFAULT_HEADLESS", "0"
+                ).lower() in ("1", "true", "yes", "on")
+            d.registry.schedule_prewarm(name, p, headless=_prewarm_headless)
         return {
             "created": not existed, "exists": existed, "name": name,
             "path": str(p), "profile_dir": str(p),
@@ -806,9 +826,18 @@ def register_all(daemon) -> None:
         wall = _backends.is_walled(title, status)
         if wall:
             out["walled"] = wall
+            # Wave 7.7.3 observability: walled-page detection now logs at
+            # INFO level so post-run forensics (`patchium logs --since 1h`)
+            # can find "Reddit blocked at 21:24" without needing
+            # PATCHIUM_LOG_VERBS=1 to have been on. Closes the gap the
+            # second dogfood run surfaced (operator hit Reddit block;
+            # detection happened but left no trace in the daemon log).
+            name = current_session_ctx.get()
+            log.info("walled-page detected session=%s defender=%s url=%s "
+                     "status=%s title=%r",
+                     name, wall, s.page.url, status, title[:80])
             # Hint backend swap if we're still on patchright (nodriver beats
             # patchright on hardest Cloudflare gates per 2026 benchmark).
-            name = current_session_ctx.get()
             entry = d.registry.get(name)
             current_backend = entry.flags.get("backend") if entry else None
             if current_backend in (None, "patchright"):

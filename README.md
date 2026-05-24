@@ -213,6 +213,23 @@ Without `--caps`, any client holding the bearer token can invoke **every** verb 
 
 Credentials never appear in logs, HAR captures, observe cache, or agent-visible response fields (grep-tested in CI). Vault uses XSalsa20-Poly1305 with key from OS keyring or `PATCHIUM_SECRETS_KEY` env. All patchium-written files are 0600; directories 0700 (enforced + tested in `tests/test_wave7_stealth_gate.py`).
 
+## When to use patchium vs WebFetch / requests
+
+Honest sizing — patchium isn't always the right tool. From real dogfood runs:
+
+| Target | Recommended | Why |
+|---|---|---|
+| Known URL, plain HTML, single fetch | **WebFetch** | Faster, no daemon, no Chrome RAM |
+| JS-rendered SPA (Antigravity, Devpost, paydaysuper.com.au, dashboards) | **patchium** | WebFetch returns boilerplate / empty; real browser executes the JS |
+| Cloudflare / Datadome / Akamai walled | **patchium** | Stealth posture clears most walls cold-launch; WebFetch gets 403 |
+| Need screenshot audit trail | **patchium** | `screenshot --full-page` produces verifiable PNGs WebFetch can't |
+| Parallel multi-angle research (5+ independent questions) | **patchium research** | Sequential WebFetch costs N × per-fetch latency; daemon fans 5+ Chromes truly in parallel |
+| Sequential queries against the same target (6 competitors back-to-back) | **patchium with `PATCHIUM_WARM_RECYCLE=1`** | Pre-warm recycle re-spawns the same profile so each next session finds it warm |
+| Auth-gated sites (X, LinkedIn, hardened logins) | **patchium attach mode** | Manual login first, attach daemon; cold-launch fan-out can't defeat auth walls |
+| Tiny one-shot scrape, no follow-up | **`curl` or WebFetch** | Don't spin up Chrome for one HTML fetch |
+
+The asymmetric win for patchium is **primary-source extraction from JS-heavy sites + screenshot audit trail**. For the rest, WebFetch is competitive and often faster.
+
 ## Honest limits
 
 - **5+ concurrent sessions = 1-2GB RAM.** Each persistent-context Chrome is ~200-400MB. Bump the cap with `patchium daemon start --max-sessions 8` (or set `PATCHIUM_MAX_SESSIONS=8` in the daemon env).
