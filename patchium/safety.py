@@ -511,6 +511,12 @@ def scan_response(verb: str, result: dict, mode: str) -> dict:
     """Mutate a daemon-response dict in place: scan each known content field
     for the verb, apply the policy, and stash metadata.
 
+    Wave 7.7.1: the `html` verb routes through the two-pass HTML-aware
+    scanner so §7 hidden-DOM smuggling (display:none, aria-hidden,
+    alt-text, HTML comments containing payloads) is caught even when the
+    visible body is clean. Costs ~30% extra on html responses; closes
+    the only attack class the text-only auto-fire path cannot see.
+
     Returns the same dict (for chaining)."""
     fields = CONTENT_FIELDS.get(verb)
     if not fields or not isinstance(result, dict):
@@ -518,11 +524,15 @@ def scan_response(verb: str, result: dict, mode: str) -> dict:
     aggregated_signals: list[str] = []
     aggregated_risk = "none"
     risk_order = {"none": 0, "low": 1, "high": 2}
+    use_html_scan = verb == "html"
     for field in fields:
         val = result.get(field)
         if not isinstance(val, str) or not val:
             continue
-        new_text, meta = scan_and_apply(val, mode)
+        if use_html_scan:
+            new_text, meta = _scan_and_apply_html(val, mode)
+        else:
+            new_text, meta = scan_and_apply(val, mode)
         result[field] = new_text
         if risk_order.get(meta["prompt_injection_risk"], 0) > risk_order[aggregated_risk]:
             aggregated_risk = meta["prompt_injection_risk"]
@@ -533,3 +543,44 @@ def scan_response(verb: str, result: dict, mode: str) -> dict:
         result["prompt_injection_risk"] = aggregated_risk
         result["signals"] = aggregated_signals
     return result
+
+
+def _scan_and_apply_html(html: str, mode: str) -> tuple[str, dict]:
+    """Wave 7.7.1 helper — HTML-aware variant of scan_and_apply.
+
+    Runs `classify_html()` (two-pass: visible + hidden DOM extraction).
+    On flag-only, surfaces both visible AND hidden findings as metadata
+    without mutating the HTML — agents see the full markup but know
+    something risky lives in a non-rendering region. On wrap / redact,
+    falls back to text-level mutation of the raw HTML for any visible-
+    track findings; hidden-track findings are only flagged in metadata
+    because rewriting CSS-hidden regions can't safely roundtrip through
+    the agent.
+    """
+    if mode not in ("flag-only", "wrap", "redact"):
+        raise ValueError(f"unknown safety mode {mode!r}")
+    two_pass = classify_html(html)
+    visible = two_pass["visible"]
+    hidden = two_pass["hidden"]
+    # Aggregate signals from both tracks
+    signals = list(dict.fromkeys(visible["signals"] + hidden["signals"]))
+    meta = {
+        "prompt_injection_risk": two_pass["risk"],
+        "signals": signals,
+        "hidden_vectors": two_pass["vectors"],
+        "any_hidden_payload": two_pass["any_hidden_payload"],
+    }
+    if two_pass["risk"] == "none":
+        return html, meta
+    if mode == "flag-only":
+        return html, meta
+    # wrap / redact — mutate using visible-track spans only (rewriting
+    # CSS-hidden regions in raw HTML isn't safe).
+    if mode == "wrap":
+        return apply_wrap(html, visible["spans"]), meta
+    redacted, originals = apply_redact(html, visible["spans"])
+    meta["redacted_count"] = len(originals)
+    meta["redacted_originals_preview"] = [
+        (o[:50] + "…") if len(o) > 50 else o for o in originals
+    ]
+    return redacted, meta
