@@ -431,10 +431,19 @@ class SessionRegistry:
 
         Returns True if the session was running and is now closed.
         Idempotent — closing an absent session returns False without error.
+
+        Wave 7.7.3: when PATCHIUM_WARM_RECYCLE=1, also re-prewarm this
+        session's profile in the background after teardown so a
+        subsequent `start` with the same name finds it warm. Helps the
+        "sequential sessions under the same name" workflow (competitor
+        scan / batch processing) where the same profile gets repeatedly
+        opened-and-closed. Default OFF (costs RAM for sessions you may
+        not reopen).
         """
         entry = self._entries.pop(name, None)
         if entry is None:
             return False
+        profile_dir = entry.profile_dir
         # Best-effort dispose handles before closing the browser
         for h in list(entry.handles.values()):
             try:
@@ -448,6 +457,17 @@ class SessionRegistry:
         except Exception as exc:  # noqa: BLE001
             log.warning("close_session(%s) failed: %s", name, exc)
         log.info("session closed name=%s", name)
+        # Wave 7.7.3 warm recycle
+        recycle = os.environ.get("PATCHIUM_WARM_RECYCLE", "0").lower() in (
+            "1", "true", "yes", "on"
+        )
+        if recycle and get_warm_mode() in {"opportunistic", "both"}:
+            try:
+                self.schedule_prewarm(name, profile_dir, headless=True)
+                log.info("warm-recycle scheduled for name=%s", name)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("warm-recycle schedule failed for %s: %s",
+                             name, exc)
         return True
 
     async def close_all(self) -> int:

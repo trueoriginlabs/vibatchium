@@ -2173,7 +2173,11 @@ def daemon_cmd():
 @click.option("--default-safety", default=None,
               type=click.Choice(["off", "flag-only", "wrap", "redact"]),
               help="Default safety mode for new sessions (default: flag-only).")
-def daemon_start(max_sessions, log_verbs, default_safety):
+@click.option("--default-headless", is_flag=True,
+              help="Default `start` calls to headless when args don't specify. "
+                   "For fan-out / background scraping workflows where you don't "
+                   "want desktop clutter. Per-call `--headless`/`--headed` still wins.")
+def daemon_start(max_sessions, log_verbs, default_safety, default_headless):
     """Explicitly bootstrap the daemon with non-default settings.
 
     For most uses you don't need this — `patchium start` auto-spawns
@@ -2192,6 +2196,8 @@ def daemon_start(max_sessions, log_verbs, default_safety):
     if log_verbs:
         env_overrides["PATCHIUM_LOG_VERBS"] = "1"
         env_overrides["PATCHIUM_LOG_LEVEL"] = "DEBUG"
+    if default_headless:
+        env_overrides["PATCHIUM_DEFAULT_HEADLESS"] = "1"
     if default_safety:
         env_overrides["PATCHIUM_DEFAULT_SAFETY"] = default_safety
     if env_overrides:
