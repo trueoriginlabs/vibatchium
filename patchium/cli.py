@@ -6,6 +6,7 @@ on the first command if it isn't already running.
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -241,6 +242,50 @@ def session_close(ctx, name, close_all):
 def session_delete(ctx, name):
     """Delete the on-disk profile dir (cannot delete active or 'default')."""
     _emit(call("session_delete", {"name": name}), ctx.obj["json"])
+
+
+@session.command("prune")
+@click.option("--pattern", default=None,
+              help="Only prune sessions whose name matches this substring.")
+@click.option("--keep", "keep_list", multiple=True,
+              help="Don't prune these names (repeatable; 'default' is always kept).")
+@click.option("--dry-run", is_flag=True,
+              help="Show what would be pruned without deleting.")
+@click.pass_context
+def session_prune(ctx, pattern, keep_list, dry_run):
+    """Delete on-disk profile dirs for stopped sessions. Useful after a
+    dogfood run leaves probe/test/ad-hoc sessions cluttering `session list`."""
+    res = call("session_list")
+    keep = {"default", *keep_list}
+    active = res.get("active") or "default"
+    keep.add(active)
+    to_prune = []
+    for entry in res.get("sessions", []):
+        name = entry.get("name")
+        if not name or name in keep:
+            continue
+        if entry.get("running"):
+            continue  # never prune running sessions
+        if pattern and pattern not in name:
+            continue
+        to_prune.append(name)
+    if not to_prune:
+        click.echo("nothing to prune", err=True)
+        _emit({"pruned": [], "dry_run": dry_run}, ctx.obj["json"])
+        return
+    pruned = []
+    for name in to_prune:
+        if dry_run:
+            click.echo(f"would delete: {name}", err=True)
+            pruned.append(name)
+        else:
+            try:
+                call("session_delete", {"name": name})
+                pruned.append(name)
+                click.echo(f"deleted: {name}", err=True)
+            except DaemonError as exc:
+                click.echo(f"skip {name}: {exc}", err=True)
+    _emit({"pruned": pruned, "dry_run": dry_run}, ctx.obj["json"])
 
 
 # ─── profile (legacy aliases — kept for backwards compat) ────────────
@@ -1192,12 +1237,12 @@ def act(ctx, intent, llm):
     _emit(call("act", {"intent": intent, "llm": llm}), ctx.obj["json"])
 
 
-@cli.command()
+@cli.command(name="logs-basic", hidden=True)
 @click.option("-n", "--lines", default=50, type=int)
 @click.option("--follow", is_flag=True, help="tail -f the log.")
 @click.pass_context
-def logs(ctx, lines, follow):
-    """Tail the daemon log."""
+def _logs_basic(ctx, lines, follow):
+    """[deprecated] Use `patchium logs` for filtered tailing."""
     from .daemon.paths import LOG_PATH
     import subprocess as _sub
     if not LOG_PATH.exists():
@@ -2052,9 +2097,158 @@ def research(ctx, target, intents, threads, output_dir, headless, safety,
     click.echo(f"\ndone: {wall_s:.1f}s — see {index_md}", err=True)
 
 
+# ─── Wave 7.7.2: onboarding fixes ─────────────────────────────────────────
+
+@cli.command(name="logs")
+@click.option("--session", "session_filter", default=None,
+              help="Only show lines mentioning this session name.")
+@click.option("--tail", default=50, type=int,
+              help="Last N lines (default 50). 0 = all.")
+@click.option("--since", default=None,
+              help="Show lines newer than this (e.g. 10m, 1h, 2026-05-23T20:00).")
+@click.option("--errors-only", is_flag=True,
+              help="Only ERROR lines.")
+def logs(session_filter, tail, since, errors_only):
+    """Tail the daemon log with session + time filtering.
+
+    Combine with `set-log-verbs on` for per-verb DEBUG visibility.
+    Without verb logging the log contains lifecycle events only
+    (session create/close, errors, secret/proxy ops).
+    """
+    from .daemon.paths import LOG_PATH
+    import datetime as _dt
+    import re as _re
+    if not LOG_PATH.exists():
+        click.echo(f"no daemon log yet at {LOG_PATH}", err=True)
+        sys.exit(1)
+    # Parse --since (relative or absolute)
+    since_dt = None
+    if since:
+        m = _re.match(r"^(\d+)([smhd])$", since)
+        if m:
+            n, unit = int(m.group(1)), m.group(2)
+            delta_s = {"s": 1, "m": 60, "h": 3600, "d": 86400}[unit] * n
+            since_dt = _dt.datetime.now() - _dt.timedelta(seconds=delta_s)
+        else:
+            try:
+                since_dt = _dt.datetime.fromisoformat(since)
+            except ValueError:
+                click.echo(f"bad --since {since!r} (use '10m' or ISO timestamp)",
+                            err=True)
+                sys.exit(1)
+    matched: list[str] = []
+    for line in LOG_PATH.read_text(errors="replace").splitlines():
+        if errors_only and "ERROR" not in line:
+            continue
+        if session_filter and session_filter not in line:
+            continue
+        if since_dt:
+            ts_match = _re.match(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})", line)
+            if ts_match:
+                try:
+                    ts = _dt.datetime.fromisoformat(ts_match.group(1).replace(" ", "T"))
+                    if ts < since_dt:
+                        continue
+                except ValueError:
+                    pass
+        matched.append(line)
+    if tail > 0:
+        matched = matched[-tail:]
+    for line in matched:
+        click.echo(line)
+
+
+@cli.group(name="daemon")
+def daemon_cmd():
+    """Daemon lifecycle (advanced — start/stop/status all happen
+    implicitly on most calls)."""
+
+
+@daemon_cmd.command(name="start")
+@click.option("--max-sessions", default=None, type=int,
+              help="Concurrent session cap (default 4). Sets PATCHIUM_MAX_SESSIONS "
+                   "for the daemon process. Persists for the daemon's lifetime.")
+@click.option("--log-verbs", is_flag=True,
+              help="Start with per-verb DEBUG audit log enabled (PATCHIUM_LOG_VERBS=1).")
+@click.option("--default-safety", default=None,
+              type=click.Choice(["off", "flag-only", "wrap", "redact"]),
+              help="Default safety mode for new sessions (default: flag-only).")
+def daemon_start(max_sessions, log_verbs, default_safety):
+    """Explicitly bootstrap the daemon with non-default settings.
+
+    For most uses you don't need this — `patchium start` auto-spawns
+    the daemon. Use this only when you need a higher session cap,
+    full audit logging, or a non-default safety mode set at daemon
+    start time.
+    """
+    from .client import daemon_is_running, spawn_daemon
+    if daemon_is_running():
+        click.echo("daemon already running — stop it first with "
+                    "`patchium shutdown`", err=True)
+        sys.exit(1)
+    env_overrides = {}
+    if max_sessions is not None:
+        env_overrides["PATCHIUM_MAX_SESSIONS"] = str(max_sessions)
+    if log_verbs:
+        env_overrides["PATCHIUM_LOG_VERBS"] = "1"
+        env_overrides["PATCHIUM_LOG_LEVEL"] = "DEBUG"
+    if default_safety:
+        env_overrides["PATCHIUM_DEFAULT_SAFETY"] = default_safety
+    if env_overrides:
+        os.environ.update(env_overrides)
+        click.echo(f"applying env: {env_overrides}", err=True)
+    spawn_daemon(wait=10)
+    click.echo("daemon started", err=True)
+
+
+# ─── Wave 7.7.2: MCP-style underscored verb aliases ────────────────────
+#
+# CLI uses `session new` (space), MCP uses `session_new` (underscore).
+# When an agent / user copies a brief written in MCP form into a shell,
+# the call fails. Rewrite the argv before click sees it: if the first
+# arg matches a known MCP verb, split on `_` and forward.
+_CLI_GROUPS_BY_PREFIX = {
+    "session_": "session",
+    "profile_": "profile",
+    "page_": "page",
+    "checkpoint_": "checkpoint",
+    "proxy_": "proxy",
+    "secret_": "secret",
+    "humanize_": "humanize",
+    "safety_": "safety",
+    "vision_": "vision",
+    "liveview_": "liveview",
+    "har_": "har",
+    "network_": "network",
+    "route_": "route",
+    "handle_": "handle",
+    "record_": "record",
+    "download_": "download",
+}
+
+
+def _rewrite_mcp_aliases(argv: list[str]) -> list[str]:
+    """Translate `patchium session_new foo` → `patchium session new foo`.
+    Doesn't touch top-level verbs that already exist (like `set_log_verbs`,
+    which is a single-word command in CLI form too)."""
+    if len(argv) < 2:
+        return argv
+    cmd = argv[1]
+    # Handle a few known top-level singletons
+    if cmd in ("set_log_verbs",):
+        return [argv[0], cmd.replace("_", "-"), *argv[2:]]
+    for prefix, group in _CLI_GROUPS_BY_PREFIX.items():
+        if cmd.startswith(prefix) and cmd != prefix.rstrip("_"):
+            subcmd = cmd[len(prefix):]
+            if subcmd:
+                return [argv[0], group, subcmd, *argv[2:]]
+    return argv
+
+
 # ─── error wrapper ────────────────────────────────────────────────────────
 
 def main():
+    sys.argv = _rewrite_mcp_aliases(sys.argv)
     try:
         cli(obj={})
     except DaemonError as exc:
