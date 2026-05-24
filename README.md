@@ -4,10 +4,15 @@
 Patched Playwright + multi-session daemon + credential vault + vision clicking + prompt-injection safety. One MCP server, N parallel Chromes, persistent per-session profiles.
 
 ```
-pip install "patchium[all]"           # core + every advertised feature
+# Install from source — active development; the PyPI package may lag.
+git clone https://github.com/monodev-eth/patchium && cd patchium
+pip install -e ".[all]"               # core + every advertised feature
 patchright install chrome             # one-time: real Chrome (not Chromium)
 patchium install                      # sanity-check the environment
-claude mcp add patchium python -m patchium.mcp_server   # register with Claude Code
+
+# Register with Claude Code (use python3, NOT python — fails on Debian/Ubuntu)
+claude mcp add patchium python3 -m patchium.mcp_server
+# Then restart Claude Code for the MCP to load.
 ```
 
 Then either drive from a shell or from any MCP-speaking agent:
@@ -31,7 +36,7 @@ patchium research --target https://example.com \
 # → spawns 3 parallel Chromes, writes per-thread markdown + screenshots to ./patchium-research-<ts>/
 ```
 
-**Status:** v0.3.0, alpha. 308 tests green in ~54s. 31/31 on bot.sannysoft.com. Cleared HackerOne Cloudflare cold-launch. Apache-2.0 (GPL/AGPL only via opt-in extras).
+**Status:** active development, alpha. **Install from source — the PyPI version lags.** 347+ tests green in ~54s. 31/31 on bot.sannysoft.com. Cleared HackerOne Cloudflare cold-launch. Apache-2.0 (GPL/AGPL only via opt-in extras).
 
 ## Why patchium
 
@@ -78,7 +83,9 @@ You have patchium installed as an MCP. It's a multi-session browser
 automation daemon: each session is an independent real Chrome with its
 own cookies + profile.
 
-Key verbs:
+Key verbs (these are the MCP-style names with underscores; the
+CLI form uses spaces — `session new`, `safety set wrap` — but you
+can paste either form into a shell, the CLI auto-translates):
   session_new <name>     create a session
   start                  launch real Chrome for current session
   go <url>               navigate (auto-detects Cloudflare/Datadome walls)
@@ -99,6 +106,12 @@ explicitly.
 For a parallel research fan-out, prefer the one-shot CLI:
   patchium research --target <url> --intent "..." --intent "..." ...
 It handles spawn / safety / crawl / cleanup for N threads in one call.
+
+For non-trivial runs, enable verb-level audit logging up front:
+  patchium daemon start --max-sessions 8 --log-verbs
+  # then: patchium logs --session research-2 --tail 50 --since 10m
+This is the only way to debug "why was thread N slow" — without verb
+logging the daemon log only shows session create/close events.
 
 Stealth: clears Cloudflare cold on most targets, sannysoft 31/31. In
 HEADED mode a yellow "--disable-blink-features unsupported" infobar
@@ -202,11 +215,12 @@ Credentials never appear in logs, HAR captures, observe cache, or agent-visible 
 
 ## Honest limits
 
-- **5+ concurrent sessions = 1-2GB RAM.** Each persistent-context Chrome is ~200-400MB.
+- **5+ concurrent sessions = 1-2GB RAM.** Each persistent-context Chrome is ~200-400MB. Bump the cap with `patchium daemon start --max-sessions 8` (or set `PATCHIUM_MAX_SESSIONS=8` in the daemon env).
 - **Vision spend cap is process-wide.** N fan-out agents share one daily/lifetime budget.
 - **Init scripts don't work on patchright backend.** Patchright filters `Page.addScriptToEvaluateOnNewDocument` because the CDP call is itself a fingerprint signal. Consequence: `chrome.runtime` stays `undefined` (we trade this for the bigger stealth win — documented in `docs/STEALTH.md`).
-- **Login walls (X, LinkedIn) require attach mode.** Cold-launch fan-out can't defeat them.
+- **Login walls (X, LinkedIn, etc.) require attach mode.** Cold-launch fan-out cannot defeat sites that require an authenticated session — even with patchium's stealth posture, you'll hit a login screen. Workaround: launch Chrome manually, log in by hand, then `patchium attach http://localhost:9222`. The credential vault feature can automate the typed-credentials step but you still need a real account on the target site.
 - **Single daemon = single point of failure.** No HA built in.
+- **PyPI version (0.1.0) is stale.** Active development; the `pip install patchium` package on PyPI is months behind. Install from source for the current feature surface — see the Quickstart block above.
 
 ## License
 
