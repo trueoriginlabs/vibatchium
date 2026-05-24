@@ -155,7 +155,9 @@ Capability buckets for MCP gating (`patchium mcp --caps=...`):
 | **Agents** | `observe`, `act` (heuristic + LLM modes, self-healing cache) |
 | **Stealth** | `fingerprint` (sannysoft/creepjs/brotector scorer + per-session UA/timezone/locale) |
 
-Full per-verb reference: [`docs/CAPABILITIES.md`](docs/CAPABILITIES.md).
+- Full per-verb reference: [`docs/CAPABILITIES.md`](docs/CAPABILITIES.md)
+- Operator playbook + env vars + recipes + anti-patterns from real runs: [`docs/OPERATIONS.md`](docs/OPERATIONS.md)
+- Stealth posture + trade-offs: [`docs/STEALTH.md`](docs/STEALTH.md)
 
 ## Install
 
