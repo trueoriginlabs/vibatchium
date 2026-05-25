@@ -101,11 +101,15 @@ def test_verify_url_no_url_at_all_errors_clearly():
 
 def test_explore_default_writes_screenshot_to_cache(local_server, tmp_path):
     """Without -o or --inline-screenshot, CLI should write the PNG to
-    ~/.cache/patchium/explores/ and return a screenshot_path instead of
-    a base64 blob. Use a unique session so explore's auto-close doesn't
-    affect the conftest-managed `default` session."""
+    a cache dir and return a screenshot_path instead of a base64 blob.
+    Use a unique session so explore's auto-close doesn't affect the
+    conftest-managed `default` session."""
     import os as _os
-    env = {**_os.environ, "HOME": str(tmp_path)}
+    # Unset XDG_RUNTIME_DIR so CACHE_DIR falls back to HOME/.cache —
+    # otherwise the daemon-spawned-by-conftest path uses the host's
+    # /run/user/UID and we can't redirect via HOME alone.
+    env = {k: v for k, v in _os.environ.items() if k != "XDG_RUNTIME_DIR"}
+    env["HOME"] = str(tmp_path)
     r = subprocess.run([_patchium_bin(),
                        "--session", "codex_friction_default_test",
                        "explore", f"{local_server}/simple.html", "--skip-verify"],
@@ -118,7 +122,10 @@ def test_explore_default_writes_screenshot_to_cache(local_server, tmp_path):
     shot = Path(data["screenshot_path"])
     assert shot.exists()
     assert shot.stat().st_size > 0
-    assert str(shot).startswith(str(tmp_path))
+    # Path can be either XDG_RUNTIME_DIR/patchium/explores/ (if daemon
+    # was started with XDG set) OR HOME/.cache/patchium/explores/ (if not).
+    # Wave 7.7.10 routes through paths.CACHE_DIR which prefers XDG.
+    assert "patchium/explores/" in str(shot)
 
 
 def test_explore_inline_screenshot_flag_preserves_base64(local_server, tmp_path):

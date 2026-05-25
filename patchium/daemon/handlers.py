@@ -41,9 +41,27 @@ def _mask_url(url: str) -> str:
     return url
 
 
+class SessionNotStarted(Exception):
+    """Sentinel raised by _need_session when no browser session exists.
+
+    Server formats this without the `RuntimeError:` type prefix so the
+    message matches the dispatcher-level "no session" rejection verbatim.
+    """
+
+
 def _need_session(daemon):
     if daemon.session is None:
-        raise RuntimeError("no browser session — run `patchium start` or `patchium attach` first")
+        # Mirror the dispatcher's no-session message verbatim so the error
+        # string is the same whether the verb is gated at dispatch time or
+        # hits the handler-level check (UNLOCKED_VERBS path).
+        from .paths import DEFAULT_SESSION_NAME
+        from .registry import current_session_ctx
+        try:
+            name = current_session_ctx.get()
+        except LookupError:
+            name = DEFAULT_SESSION_NAME
+        suffix = (f" --session {name}" if name != DEFAULT_SESSION_NAME else "")
+        raise SessionNotStarted(f"no session {name!r} — run `patchium start{suffix}` first")
     # Repair a stale session.page if the previously-active page has detached
     # (popup-then-close, navigation-cancelled, target-crashed). Pick the
     # newest live page from the context as the fallback.
@@ -995,18 +1013,23 @@ def register_all(daemon) -> None:
 
     @daemon.handler("text")
     async def _text(d, args):
-        s = _need_session(d)
-        sel = args.get("selector")
+        # Accept both `selector` (legacy MCP param) and `target` (modern,
+        # matches click/fill/hover). Route through _resolve_target so @eN
+        # and @text:/@label: prefixes work consistently.
+        sel = args.get("target") or args.get("selector")
         if sel:
-            return {"text": await s.page.locator(sel).inner_text()}
+            loc = _resolve_target(d, sel)
+            return {"text": await loc.inner_text()}
+        s = _need_session(d)
         return {"text": await s.page.inner_text("body")}
 
     @daemon.handler("html")
     async def _html(d, args):
-        s = _need_session(d)
-        sel = args.get("selector")
+        sel = args.get("target") or args.get("selector")
         if sel:
-            return {"html": await s.page.locator(sel).inner_html()}
+            loc = _resolve_target(d, sel)
+            return {"html": await loc.inner_html()}
+        s = _need_session(d)
         return {"html": await s.page.content()}
 
     @daemon.handler("eval")
@@ -1018,13 +1041,19 @@ def register_all(daemon) -> None:
 
     @daemon.handler("attr")
     async def _attr(d, args):
-        s = _need_session(d)
-        return {"value": await s.page.locator(args["selector"]).get_attribute(args["name"])}
+        target = args.get("target") or args.get("selector")
+        if not target:
+            raise ValueError("attr requires `target` (or legacy `selector`)")
+        loc = _resolve_target(d, target)
+        return {"value": await loc.get_attribute(args["name"])}
 
     @daemon.handler("value")
     async def _value(d, args):
-        s = _need_session(d)
-        return {"value": await s.page.locator(args["selector"]).input_value()}
+        target = args.get("target") or args.get("selector")
+        if not target:
+            raise ValueError("value requires `target` (or legacy `selector`)")
+        loc = _resolve_target(d, target)
+        return {"value": await loc.input_value()}
 
     # ─── input ────────────────────────────────────────────────────────────
 
@@ -1041,11 +1070,12 @@ def register_all(daemon) -> None:
         s = _need_session(d)
         full_page = bool(args.get("full_page", False))
         path = args.get("path")
-        if path:
-            await s.page.screenshot(path=path, full_page=full_page)
-            return {"path": path}
-        # return base64 if no path given
         png = await s.page.screenshot(full_page=full_page)
+        if path:
+            # Always secure-write — page captures may include authenticated
+            # sessions (banking, dashboards) and must not leak via umask.
+            secure_write(Path(path), png)
+            return {"path": path}
         return {"png_b64": base64.b64encode(png).decode()}
 
     # ─── element model: map + interactive verbs ───────────────────────────
