@@ -87,13 +87,10 @@ def register_extra(daemon) -> None:
 
     @daemon.handler("count")
     async def _count(d, args):
-        """Count elements matching a CSS selector or @eN."""
+        """Count elements matching a CSS selector, @eN, or @prefix:value form."""
         surf = _surface(d)
-        target = args["target"]
-        if target.startswith("@e") or (len(target) > 1 and target[0] == "e" and target[1:].isdigit()):
-            loc = elements.resolve(surf, getattr(d, "_snapshot", None), target)
-        else:
-            loc = surf.locator(target)
+        loc = elements.resolve_target(surf, getattr(d, "_snapshot", None),
+                                      args["target"])
         return {"count": await loc.count()}
 
     @daemon.handler("content")
@@ -276,10 +273,7 @@ def register_extra(daemon) -> None:
         if isinstance(files, str):
             files = [files]
         surf = _surface(d)
-        if target.startswith("@e") or (len(target) > 1 and target[0] == "e" and target[1:].isdigit()):
-            loc = elements.resolve(surf, getattr(d, "_snapshot", None), target)
-        else:
-            loc = surf.locator(target)
+        loc = elements.resolve_target(surf, getattr(d, "_snapshot", None), target)
         await loc.set_input_files(files)
         return {"uploaded": files, "to": target}
 
@@ -418,10 +412,7 @@ def register_extra(daemon) -> None:
         target = args["target"]
         ms = int(args.get("ms", 3000))
         surf = _surface(d)
-        if target.startswith("@e") or (len(target) > 1 and target[0] == "e" and target[1:].isdigit()):
-            loc = elements.resolve(surf, getattr(d, "_snapshot", None), target)
-        else:
-            loc = surf.locator(target)
+        loc = elements.resolve_target(surf, getattr(d, "_snapshot", None), target)
         await loc.evaluate(
             "(el, ms) => {"
             "const prev = el.style.outline;"

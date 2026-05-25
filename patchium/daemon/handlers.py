@@ -92,11 +92,14 @@ def _is_ref_target(target: str) -> bool:
 def _resolve_target(daemon, target: str):
     """Resolve `target` to a Locator.
 
-    If it's a structured ref (`@eN`, `eN`, `[ref=eN]`) use Playwright's
-    `aria-ref=` selector engine. Otherwise treat as raw CSS / Playwright
-    selector. The daemon-side `_snapshot` cache exists only to log staleness
-    diagnostics; the actual resolution goes through Playwright's selector
-    engine against the live AX tree.
+    Recognized forms (full list in elements.resolve_target):
+    - `@eN` / `eN` / `[ref=eN]`           — last-map aria-ref
+    - `@text:Foo` / `@label:Email` etc.   — Playwright getBy* shortcuts
+    - `"Multi word text"`                  — auto-routes to get_by_text
+    - anything else                        — raw Playwright selector
+
+    Refs need the cached snapshot; other forms resolve directly against
+    the live AX tree.
     """
     s = _need_session(daemon)
     if _is_ref_target(target):
@@ -106,7 +109,7 @@ def _resolve_target(daemon, target: str):
                 f"a navigation. Run `patchium map` to refresh the snapshot first."
             )
         return elements.resolve(s.page, daemon._snapshot, target)
-    return s.page.locator(target)
+    return elements.resolve_target(s.page, daemon._snapshot, target)
 
 
 def register_all(daemon) -> None:
@@ -1102,7 +1105,7 @@ def register_all(daemon) -> None:
             except Exception:  # noqa: BLE001
                 pass
             # Re-resolve (snapshot may have been invalidated by the banner click)
-            loc = _resolve_target(d, target) if _is_ref_target(target) else _need_session(d).page.locator(target)
+            loc = _resolve_target(d, target)
             await loc.click(timeout=timeout)
             return {"clicked": target, "auto_dismissed": True}
 

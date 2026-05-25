@@ -61,6 +61,26 @@ $PB --session mywork session_close
 
 A single daemon process holds all sessions. Auto-spawns on first call.
 
+### Selector forms for click / type / fill / hover
+
+All target arguments accept any of these forms — pick the one that matches
+what you know about the element:
+
+| Form | Resolves to |
+|---|---|
+| `@e3` | last `map`'s ref (refresh map after navigation) |
+| `"Sign Up"` (bare text with space) | `page.get_by_text("Sign Up")` — auto-fallback |
+| `@text:Sign Up` | `page.get_by_text("Sign Up")` |
+| `@label:Email` | `page.get_by_label("Email")` |
+| `@role:button` | `page.get_by_role("button")` |
+| `@role:button[name=Submit]` | `page.get_by_role("button", name="Submit")` |
+| `@placeholder:Search...` | `page.get_by_placeholder("Search...")` |
+| `@testid:submit-btn` | `page.get_by_test_id("submit-btn")` |
+| `#new-account-email` / `.btn-primary` | raw CSS |
+| `text=Foo` / `role=button[name=X]` | raw Playwright selector engine |
+
+**Pattern**: try visible text or label FIRST (`click "Sign Up"` or `type @label:Email "test@x.com"`). Only fall back to `html | grep` for CSS IDs when text/label/role don't disambiguate. The 7m51s Nemotron run on aave became a 30-second task with these selectors.
+
 ## Output
 
 - `explore` → JSON to stdout `{url, title, text, screenshot_path, status, elapsed_ms, closed}`. Screenshot written to `~/.cache/patchium/explores/` by default (no base64 in stdout). `-o <dir>` writes to a chosen dir + markdown summary. `--inline-screenshot` returns base64 inline (the old default).
