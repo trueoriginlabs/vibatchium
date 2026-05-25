@@ -392,6 +392,7 @@ def explore(ctx, url, intent, keep_open, screenshot, full_page, skip_verify,
     import time as _time
     from hashlib import md5 as _md5
     from pathlib import Path as _P
+    from .daemon.paths import CACHE_DIR, secure_mkdir, secure_write
     args = {"url": url, "keep_open": keep_open,
             "screenshot": screenshot, "full_page": full_page,
             "skip_verify": skip_verify}
@@ -400,7 +401,8 @@ def explore(ctx, url, intent, keep_open, screenshot, full_page, skip_verify,
     result = call("explore", args)
     b64 = result.get("screenshot_b64")
     if b64 and output_dir:
-        # Explicit -o: write into user-chosen dir + markdown summary
+        # Explicit -o: user chose the path, honor their dir permissions.
+        # Don't force 0700 on a dir they might want to share.
         out = _P(output_dir).resolve()
         out.mkdir(parents=True, exist_ok=True)
         shot = out / "landing.png"
@@ -419,13 +421,13 @@ def explore(ctx, url, intent, keep_open, screenshot, full_page, skip_verify,
         result["markdown_path"] = str(md)
         result.pop("screenshot_b64", None)
     elif b64 and not inline_screenshot:
-        # Default: write to ~/.cache/patchium/explores/, strip from JSON.
-        # Keeps agent stdout free of ~3MB of base64 per call.
-        cache = _P.home() / ".cache" / "patchium" / "explores"
-        cache.mkdir(parents=True, exist_ok=True)
+        # Default: write to CACHE_DIR/explores/ with 0700 dir + 0600 PNG.
+        # Screenshots of authenticated sessions (banking, dashboards) must
+        # not leak to other users on shared machines.
+        cache = secure_mkdir(CACHE_DIR / "explores")
         url_hash = _md5(url.encode()).hexdigest()[:8]
         shot = cache / f"explore-{int(_time.time())}-{url_hash}.png"
-        shot.write_bytes(_b64.b64decode(b64))
+        secure_write(shot, _b64.b64decode(b64))
         result["screenshot_path"] = str(shot)
         result.pop("screenshot_b64", None)
     _emit(result, ctx.obj["json"])
@@ -536,14 +538,26 @@ def status(ctx):
 # ─── navigation ───────────────────────────────────────────────────────────
 
 @cli.command()
-@click.argument("url")
+@click.argument("url", required=False)
+@click.option("--url", "url_flag", default=None,
+              help="Alternative to positional URL (both forms accepted).")
 @click.option("--wait-until", default="domcontentloaded",
               type=click.Choice(["load", "domcontentloaded", "networkidle", "commit"]))
 @click.option("--timeout", "timeout_ms", default=60_000, type=int, help="Timeout in ms.")
 @click.pass_context
-def go(ctx, url, wait_until, timeout_ms):
-    """Navigate to URL."""
-    _emit(call("go", {"url": url, "wait_until": wait_until, "timeout_ms": timeout_ms}),
+def go(ctx, url, url_flag, wait_until, timeout_ms):
+    """Navigate to URL.
+
+    \b
+    EXAMPLES:
+        patchium go https://example.com
+        patchium go --url https://example.com    # same thing
+    """
+    final_url = url or url_flag
+    if not final_url:
+        raise click.UsageError(
+            "URL required: pass as positional argument or `--url <value>`")
+    _emit(call("go", {"url": final_url, "wait_until": wait_until, "timeout_ms": timeout_ms}),
           ctx.obj["json"], "url")
 
 
@@ -691,16 +705,30 @@ def keys(ctx, keys):
 # ─── screenshot ───────────────────────────────────────────────────────────
 
 @cli.command()
-@click.option("-o", "--output", default="screenshot.png", help="Output file path.")
+@click.option("-o", "--output", default=None,
+              help="Output file path. Default: CACHE_DIR/screenshots/<ts>.png "
+                   "(0600 perms — screenshots may show authenticated sessions).")
 @click.option("--full-page", is_flag=True, help="Full-page screenshot (not just viewport).")
 @click.option("--annotate", is_flag=True,
               help="Overlay @eN bounding boxes (needs Pillow).")
 @click.pass_context
 def screenshot(ctx, output, full_page, annotate):
-    """Capture a screenshot, optionally annotated with @eN box overlays."""
-    path = str(Path(output).resolve())
+    """Capture a screenshot, optionally annotated with @eN box overlays.
+
+    Default destination is CACHE_DIR/screenshots/screenshot-<ts>.png with
+    0600 perms (avoids leaking authenticated-session captures to other
+    users on shared machines). Pass `-o <path>` to write to a specific
+    location with your own permission policy.
+    """
+    import time as _time
+    from .daemon.paths import CACHE_DIR, secure_mkdir
+    if output is None:
+        cache = secure_mkdir(CACHE_DIR / "screenshots")
+        output = str(cache / f"screenshot-{int(_time.time())}.png")
+    else:
+        output = str(Path(output).resolve())
     cmd = "screenshot_annotate" if annotate else "screenshot"
-    _emit(call(cmd, {"path": path, "full_page": full_page}),
+    _emit(call(cmd, {"path": output, "full_page": full_page}),
           ctx.obj["json"], "path")
 
 
@@ -940,12 +968,18 @@ def wait_selector(ctx, selector, state, timeout_ms):
 
 
 @wait.command("url")
-@click.argument("pattern")
+@click.argument("pattern", required=False)
+@click.option("--url", "--pattern", "pattern_flag", default=None,
+              help="Alternative to positional pattern (--url and --pattern both accepted).")
 @click.option("--timeout", "timeout_ms", default=30_000, type=int)
 @click.pass_context
-def wait_url(ctx, pattern, timeout_ms):
+def wait_url(ctx, pattern, pattern_flag, timeout_ms):
     """Wait until the URL matches (glob or regex)."""
-    _emit(call("wait_url", {"pattern": pattern, "timeout_ms": timeout_ms}),
+    final_pattern = pattern or pattern_flag
+    if not final_pattern:
+        raise click.UsageError(
+            "URL pattern required: pass as positional argument or `--url <value>`")
+    _emit(call("wait_url", {"pattern": final_pattern, "timeout_ms": timeout_ms}),
           ctx.obj["json"], "url")
 
 
@@ -1323,14 +1357,20 @@ def route_clear(ctx, pattern):
 
 
 @cli.command("wait-response")
-@click.argument("pattern")
+@click.argument("pattern", required=False)
+@click.option("--url", "--pattern", "pattern_flag", default=None,
+              help="Alternative to positional pattern (--url and --pattern both accepted).")
 @click.option("--timeout", "timeout_ms", default=30_000, type=int)
 @click.option("--body", is_flag=True, help="Capture and return the response body.")
 @click.option("--max-body", default=1_000_000, type=int)
 @click.pass_context
-def wait_response(ctx, pattern, timeout_ms, body, max_body):
+def wait_response(ctx, pattern, pattern_flag, timeout_ms, body, max_body):
     """Wait for a network response matching URL pattern (and optionally return the body)."""
-    _emit(call("wait_response", {"pattern": pattern, "timeout_ms": timeout_ms,
+    final_pattern = pattern or pattern_flag
+    if not final_pattern:
+        raise click.UsageError(
+            "URL pattern required: pass as positional argument or `--url <value>`")
+    _emit(call("wait_response", {"pattern": final_pattern, "timeout_ms": timeout_ms,
                                   "body": body, "max_body": max_body}),
           ctx.obj["json"])
 
@@ -2257,6 +2297,24 @@ def research(ctx, target, intents, threads, output_dir, headless, safety,
 
 # ─── Wave 7.7.2: onboarding fixes ─────────────────────────────────────────
 
+@cli.command(name="set-log-verbs")
+@click.argument("mode", type=click.Choice(["on", "off"]))
+@click.pass_context
+def set_log_verbs_cli(ctx, mode):
+    """Toggle per-verb DEBUG audit logging at runtime (no daemon restart).
+
+    \b
+    EXAMPLES:
+        patchium set-log-verbs on    # enable full per-verb log
+        patchium set-log-verbs off   # back to lifecycle-only logging
+
+    With ON, every handler call lands in the daemon log with args (creds
+    redacted). Pair with `patchium logs --session NAME --tail N`. Pre-existing
+    env equivalent: PATCHIUM_LOG_VERBS=1 (at daemon bootstrap).
+    """
+    _emit(call("set_log_verbs", {"on": mode == "on"}), ctx.obj["json"])
+
+
 @cli.command(name="logs")
 @click.option("--session", "session_filter", default=None,
               help="Only show lines mentioning this session name.")
@@ -2391,31 +2449,91 @@ _CLI_GROUPS_BY_PREFIX = {
 }
 
 
-def _rewrite_mcp_aliases(argv: list[str]) -> list[str]:
-    """Translate `patchium session_new foo` → `patchium session new foo`,
-    and `patchium verify_url X` → `patchium verify-url X`.
+# Global flags from the root `cli` command that may precede the verb.
+# When users write `patchium --session work session_close`, the rewriter has
+# to skip past `--session` + value before deciding what the verb is.
+_GLOBAL_FLAGS_WITH_VALUE = {"--session"}
+_GLOBAL_FLAGS_BOOLEAN = {"--json", "--version", "-h", "--help"}
 
-    Group-prefix rewrites are explicit (session_*, vision_*, etc.). For
-    top-level commands with underscores, fall back to introspecting the
-    click command registry: if `foo_bar` isn't a registered command but
-    `foo-bar` is, rewrite. Keeps the underscore-tolerance auto-extensible
-    for future hyphenated CLI commands.
+# Hidden top-level aliases — agents universally reach for these names.
+# Only fires when the target form exists AND the alias is NOT itself a real
+# command (so a future real `goto` would take precedence over this alias).
+_TOP_LEVEL_ALIASES = {
+    "tabs": "pages",
+    "tab": "page",          # group alias: `tab new` → `page new`
+    "snapshot": "map",
+    "goto": "go",
+    "navigate": "go",
+    "open": "go",
+    "visit": "go",
+    "dom": "html",
+    "get-text": "text",
+    "get_text": "text",
+    "is_state": "is",       # MCP name vs CLI name
+}
+
+
+def _find_verb_index(argv: list[str]) -> int:
+    """Return the index of the verb (subcommand) in argv, skipping past
+    global flags like `--session NAME`, `--json`, `--version`. Returns -1
+    if no verb is present (bare `patchium` or `patchium --help`).
     """
-    if len(argv) < 2:
+    i = 1
+    while i < len(argv):
+        a = argv[i]
+        if a in _GLOBAL_FLAGS_WITH_VALUE:
+            i += 2  # flag + value
+            continue
+        if a in _GLOBAL_FLAGS_BOOLEAN:
+            i += 1
+            continue
+        if a.startswith("-"):
+            # Unknown option; conservatively assume flag-only (no value).
+            # Worst case: we mis-identify a non-verb as the verb, the rewrite
+            # then no-ops (because it doesn't match any pattern), and click
+            # surfaces the real error.
+            i += 1
+            continue
+        return i
+    return -1
+
+
+def _rewrite_mcp_aliases(argv: list[str]) -> list[str]:
+    """Translate agent-friendly verb forms to the canonical CLI form:
+
+    - `session_new foo` → `session new foo` (group prefix)
+    - `verify_url X` → `verify-url X` (top-level underscore→hyphen)
+    - `goto X` / `navigate X` / `open X` / `visit X` → `go X` (aliases)
+    - `tabs` → `pages`, `snapshot` → `map`, `dom` → `html`, `get-text` → `text`
+    - All of the above also work AFTER `--session NAME` / `--json` flags
+
+    Rewrites are conservative — they only fire when the input doesn't already
+    match a real command. A future real `goto` command would shadow the alias.
+    """
+    verb_idx = _find_verb_index(argv)
+    if verb_idx == -1:
         return argv
-    cmd = argv[1]
+    cmd = argv[verb_idx]
+
+    # Top-level aliases (tabs/snapshot/goto/etc.)
+    if cmd not in cli.commands and cmd in _TOP_LEVEL_ALIASES:
+        target = _TOP_LEVEL_ALIASES[cmd]
+        return argv[:verb_idx] + target.split() + argv[verb_idx + 1:]
+
     # Group-prefix → subcommand rewrite (session_new → session new)
     for prefix, group in _CLI_GROUPS_BY_PREFIX.items():
         if cmd.startswith(prefix) and cmd != prefix.rstrip("_"):
             subcmd = cmd[len(prefix):]
             if subcmd:
-                return [argv[0], group, subcmd, *argv[2:]]
-    # Top-level: only rewrite if underscored form is missing AND
-    # the hyphenated form exists. Avoids touching valid underscored verbs.
+                return argv[:verb_idx] + [group, subcmd] + argv[verb_idx + 1:]
+
+    # Top-level underscore → hyphen, only when underscored form doesn't exist
+    # but hyphenated form does (e.g. verify_url → verify-url).
     if "_" in cmd and cmd not in cli.commands:
         hyphenated = cmd.replace("_", "-")
         if hyphenated in cli.commands:
-            return [argv[0], hyphenated, *argv[2:]]
+            return argv[:verb_idx] + [hyphenated] + argv[verb_idx + 1:]
+
     return argv
 
 

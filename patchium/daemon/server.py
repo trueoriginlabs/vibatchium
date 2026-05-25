@@ -284,6 +284,12 @@ class Daemon:
             return {"id": req_id, "ok": True, "result": result}
         except Exception as exc:  # noqa: BLE001
             log.exception("handler %s failed (session=%s)", cmd, session_name)
+            from .handlers import SessionNotStarted
+            # SessionNotStarted carries a user-facing message that already
+            # matches the dispatcher-level format — emit it bare so wait_*
+            # and other UNLOCKED_VERBS see the same error string as click/fill.
+            if isinstance(exc, SessionNotStarted):
+                return {"id": req_id, "ok": False, "error": str(exc)}
             return {"id": req_id, "ok": False, "error": f"{type(exc).__name__}: {exc}"}
         finally:
             current_session_ctx.reset(tok)
