@@ -1,6 +1,6 @@
 # patchium capability reference
 
-Complete list of the 124 daemon verbs an agent can invoke. Every verb is exposed identically over CLI, MCP, and REST. Verbs that need a target take an `@eN` ref (from the most recent `map`) or any Playwright selector (`text=...`, `role=...`, `css=...`).
+Complete list of the 127 daemon verbs an agent can invoke. Every verb is exposed identically over CLI, MCP, and REST. Verbs that need a target take an `@eN` ref (from the most recent `map`) or any Playwright selector (`text=...`, `role=...`, `css=...`).
 
 ## Lifecycle (6)
 - `ping` — daemon health check
