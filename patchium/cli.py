@@ -435,6 +435,53 @@ def verify_url_cli(ctx, url, check_http, timeout_ms):
 
 
 @cli.command()
+@click.option("--agent", "agents", multiple=True,
+              type=click.Choice(["codex", "claude", "cursor"]),
+              help="Limit setup to specific agents (repeatable). Default: all detected.")
+@click.option("--check", is_flag=True,
+              help="Dry-run: show what would change, write nothing.")
+@click.option("--no-docs", is_flag=True,
+              help="Skip writing global AGENTS.md / CLAUDE.md blocks; only register MCP.")
+@click.pass_context
+def setup(ctx, agents, check, no_docs):
+    """Wire patchium into installed agent CLIs (Codex, Claude Code, Cursor).
+
+    Registers patchium as an MCP server and writes a small pointer block in
+    each agent's global docs so any future agent session knows patchium is
+    available. Idempotent — safe to re-run.
+
+    \b
+    patchium setup              # auto-detect and wire everything
+    patchium setup --check      # dry-run; show what would change
+    patchium setup --agent codex --agent claude
+    patchium setup --no-docs    # only MCP, skip global docs blocks
+    """
+    from .setup_cmd import run_setup
+    result = run_setup(list(agents) or None, dry_run=check,
+                      write_docs=not no_docs)
+    if ctx.obj["json"]:
+        click.echo(json.dumps(result, indent=2))
+        return
+    click.echo(f"binary: {result['binary']}")
+    if check:
+        click.echo("(dry-run — no changes written)")
+    click.echo()
+    click.echo("detected:")
+    for name, info in result["detected"].items():
+        mark = "✓" if info["detected"] else "·"
+        click.echo(f"  {mark} {name:8s} {info['reason']}")
+    click.echo()
+    click.echo("results:")
+    for r in result["results"]:
+        click.echo(f"  {r['agent']:8s}  mcp={r['mcp']:14s} docs={r['docs']}")
+        for note in r["notes"]:
+            click.echo(f"      · {note}")
+    if not check and any(r["mcp"] == "registered" for r in result["results"]):
+        click.echo()
+        click.echo("Restart any agent CLI sessions to pick up the new MCP server.")
+
+
+@cli.command()
 @click.pass_context
 def shutdown(ctx):
     """Stop the browser AND tell the daemon to exit."""

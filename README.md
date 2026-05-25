@@ -4,16 +4,22 @@
 Patched Playwright + multi-session daemon + credential vault + vision clicking + prompt-injection safety. One MCP server, N parallel Chromes, persistent per-session profiles.
 
 ```
-# Install from source — active development; the PyPI package may lag.
-git clone https://github.com/monodev-eth/patchium && cd patchium
-pip install -e ".[all]"               # core + every advertised feature
+# One-line install — works on Debian/Ubuntu/macOS without PEP-668 grief.
+pipx install git+https://github.com/monodev-eth/patchium
 patchright install chrome             # one-time: real Chrome (not Chromium)
-patchium install                      # sanity-check the environment
-
-# Register with Claude Code (use python3, NOT python — fails on Debian/Ubuntu)
-claude mcp add patchium python3 -m patchium.mcp_server
-# Then restart Claude Code for the MCP to load.
+patchium setup                        # auto-register with Codex/Claude/Cursor (idempotent)
+# → restart any agent CLI sessions to pick up the new MCP server.
 ```
+
+<details><summary>From source (for development)</summary>
+
+```
+git clone https://github.com/monodev-eth/patchium && cd patchium
+python3 -m venv .venv && .venv/bin/pip install -e ".[all]"
+.venv/bin/patchright install chrome
+.venv/bin/patchium setup              # uses the venv binary
+```
+</details>
 
 > **Coding agents (Codex / Cursor / Claude Code) landing in this repo:** read [`AGENTS.md`](AGENTS.md) first. If the `.venv` already exists, you can skip the install — `./.venv/bin/patchium <verb>` works directly. The two everyday recipes are `explore <url>` (look at one page) and `research --target <url> --intent ...` (parallel fan-out). Avoid the PEP-668 install trap and the headed-default trap by following that file.
 
