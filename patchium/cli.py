@@ -366,10 +366,15 @@ def stop(ctx):
 @click.option("--skip-verify", is_flag=True,
               help="Skip the DNS pre-check (trusted URLs only).")
 @click.option("-o", "--output-dir", default=None,
-              help="If set: save screenshot as a PNG file + write `<dir>/explore.md` summary "
-                   "instead of returning the base64 in JSON.")
+              help="If set: save screenshot + markdown summary to this dir.")
+@click.option("--inline-screenshot", is_flag=True,
+              help="Return the base64 screenshot inline in JSON (old default). "
+                   "Without this flag the CLI writes to ~/.cache/patchium/explores/ "
+                   "and returns a `screenshot_path` instead — avoids flooding agent "
+                   "stdout with thousands of lines of base64.")
 @click.pass_context
-def explore(ctx, url, intent, keep_open, screenshot, full_page, skip_verify, output_dir):
+def explore(ctx, url, intent, keep_open, screenshot, full_page, skip_verify,
+            output_dir, inline_screenshot):
     """ONE-CALL "look at this URL". The canonical "I just want to see what's
     on this page" workflow — does verify_url → auto-start headless session
     → go → extract text + screenshot → close.
@@ -377,14 +382,15 @@ def explore(ctx, url, intent, keep_open, screenshot, full_page, skip_verify, out
     Replaces the start/go/text/stop sequence for the 80% case. Use this
     instead of separate primitives unless you need multi-step interaction.
 
-    EXAMPLE:
-
     \b
+    EXAMPLES:
         patchium explore https://example.com
         patchium explore https://docs.example.com -o ./scrape-out/
         patchium explore https://maybe-dead.example --skip-verify
     """
     import base64 as _b64
+    import time as _time
+    from hashlib import md5 as _md5
     from pathlib import Path as _P
     args = {"url": url, "keep_open": keep_open,
             "screenshot": screenshot, "full_page": full_page,
@@ -392,13 +398,13 @@ def explore(ctx, url, intent, keep_open, screenshot, full_page, skip_verify, out
     if intent is not None:
         args["intent"] = intent
     result = call("explore", args)
-    if output_dir and result.get("screenshot_b64"):
+    b64 = result.get("screenshot_b64")
+    if b64 and output_dir:
+        # Explicit -o: write into user-chosen dir + markdown summary
         out = _P(output_dir).resolve()
         out.mkdir(parents=True, exist_ok=True)
-        # Save screenshot
         shot = out / "landing.png"
-        shot.write_bytes(_b64.b64decode(result["screenshot_b64"]))
-        # Write markdown summary; drop the base64 from JSON output
+        shot.write_bytes(_b64.b64decode(b64))
         md = out / "explore.md"
         md.write_text(
             f"# explore {result.get('url')}\n\n"
@@ -412,25 +418,47 @@ def explore(ctx, url, intent, keep_open, screenshot, full_page, skip_verify, out
         result["screenshot_path"] = str(shot)
         result["markdown_path"] = str(md)
         result.pop("screenshot_b64", None)
+    elif b64 and not inline_screenshot:
+        # Default: write to ~/.cache/patchium/explores/, strip from JSON.
+        # Keeps agent stdout free of ~3MB of base64 per call.
+        cache = _P.home() / ".cache" / "patchium" / "explores"
+        cache.mkdir(parents=True, exist_ok=True)
+        url_hash = _md5(url.encode()).hexdigest()[:8]
+        shot = cache / f"explore-{int(_time.time())}-{url_hash}.png"
+        shot.write_bytes(_b64.b64decode(b64))
+        result["screenshot_path"] = str(shot)
+        result.pop("screenshot_b64", None)
     _emit(result, ctx.obj["json"])
 
 
 @cli.command(name="verify-url")
-@click.argument("url")
+@click.argument("url", required=False)
+@click.option("--url", "url_flag", default=None,
+              help="Alternative to positional URL (both forms accepted).")
 @click.option("--check-http", is_flag=True,
               help="Also do an HTTP HEAD (default: DNS-only, faster).")
 @click.option("--timeout-ms", default=3000, type=int,
               help="Per-stage timeout in ms (default: 3000).")
 @click.pass_context
-def verify_url_cli(ctx, url, check_http, timeout_ms):
+def verify_url_cli(ctx, url, url_flag, check_http, timeout_ms):
     """Fast DNS / optional HTTP HEAD pre-check for a URL. Returns in ~50ms
     on a dead domain instead of the 30s nav timeout `go` would have eaten.
 
     Use this before `go` on any URL you're not 100% sure exists — typically
     LLM-generated candidate domains, business-name guesses, etc.
+
+    \b
+    EXAMPLES:
+        patchium verify-url https://example.com
+        patchium verify-url --url https://example.com    # same thing
+        patchium verify_url https://example.com          # MCP-style alias
     """
+    final_url = url or url_flag
+    if not final_url:
+        raise click.UsageError(
+            "URL required: pass as positional argument or `--url <value>`")
     _emit(call("verify_url",
-                {"url": url, "check_http": check_http, "timeout_ms": timeout_ms}),
+                {"url": final_url, "check_http": check_http, "timeout_ms": timeout_ms}),
           ctx.obj["json"])
 
 
@@ -2364,20 +2392,30 @@ _CLI_GROUPS_BY_PREFIX = {
 
 
 def _rewrite_mcp_aliases(argv: list[str]) -> list[str]:
-    """Translate `patchium session_new foo` → `patchium session new foo`.
-    Doesn't touch top-level verbs that already exist (like `set_log_verbs`,
-    which is a single-word command in CLI form too)."""
+    """Translate `patchium session_new foo` → `patchium session new foo`,
+    and `patchium verify_url X` → `patchium verify-url X`.
+
+    Group-prefix rewrites are explicit (session_*, vision_*, etc.). For
+    top-level commands with underscores, fall back to introspecting the
+    click command registry: if `foo_bar` isn't a registered command but
+    `foo-bar` is, rewrite. Keeps the underscore-tolerance auto-extensible
+    for future hyphenated CLI commands.
+    """
     if len(argv) < 2:
         return argv
     cmd = argv[1]
-    # Handle a few known top-level singletons
-    if cmd in ("set_log_verbs",):
-        return [argv[0], cmd.replace("_", "-"), *argv[2:]]
+    # Group-prefix → subcommand rewrite (session_new → session new)
     for prefix, group in _CLI_GROUPS_BY_PREFIX.items():
         if cmd.startswith(prefix) and cmd != prefix.rstrip("_"):
             subcmd = cmd[len(prefix):]
             if subcmd:
                 return [argv[0], group, subcmd, *argv[2:]]
+    # Top-level: only rewrite if underscored form is missing AND
+    # the hyphenated form exists. Avoids touching valid underscored verbs.
+    if "_" in cmd and cmd not in cli.commands:
+        hyphenated = cmd.replace("_", "-")
+        if hyphenated in cli.commands:
+            return [argv[0], hyphenated, *argv[2:]]
     return argv
 
 
