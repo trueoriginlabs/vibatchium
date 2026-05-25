@@ -15,6 +15,8 @@ claude mcp add patchium python3 -m patchium.mcp_server
 # Then restart Claude Code for the MCP to load.
 ```
 
+> **Coding agents (Codex / Cursor / Claude Code) landing in this repo:** read [`AGENTS.md`](AGENTS.md) first. If the `.venv` already exists, you can skip the install — `./.venv/bin/patchium <verb>` works directly. The two everyday recipes are `explore <url>` (look at one page) and `research --target <url> --intent ...` (parallel fan-out). Avoid the PEP-668 install trap and the headed-default trap by following that file.
+
 Then either drive from a shell or from any MCP-speaking agent:
 
 ```
@@ -155,6 +157,7 @@ Capability buckets for MCP gating (`patchium mcp --caps=...`):
 | **Agents** | `observe`, `act` (heuristic + LLM modes, self-healing cache) |
 | **Stealth** | `fingerprint` (sannysoft/creepjs/brotector scorer + per-session UA/timezone/locale) |
 
+- Coding-agent contract (Codex / Cursor / Claude Code one-pager): [`AGENTS.md`](AGENTS.md)
 - Full per-verb reference: [`docs/CAPABILITIES.md`](docs/CAPABILITIES.md)
 - Operator playbook + env vars + recipes + anti-patterns from real runs: [`docs/OPERATIONS.md`](docs/OPERATIONS.md)
 - Stealth posture + trade-offs: [`docs/STEALTH.md`](docs/STEALTH.md)
