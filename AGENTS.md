@@ -2,10 +2,23 @@
 
 If you're a coding agent (Codex, Cursor, Claude Code, etc.) operating in this repo and a user has told you to "use patchium," read this file first. It saves ~15 min of environment-discovery friction.
 
+## If you're a user reading this for the first time
+
+```bash
+pipx install git+https://github.com/monodev-eth/patchium  # or pip install --user
+patchright install chrome
+patchium setup            # wire patchium into Codex / Claude Code / Cursor (idempotent)
+```
+
+After `setup`, any agent CLI session in any cwd sees patchium as a registered
+MCP server + has a small docs block in its global instructions file pointing
+at it. Restart agent sessions to pick up the new MCP server.
+
 ## TL;DR — the only commands you actually need
 
 ```bash
-# The CLI binary lives at this path — no install, no PATH magic, no python -m invocation.
+# In this repo the CLI binary lives in the venv. If patchium is on $PATH
+# (after `pipx install`), just use `patchium` directly.
 PB=/home/mono/projects/patchium/.venv/bin/patchium
 
 # One-call "look at this URL" (returns text + screenshot, auto-closes session)
