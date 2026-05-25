@@ -63,7 +63,7 @@ A single daemon process holds all sessions. Auto-spawns on first call.
 
 ## Output
 
-- `explore` → JSON to stdout `{url, title, text, screenshot_b64, status, elapsed_ms, closed}`. `-o <dir>` saves screenshot + markdown summary.
+- `explore` → JSON to stdout `{url, title, text, screenshot_path, status, elapsed_ms, closed}`. Screenshot written to `~/.cache/patchium/explores/` by default (no base64 in stdout). `-o <dir>` writes to a chosen dir + markdown summary. `--inline-screenshot` returns base64 inline (the old default).
 - `research` → per-thread markdown + landing screenshots + `index.md` in `--output-dir`.
 - `screenshot` → PNG via `--path`. `text`/`html`/`content` → stdout.
 
