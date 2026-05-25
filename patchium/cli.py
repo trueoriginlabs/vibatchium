@@ -351,6 +351,89 @@ def stop(ctx):
     _emit(call("stop"), ctx.obj["json"], "stopped")
 
 
+# ─── Wave 7.7.6: surface the "just works" verbs in the CLI ───────────
+
+@cli.command()
+@click.argument("url")
+@click.option("--intent", default=None,
+              help="Optional natural-language description (reserved for future).")
+@click.option("--keep-open", is_flag=True,
+              help="Leave session running after extracting; default is auto-close.")
+@click.option("--no-screenshot", "screenshot", flag_value=False, default=True,
+              help="Skip the base64 screenshot to save time and stdout bytes.")
+@click.option("--no-full-page", "full_page", flag_value=False, default=True,
+              help="Viewport-only screenshot instead of full-page.")
+@click.option("--skip-verify", is_flag=True,
+              help="Skip the DNS pre-check (trusted URLs only).")
+@click.option("-o", "--output-dir", default=None,
+              help="If set: save screenshot as a PNG file + write `<dir>/explore.md` summary "
+                   "instead of returning the base64 in JSON.")
+@click.pass_context
+def explore(ctx, url, intent, keep_open, screenshot, full_page, skip_verify, output_dir):
+    """ONE-CALL "look at this URL". The canonical "I just want to see what's
+    on this page" workflow — does verify_url → auto-start headless session
+    → go → extract text + screenshot → close.
+
+    Replaces the start/go/text/stop sequence for the 80% case. Use this
+    instead of separate primitives unless you need multi-step interaction.
+
+    EXAMPLE:
+
+    \b
+        patchium explore https://example.com
+        patchium explore https://docs.example.com -o ./scrape-out/
+        patchium explore https://maybe-dead.example --skip-verify
+    """
+    import base64 as _b64
+    from pathlib import Path as _P
+    args = {"url": url, "keep_open": keep_open,
+            "screenshot": screenshot, "full_page": full_page,
+            "skip_verify": skip_verify}
+    if intent is not None:
+        args["intent"] = intent
+    result = call("explore", args)
+    if output_dir and result.get("screenshot_b64"):
+        out = _P(output_dir).resolve()
+        out.mkdir(parents=True, exist_ok=True)
+        # Save screenshot
+        shot = out / "landing.png"
+        shot.write_bytes(_b64.b64decode(result["screenshot_b64"]))
+        # Write markdown summary; drop the base64 from JSON output
+        md = out / "explore.md"
+        md.write_text(
+            f"# explore {result.get('url')}\n\n"
+            f"- title: {result.get('title')}\n"
+            f"- status: {result.get('status')}\n"
+            f"- elapsed: {result.get('elapsed_ms')}ms\n"
+            f"- screenshot: [landing.png]({shot.name})\n"
+            + (f"- walled: {result['walled']}\n" if result.get("walled") else "")
+            + f"\n## text\n\n{result.get('text', '_(empty)_')}\n"
+        )
+        result["screenshot_path"] = str(shot)
+        result["markdown_path"] = str(md)
+        result.pop("screenshot_b64", None)
+    _emit(result, ctx.obj["json"])
+
+
+@cli.command(name="verify-url")
+@click.argument("url")
+@click.option("--check-http", is_flag=True,
+              help="Also do an HTTP HEAD (default: DNS-only, faster).")
+@click.option("--timeout-ms", default=3000, type=int,
+              help="Per-stage timeout in ms (default: 3000).")
+@click.pass_context
+def verify_url_cli(ctx, url, check_http, timeout_ms):
+    """Fast DNS / optional HTTP HEAD pre-check for a URL. Returns in ~50ms
+    on a dead domain instead of the 30s nav timeout `go` would have eaten.
+
+    Use this before `go` on any URL you're not 100% sure exists — typically
+    LLM-generated candidate domains, business-name guesses, etc.
+    """
+    _emit(call("verify_url",
+                {"url": url, "check_http": check_http, "timeout_ms": timeout_ms}),
+          ctx.obj["json"])
+
+
 @cli.command()
 @click.pass_context
 def shutdown(ctx):
