@@ -63,7 +63,11 @@ def cli(ctx: click.Context, json_mode: bool, session_name: str | None) -> None:
 @cli.command()
 @click.option("--profile", default=None,
               help="Profile name or absolute path (defaults to active session/profile).")
-@click.option("--headless", is_flag=True, help="Headless mode (NOT recommended for stealth).")
+@click.option("--headless/--headed", "headless", default=None,
+              help="Force headless or headed. Default: headless when stdin is not a TTY "
+                   "(agent / piped / scripted use), headed when invoked interactively "
+                   "from a terminal. `PATCHIUM_DEFAULT_HEADLESS=1` forces headless "
+                   "everywhere; explicit --headless / --headed always wins.")
 @click.option("--stealth-mouse", is_flag=True,
               help="Layer humanized mouse via CDP-Patches (needs patchium[stealth-mouse]).")
 @click.option("--backend", default="patchright",
@@ -74,12 +78,27 @@ def cli(ctx: click.Context, json_mode: bool, session_name: str | None) -> None:
                    "auto = start with patchright, advisory on first wall.")
 @click.pass_context
 def start(ctx, profile, headless, stealth_mouse, backend):
-    """Start a browser session (cold launch real Chrome + persistent context)."""
+    """Start a browser session (cold launch real Chrome + persistent context).
+
+    Default headed/headless is inferred from the calling context: a TTY means a
+    human is watching (headed), no TTY means an agent or pipe is driving
+    (headless). Set `--headless` / `--headed` to override, or
+    `PATCHIUM_DEFAULT_HEADLESS=1` to force headless everywhere.
+    """
     args = {}
     if profile:
         args["profile"] = profile
-    if headless:
+    # Wave 7.7.11: tri-state headless. Explicit --headless / --headed wins.
+    # Otherwise: TTY → headed (human visual debugging); no TTY → headless
+    # (agent / pipe / script). Closes the trap where Codex/Claude/Cursor
+    # shelling out to `patchium start` got headed windows on the user's desktop.
+    if headless is True:
         args["headless"] = True
+    elif headless is False:
+        args["headless"] = False
+    elif not sys.stdin.isatty():
+        args["headless"] = True
+    # else: TTY → leave unset, daemon falls through to PATCHIUM_DEFAULT_HEADLESS / headed
     if stealth_mouse:
         args["stealth_mouse"] = True
     if backend != "patchright":
