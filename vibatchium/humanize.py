@@ -1,7 +1,7 @@
 """Wave 6.2b — humanization budget.
 
 Bezier mouse trajectories, gaussian-sampled dwell times, sinusoidal scroll
-inertia. Opt-in per session via `patchium humanize on`. Off by default
+inertia. Opt-in per session via `vibatchium humanize on`. Off by default
 because:
   1. Bad humanization is worse than none (perfectly-symmetric Bezier curves
      are more detectable than a straight line).

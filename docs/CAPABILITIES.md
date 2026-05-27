@@ -1,4 +1,4 @@
-# patchium capability reference
+# vibatchium capability reference
 
 Complete list of the 127 daemon verbs an agent can invoke. Every verb is exposed identically over CLI, MCP, and REST. Verbs that need a target take an `@eN` ref (from the most recent `map`) or any Playwright selector (`text=...`, `role=...`, `css=...`).
 
@@ -166,10 +166,10 @@ Legacy aliases: `profile_list` / `profile_new` / `profile_use` / `profile_delete
 - `set_log_verbs <on|off>` — runtime toggle for the per-verb DEBUG audit log. No daemon restart needed.
 
 ## Evals (CLI only)
-- `patchium evals run --targets ... --backends ... --update-readme` — built-in benchmark runner
+- `vb evals run --targets ... --backends ... --update-readme` — built-in benchmark runner
 
 ## Orchestration (CLI only)
-- `patchium research --target <url> --intent ... --intent ...` — parallel fan-out across N sessions; per-thread markdown + screenshot artifacts + an index.md
+- `vb research --target <url> --intent ... --intent ...` — parallel fan-out across N sessions; per-thread markdown + screenshot artifacts + an index.md
 
 ## Server modes (2)
 - `mcp [--caps=...]` — stdio JSON-RPC MCP server with capability gating

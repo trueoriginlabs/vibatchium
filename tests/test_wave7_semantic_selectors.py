@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
-from patchium.daemon import elements
+from vibatchium.daemon import elements
 
 
 # ─── prefix shortcuts ──────────────────────────────────────────────────

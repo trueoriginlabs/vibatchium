@@ -18,7 +18,7 @@ from pathlib import Path
 
 from . import elements, observe as _observe_mod
 
-log = logging.getLogger("patchium.handlers_extra")
+log = logging.getLogger("vibatchium.handlers_extra")
 
 # Pillow is optional — only required for `screenshot --annotate`. We import
 # lazily to keep the base install thin.
@@ -31,7 +31,7 @@ except Exception:  # noqa: BLE001
 
 def _session(d):
     if d.session is None:
-        raise RuntimeError("no browser session — run `patchium start` or `attach` first")
+        raise RuntimeError("no browser session — run `vibatchium start` or `attach` first")
     return d.session
 
 
@@ -823,7 +823,7 @@ def register_extra(daemon) -> None:
         har_doc = {
             "log": {
                 "version": "1.2",
-                "creator": {"name": "patchium", "version": _pv},
+                "creator": {"name": "vibatchium", "version": _pv},
                 "browser": {"name": "Chrome", "version": ""},
                 "pages": [],  # we don't track page boundaries here — could add
                 "entries": [{k: v for k, v in e.items() if not k.startswith("_")}

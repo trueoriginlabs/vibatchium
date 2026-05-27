@@ -15,7 +15,7 @@ from email.message import EmailMessage
 
 import pytest
 
-from patchium.secrets import (
+from vibatchium.secrets import (
     parse_email_poll_url, wait_for_email_code,
 )
 

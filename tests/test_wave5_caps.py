@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import pytest
 
-from patchium.mcp_server import (
+from vibatchium.mcp_server import (
     TOOLS, _CAP_BUCKETS, _filter_tools, _resolve_caps,
 )
 
@@ -113,7 +113,7 @@ def test_every_tool_classified():
     Sleep/ping are utility tools that the filter also lets through. Everything
     else needs an explicit bucket.
     """
-    from patchium.mcp_server import _ALWAYS_EXPOSED
+    from vibatchium.mcp_server import _ALWAYS_EXPOSED
     classified = set().union(*_CAP_BUCKETS.values()) | _ALWAYS_EXPOSED | {"sleep", "ping"}
     all_names = {t[0] for t in TOOLS}
     unclassified = all_names - classified

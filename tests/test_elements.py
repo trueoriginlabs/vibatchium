@@ -1,5 +1,5 @@
 """Element model tests — map / click / fill / type / refs."""
-from patchium.client import call
+from vibatchium.client import call
 
 
 def test_map_returns_refs(local_server):
@@ -51,9 +51,9 @@ def test_fill_and_submit(local_server):
 
 def test_find_text(local_server):
     call("go", {"url": f"{local_server}/simple.html"})
-    res = call("find", {"kind": "text", "query": "Hello, Patchium"})
+    res = call("find", {"kind": "text", "query": "Hello, Vibatchium"})
     assert res["count"] >= 1
-    assert "Hello, Patchium" in res["first_text"]
+    assert "Hello, Vibatchium" in res["first_text"]
 
 
 def test_find_label(local_server):

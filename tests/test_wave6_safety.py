@@ -13,8 +13,8 @@ from __future__ import annotations
 
 import pytest
 
-from patchium.client import call
-from patchium.safety import (
+from vibatchium.client import call
+from vibatchium.safety import (
     classify, apply_wrap, apply_redact,
     scan_and_apply, scan_response,
 )
@@ -453,6 +453,6 @@ def test_safety_scan_handler_returns_classification():
 
 
 def test_safety_set_rejects_invalid_mode():
-    from patchium.client import DaemonError
+    from vibatchium.client import DaemonError
     with pytest.raises(DaemonError, match="unknown safety mode"):
         call("safety_set", {"mode": "garbage"})

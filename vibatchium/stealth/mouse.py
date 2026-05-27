@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import logging
 
-log = logging.getLogger("patchium.stealth.mouse")
+log = logging.getLogger("vibatchium.stealth.mouse")
 
 
 def humanize_mouse_available() -> tuple[bool, str]:
@@ -55,14 +55,14 @@ async def install_humanized_mouse(session, *, button_dwell_ms: int = 60) -> None
     Idempotent: calling twice on the same session is a no-op.
 
     Args:
-      session: BrowserSession from patchium.daemon.browser
+      session: BrowserSession from vibatchium.daemon.browser
       button_dwell_ms: typical button-press dwell time. Real humans: 40-120ms.
     """
     available, info = humanize_mouse_available()
     if not available:
         raise RuntimeError(
             "stealth-mouse layer requested but `cdp_patches` is not installed. "
-            "Install with: `pip install patchium[stealth-mouse]` "
+            "Install with: `pip install vibatchium[stealth-mouse]` "
             f"(import error: {info})"
         )
     if getattr(session, "_stealth_mouse_installed", False):

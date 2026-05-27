@@ -19,8 +19,8 @@ import os
 
 import pytest
 
-from patchium.client import call
-from patchium import secrets as _vault
+from vibatchium.client import call
+from vibatchium import secrets as _vault
 
 
 # ─── test fixture: temp vault key in env ────────────────────────────────
@@ -88,7 +88,7 @@ def test_delete_secret_idempotent_returns_false(_patch_vault_paths):
 
 
 def test_vault_locked_when_no_key(monkeypatch, tmp_path):
-    """Without PATCHIUM_SECRETS_KEY + no keyring → VaultLocked."""
+    """Without VIBATCHIUM_SECRETS_KEY + no keyring → VaultLocked."""
     monkeypatch.delenv(_vault.ENV_KEY, raising=False)
     monkeypatch.setattr(_vault, "VAULT_PATH", tmp_path / "x.enc")
     # Force keyring lookup to return None
@@ -157,9 +157,9 @@ def test_resolve_bad_format_raises():
 
 # ─── daemon-level handler tests ─────────────────────────────────────────
 # These need the test key to be reachable from the daemon process. The daemon
-# was spawned with the inherited env at conftest time, so PATCHIUM_SECRETS_KEY
+# was spawned with the inherited env at conftest time, so VIBATCHIUM_SECRETS_KEY
 # should be set there too via conftest. For simplicity, we point the daemon
-# at its own vault path (default ~/.config/patchium/secrets.enc) and clean up
+# at its own vault path (default ~/.config/vibatchium/secrets.enc) and clean up
 # after — the daemon test confirms the WIRING, the pure-module tests confirm
 # the encryption is correct.
 
@@ -167,10 +167,10 @@ def test_resolve_bad_format_raises():
 def test_daemon_secret_set_list_delete_lifecycle(_patch_vault_paths):
     """Daemon-level: set → list shows masked → totp roundtrip → delete."""
     # The daemon inherits the test's env when spawned by conftest, so
-    # PATCHIUM_SECRETS_KEY is set. But the daemon's vault path is the
+    # VIBATCHIUM_SECRETS_KEY is set. But the daemon's vault path is the
     # default, not our tmp one. Use a unique site name to avoid stomping
     # real user data, and clean up explicitly.
-    site = f"patchium_test_site_{os.getpid()}"
+    site = f"vibatchium_test_site_{os.getpid()}"
     try:
         res = call("secret_set", {"site": site, "key": "totp-seed",
                                     "value": "JBSWY3DPEHPK3PXP"})
@@ -193,7 +193,7 @@ def test_daemon_secret_set_list_delete_lifecycle(_patch_vault_paths):
 
 def test_daemon_secret_response_never_includes_value():
     """CRITICAL: even on error, no daemon response should contain a value."""
-    site = f"patchium_test_leakproof_{os.getpid()}"
+    site = f"vibatchium_test_leakproof_{os.getpid()}"
     sentinel = "LEAK_DETECT_SENTINEL_42"
     try:
         call("secret_set", {"site": site, "key": "password", "value": sentinel})
@@ -215,7 +215,7 @@ def test_daemon_secret_response_never_includes_value():
 
 def test_daemon_log_never_contains_secret_values():
     """Hard requirement: secret values NEVER appear in the daemon log."""
-    site = f"patchium_test_log_leak_{os.getpid()}"
+    site = f"vibatchium_test_log_leak_{os.getpid()}"
     sentinel = "LOG_LEAK_DETECT_SENTINEL_42"
     try:
         call("secret_set", {"site": site, "key": "password", "value": sentinel})
@@ -224,7 +224,7 @@ def test_daemon_log_never_contains_secret_values():
                              "value": "JBSWY3DPEHPK3PXP"})
         call("secret_totp", {"site": site})
         # Read the daemon log
-        from patchium.daemon.paths import LOG_PATH
+        from vibatchium.daemon.paths import LOG_PATH
         if LOG_PATH.exists():
             log_content = LOG_PATH.read_text()
             assert sentinel not in log_content, \
@@ -240,7 +240,7 @@ def test_daemon_log_never_contains_secret_values():
 
 def test_fill_use_secret_resolves_from_vault(local_server):
     """fill --use-secret should fill the input with vault value, never echoing it."""
-    site = f"patchium_test_fill_use_{os.getpid()}"
+    site = f"vibatchium_test_fill_use_{os.getpid()}"
     sentinel = "USE_SECRET_FILL_VALUE_99"
     try:
         call("secret_set", {"site": site, "key": "password", "value": sentinel})

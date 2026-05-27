@@ -1,19 +1,19 @@
-# Wave 6.4b — example compose file showing a patchium service with persistent
+# Wave 6.4b — example compose file showing a vibatchium service with persistent
 # profiles + REST + live-view exposed.
 #
 # Bring up:   docker compose up -d
 # REST URL:   http://localhost:8000/v1/health
 # Live-view:  http://localhost:9223/
-# Token:      docker compose exec patchium cat /root/.cache/patchium/rest-token
+# Token:      docker compose exec vibatchium cat /root/.cache/vibatchium/rest-token
 
 services:
-  patchium:
+  vibatchium:
     build:
       context: .
       args:
         EXTRAS: annotate,llm,liveview,secrets,rest
-    image: patchium:0.3.0
-    container_name: patchium
+    image: vibatchium:0.3.0
+    container_name: vibatchium
     restart: unless-stopped
     ports:
       - "127.0.0.1:8000:8000"   # REST shim
@@ -21,22 +21,22 @@ services:
     environment:
       # Per-session vault key for headless containers (avoids OS keyring).
       # GENERATE YOUR OWN: openssl rand -base64 32 > .secrets-key
-      PATCHIUM_SECRETS_KEY: "${PATCHIUM_SECRETS_KEY:-}"
+      VIBATCHIUM_SECRETS_KEY: "${VIBATCHIUM_SECRETS_KEY:-}"
       # Anthropic API key for vision-first / LLM observe (optional)
       ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
       # Max concurrent browser sessions
-      PATCHIUM_MAX_SESSIONS: "4"
+      VIBATCHIUM_MAX_SESSIONS: "4"
       # Warm pool — pre-launch Playwright driver on container boot
-      PATCHIUM_WARM: "both"
+      VIBATCHIUM_WARM: "both"
     volumes:
       # Persist sessions across container restarts
-      - patchium-profiles:/root/.config/patchium
-      - patchium-cache:/root/.cache/patchium
+      - vibatchium-profiles:/root/.config/vibatchium
+      - vibatchium-cache:/root/.cache/vibatchium
       # If you need to expose the live-view to a sibling container, mount
       # /tmp/.X11-unix and set DISPLAY appropriately.
     shm_size: "2gb"    # Headless Chrome needs shm; the Dockerfile also
                        # sets --disable-dev-shm-usage as a safety net.
 
 volumes:
-  patchium-profiles:
-  patchium-cache:
+  vibatchium-profiles:
+  vibatchium-cache:

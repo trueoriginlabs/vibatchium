@@ -1,6 +1,6 @@
 # Stealth posture, honest
 
-What patchium does, what it doesn't, what we tested, and the explicit trade-offs.
+What vibatchium does, what it doesn't, what we tested, and the explicit trade-offs.
 
 ## Default stack
 
@@ -12,7 +12,7 @@ What patchium does, what it doesn't, what we tested, and the explicit trade-offs
 - **`--disable-dev-shm-usage`** — required for headless multi-session reliability
 - **WebRTC leak guard flags** auto-applied when a proxy is set
 - **`--no-sandbox` explicitly stripped** via `ignore_default_args` (Wave 7.5c) — this flag triggers a visible yellow infobar AND is a layer-7 detector signal
-- **Sandbox enabled** unless `PATCHIUM_DISABLE_SANDBOX=1` (escape hatch for Docker / restricted environments)
+- **Sandbox enabled** unless `VIBATCHIUM_DISABLE_SANDBOX=1` (escape hatch for Docker / restricted environments)
 
 ## Verified
 
@@ -70,8 +70,8 @@ We keep the flag. In headless mode (the default for agent runs), it's a non-issu
 ## Layers we can add (opt-in)
 
 - **`humanize on`** — Bezier mouse / gaussian dwell / sinusoidal scroll (already shipped, default OFF; only enable when targets actually fingerprint mouse behavior — DataDome, PerimeterX, HUMAN)
-- **CDP-Patches** mouse heuristics — `pip install patchium[stealth-mouse]` (GPL-3.0, opt-in)
-- **nodriver** backend — `pip install patchium[nodriver]` (AGPL-3.0, opt-in). Doesn't filter init scripts, so `chrome.runtime` shim is possible. Different stealth profile — best for sites where chrome.runtime is checked.
+- **CDP-Patches** mouse heuristics — `pip install vibatchium[stealth-mouse]` (GPL-3.0, opt-in)
+- **nodriver** backend — `pip install vibatchium[nodriver]` (AGPL-3.0, opt-in). Doesn't filter init scripts, so `chrome.runtime` shim is possible. Different stealth profile — best for sites where chrome.runtime is checked.
 - **BrowserForge** for canvas/WebGL/audio diversity (future, gated)
 
 ## When to use what
@@ -84,19 +84,19 @@ We keep the flag. In headless mode (the default for agent runs), it's a non-issu
 ## What we don't do
 
 - **TLS JA3 spoofing** — we run real Chrome so this is real-Chrome's JA3. If you need to look like a non-Chrome browser, this won't help.
-- **Canvas / audio fingerprint randomization** — neither patchright nor patchium does this. CreepJS will identify the GPU.
+- **Canvas / audio fingerprint randomization** — neither patchright nor vibatchium does this. CreepJS will identify the GPU.
 - **Browser-level user simulation (typing pauses, mouse jitter)** — that's `humanize on`. Opt-in.
 - **Defeat Cloudflare Turnstile / Managed Challenge that requires JS challenge solving** — out of scope. Use a CAPTCHA-solving service if you need this.
 
 ## How to verify against your target
 
 ```
-patchium fingerprint sannysoft       # baseline JS-runtime score
-patchium fingerprint creepjs         # canvas/audio/timing
-patchium fingerprint brotector       # Patchright authors' own gauntlet
+vb fingerprint sannysoft       # baseline JS-runtime score
+vb fingerprint creepjs         # canvas/audio/timing
+vb fingerprint brotector       # Patchright authors' own gauntlet
 
-patchium evals run --targets sannysoft,creepjs --backends patchright,nodriver
-patchium evals run --min-score 80 --update-readme   # CI gate + auto-patch README
+vb evals run --targets sannysoft,creepjs --backends patchright,nodriver
+vb evals run --min-score 80 --update-readme   # CI gate + auto-patch README
 ```
 
-If your target is a specific site you can probe, the most useful thing is `patchium go <url>` and look at the response. The daemon auto-detects walled pages (14+ challenge patterns: Cloudflare, Datadome, PerimeterX, Akamai, hCaptcha, Sucuri, Imperva) and surfaces `walled: <defender>` plus an `advice` field.
+If your target is a specific site you can probe, the most useful thing is `vb go <url>` and look at the response. The daemon auto-detects walled pages (14+ challenge patterns: Cloudflare, Datadome, PerimeterX, Akamai, hCaptcha, Sucuri, Imperva) and surfaces `walled: <defender>` plus an `advice` field.

@@ -2,12 +2,12 @@
 
 FastAPI app that exposes every daemon verb at `POST /v1/<verb>` with the
 same JSON body. Lets non-shell clients (Docker, language-agnostic agents,
-hosted-mode integrations) drive patchium without speaking Unix-socket RPC.
+hosted-mode integrations) drive vibatchium without speaking Unix-socket RPC.
 
 ### Auth
 
 Bearer-token by default. Token is generated on first launch + persisted at
-`~/.cache/patchium/rest-token` (mode 0600). All endpoints require
+`~/.cache/vibatchium/rest-token` (mode 0600). All endpoints require
 `Authorization: Bearer <token>` except `/v1/health`.
 
 `--insecure-no-auth` (CLI flag) disables auth — explicit opt-in for dev only.
@@ -45,10 +45,10 @@ import os
 import secrets
 from pathlib import Path
 
-log = logging.getLogger("patchium.rest")
+log = logging.getLogger("vibatchium.rest")
 
 
-TOKEN_PATH = Path.home() / ".cache" / "patchium" / "rest-token"
+TOKEN_PATH = Path.home() / ".cache" / "vibatchium" / "rest-token"
 
 
 def get_or_create_token() -> str:
@@ -99,7 +99,7 @@ def build_app(*, require_auth: bool = True, token: str | None = None,
         from fastapi.responses import JSONResponse
     except ImportError as exc:
         raise RuntimeError(
-            "REST shim requires `pip install patchium[rest]` "
+            "REST shim requires `pip install vibatchium[rest]` "
             f"(import error: {exc})"
         ) from exc
 
@@ -111,8 +111,8 @@ def build_app(*, require_auth: bool = True, token: str | None = None,
     _expected_token = token  # closure
     _allowed = _allowed_verbs(caps)  # None = unrestricted
 
-    app = FastAPI(title="patchium", version="0.3.0",
-                  description="REST shim over the patchium daemon")
+    app = FastAPI(title="vibatchium", version="0.3.0",
+                  description="REST shim over the vibatchium daemon")
 
     def _check_auth(request) -> None:
         if not require_auth:
@@ -333,12 +333,12 @@ def serve(*, host: str = "127.0.0.1", port: int = 8000,
         import uvicorn
     except ImportError as exc:
         raise RuntimeError(
-            "REST shim requires `pip install patchium[rest]` "
+            "REST shim requires `pip install vibatchium[rest]` "
             f"(import error: {exc})"
         ) from exc
     if require_auth and token is None:
         token = get_or_create_token()
-        print(f"\n  patchium REST listening on http://{host}:{port}", flush=True)
+        print(f"\n  vibatchium REST listening on http://{host}:{port}", flush=True)
         print(f"  bearer token: {token}", flush=True)
         print(f"  token file:   {TOKEN_PATH}", flush=True)
         if caps:

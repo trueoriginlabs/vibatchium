@@ -7,7 +7,7 @@ Covers:
 - route add/list/clear lifecycle
 - dialog_policy replaces prior handler cleanly
 """
-from patchium.client import call
+from vibatchium.client import call
 
 
 def test_snapshot_invalidates_on_navigation(local_server):
@@ -18,7 +18,7 @@ def test_snapshot_invalidates_on_navigation(local_server):
     call("go", {"url": f"{local_server}/second.html"})
     # using a pre-nav ref should now error explicitly
     import pytest
-    from patchium.client import DaemonError
+    from vibatchium.client import DaemonError
     with pytest.raises(DaemonError, match="invalidated"):
         call("click", {"target": "@e1"})
 
@@ -28,7 +28,7 @@ def test_snapshot_invalidates_on_reload(local_server):
     call("map")
     call("reload")
     import pytest
-    from patchium.client import DaemonError
+    from vibatchium.client import DaemonError
     with pytest.raises(DaemonError, match="invalidated"):
         call("click", {"target": "@e1"})
 
@@ -108,4 +108,4 @@ def test_close_active_page_recovers(local_server):
     assert res["running"] is True
     # the daemon's session.page should still be navigable
     call("go", {"url": f"{local_server}/simple.html"})
-    assert call("title")["title"] == "Patchium Test Page"
+    assert call("title")["title"] == "Vibatchium Test Page"

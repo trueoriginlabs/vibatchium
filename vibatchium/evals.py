@@ -1,4 +1,4 @@
-"""Wave 6.2c — patchium evals benchmark suite.
+"""Wave 6.2c — vibatchium evals benchmark suite.
 
 Runs the `fingerprint` scorer across a matrix of (target × backend × humanize)
 and emits a markdown/JSON table. Used to:
@@ -11,7 +11,7 @@ Cells in the matrix:
   - backend: patchright (default) | nodriver
   - humanize: on | off
 
-For each cell, we spawn an isolated session (`patchium_evals_<uuid>`),
+For each cell, we spawn an isolated session (`vibatchium_evals_<uuid>`),
 configure backend + humanize, navigate to the target, scrape the score,
 then tear down the session. Default: just patchright × off vs patchright ×
 on to keep wall-clock short (~30s).
@@ -19,7 +19,7 @@ on to keep wall-clock short (~30s).
 Output formats:
   - markdown (default): printable table for the README
   - json: machine-readable for CI / dashboards
-  - --update-readme: patches `<!-- patchium-evals -->...<!-- /patchium-evals -->`
+  - --update-readme: patches `<!-- vibatchium-evals -->...<!-- /vibatchium-evals -->`
     region in README.md (idempotent)
 
 CI gate: `--min-score N` exits non-zero if any cell scored below N.
@@ -35,7 +35,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-log = logging.getLogger("patchium.evals")
+log = logging.getLogger("vibatchium.evals")
 
 
 BUILTIN_TARGETS = ("sannysoft", "creepjs", "brotector")
@@ -45,7 +45,7 @@ BUILTIN_BACKENDS = ("patchright",)  # nodriver is opt-in; user passes explicitly
 async def _run_one_cell(client_call, target: str, backend: str,
                          humanize: bool, *, settle_ms: int = 5000) -> dict:
     """Run a single (target, backend, humanize) cell. Returns a row dict."""
-    sname = f"patchium_evals_{uuid.uuid4().hex[:8]}"
+    sname = f"vibatchium_evals_{uuid.uuid4().hex[:8]}"
     cell: dict[str, Any] = {
         "target": target, "backend": backend, "humanize": humanize,
         "score": None, "error": None, "elapsed_s": None,
@@ -110,7 +110,7 @@ def run_eval_matrix(client_call, *, targets=BUILTIN_TARGETS,
 def _run_one_cell_sync(client_call, target: str, backend: str,
                         humanize: bool, settle_ms: int) -> dict:
     """Sync wrapper for _run_one_cell — the client is sync."""
-    sname = f"patchium_evals_{uuid.uuid4().hex[:8]}"
+    sname = f"vibatchium_evals_{uuid.uuid4().hex[:8]}"
     cell: dict[str, Any] = {
         "target": target, "backend": backend, "humanize": humanize,
         "score": None, "error": None, "elapsed_s": None,
@@ -182,7 +182,7 @@ def render_json(rows: list[dict]) -> str:
 
 
 def update_readme(readme_path: Path, markdown_table: str) -> bool:
-    """Patch the `<!-- patchium-evals -->...<!-- /patchium-evals -->` region
+    """Patch the `<!-- vibatchium-evals -->...<!-- /vibatchium-evals -->` region
     in `readme_path` with the new table. Idempotent — re-running on same
     data produces no diff.
 
@@ -192,8 +192,8 @@ def update_readme(readme_path: Path, markdown_table: str) -> bool:
     if not readme_path.exists():
         return False
     content = readme_path.read_text()
-    start = "<!-- patchium-evals -->"
-    end = "<!-- /patchium-evals -->"
+    start = "<!-- vibatchium-evals -->"
+    end = "<!-- /vibatchium-evals -->"
     pattern = re.compile(
         re.escape(start) + r".*?" + re.escape(end),
         re.DOTALL,

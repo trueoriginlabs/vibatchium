@@ -1,4 +1,4 @@
-"""patchium CLI — thin wrapper over the daemon RPC.
+"""vibatchium CLI — thin wrapper over the daemon RPC.
 
 All commands talk to a single long-lived daemon process. The daemon auto-spawns
 on the first command if it isn't already running.
@@ -36,16 +36,16 @@ def _emit(result, json_mode: bool, fallback_key: str | None = None):
 @click.group(context_settings={"help_option_names": ["-h", "--help"]})
 @click.option("--json", "json_mode", is_flag=True, help="Emit responses as JSON.")
 @click.option("--session", "session_name", default=None,
-              help="Target session name (also via PATCHIUM_SESSION env). "
+              help="Target session name (also via VIBATCHIUM_SESSION env). "
                    "Defaults to the active session on disk → 'default'.")
 @click.version_option(__version__, "--version")
 @click.pass_context
 def cli(ctx: click.Context, json_mode: bool, session_name: str | None) -> None:
-    """Patchium — agentic browser CLI (Patchwright stealth + Vibium ergonomics).
+    """Vibatchium — agentic browser CLI (Patchwright stealth + Vibium ergonomics).
 
-    Multi-session: `patchium --session work click @e3` addresses the 'work'
+    Multi-session: `vibatchium --session work click @e3` addresses the 'work'
     session. Without --session, the active session on disk is used (default
-    'default'). Pin a session for a sub-shell via `export PATCHIUM_SESSION=work`.
+    'default'). Pin a session for a sub-shell via `export VIBATCHIUM_SESSION=work`.
     """
     import os as _os
     ctx.ensure_object(dict)
@@ -54,8 +54,8 @@ def cli(ctx: click.Context, json_mode: bool, session_name: str | None) -> None:
     # every subcommand needing to thread `session=` explicitly. Done before
     # any subcommand dispatch.
     if session_name:
-        _os.environ["PATCHIUM_SESSION"] = session_name
-    ctx.obj["session"] = session_name or _os.environ.get("PATCHIUM_SESSION")
+        _os.environ["VIBATCHIUM_SESSION"] = session_name
+    ctx.obj["session"] = session_name or _os.environ.get("VIBATCHIUM_SESSION")
 
 
 # ─── lifecycle ─────────────────────────────────────────────────────────────
@@ -66,14 +66,14 @@ def cli(ctx: click.Context, json_mode: bool, session_name: str | None) -> None:
 @click.option("--headless/--headed", "headless", default=None,
               help="Force headless or headed. Default: headless when stdin is not a TTY "
                    "(agent / piped / scripted use), headed when invoked interactively "
-                   "from a terminal. `PATCHIUM_DEFAULT_HEADLESS=1` forces headless "
+                   "from a terminal. `VIBATCHIUM_DEFAULT_HEADLESS=1` forces headless "
                    "everywhere; explicit --headless / --headed always wins.")
 @click.option("--stealth-mouse", is_flag=True,
-              help="Layer humanized mouse via CDP-Patches (needs patchium[stealth-mouse]).")
+              help="Layer humanized mouse via CDP-Patches (needs vibatchium[stealth-mouse]).")
 @click.option("--backend", default="patchright",
               type=click.Choice(["patchright", "nodriver", "auto"]),
               help="Stealth backend. patchright (default) = current Patchright stack. "
-                   "nodriver = hardened launch via nodriver lib (needs patchium[nodriver]); "
+                   "nodriver = hardened launch via nodriver lib (needs vibatchium[nodriver]); "
                    "better on Cloudflare Turnstile interactive challenges per 2026 benchmark. "
                    "auto = start with patchright, advisory on first wall.")
 @click.pass_context
@@ -83,7 +83,7 @@ def start(ctx, profile, headless, stealth_mouse, backend):
     Default headed/headless is inferred from the calling context: a TTY means a
     human is watching (headed), no TTY means an agent or pipe is driving
     (headless). Set `--headless` / `--headed` to override, or
-    `PATCHIUM_DEFAULT_HEADLESS=1` to force headless everywhere.
+    `VIBATCHIUM_DEFAULT_HEADLESS=1` to force headless everywhere.
     """
     args = {}
     if profile:
@@ -91,14 +91,14 @@ def start(ctx, profile, headless, stealth_mouse, backend):
     # Wave 7.7.11: tri-state headless. Explicit --headless / --headed wins.
     # Otherwise: TTY → headed (human visual debugging); no TTY → headless
     # (agent / pipe / script). Closes the trap where Codex/Claude/Cursor
-    # shelling out to `patchium start` got headed windows on the user's desktop.
+    # shelling out to `vibatchium start` got headed windows on the user's desktop.
     if headless is True:
         args["headless"] = True
     elif headless is False:
         args["headless"] = False
     elif not sys.stdin.isatty():
         args["headless"] = True
-    # else: TTY → leave unset, daemon falls through to PATCHIUM_DEFAULT_HEADLESS / headed
+    # else: TTY → leave unset, daemon falls through to VIBATCHIUM_DEFAULT_HEADLESS / headed
     if stealth_mouse:
         args["stealth_mouse"] = True
     if backend != "patchright":
@@ -138,7 +138,7 @@ def install(ctx, skip_chrome):
                            check=False, capture_output=True, text=True, timeout=300)
             check("chrome", True, "patchright install chrome ran (idempotent)")
         except FileNotFoundError:
-            check("chrome", False, "patchright binary not found — pip install patchium")
+            check("chrome", False, "patchright binary not found — pip install vibatchium")
 
     # 3) DISPLAY (Xvfb hint)
     display = os.environ.get("DISPLAY")
@@ -165,14 +165,14 @@ def install(ctx, skip_chrome):
     # 6) MCP SDK importable
     try:
         import mcp  # noqa: F401
-        check("mcp", True, "available — patchium mcp server runnable")
+        check("mcp", True, "available — vibatchium mcp server runnable")
     except ImportError:
         check("mcp", False, "missing — `pip install mcp` for the MCP server")
 
     overall_ok = all(c["ok"] for c in out["checks"])
     out["ok"] = overall_ok
     click.echo("")
-    click.echo("[+] all checks passed — patchium ready" if overall_ok
+    click.echo("[+] all checks passed — vibatchium ready" if overall_ok
                else "[!] some checks failed — see notes above")
     if ctx.obj["json"]:
         click.echo(json.dumps(out, indent=2))
@@ -186,15 +186,15 @@ def session():
 
     Sessions are independent Chrome processes — separate cookies, separate
     fingerprint, can run in parallel. Each session is tied to a profile dir
-    under ~/.config/patchium/profiles/<name>/ that persists on disk.
+    under ~/.config/vibatchium/profiles/<name>/ that persists on disk.
 
     Patterns:
-        patchium session new work               # create work profile dir
-        patchium --session work start           # launch Chrome for it
-        patchium --session work go https://...  # use it
-        patchium session list                   # see running + on-disk
-        patchium session close work             # stop Chrome; keep profile
-        patchium session delete work            # destroy profile dir
+        vibatchium session new work               # create work profile dir
+        vibatchium --session work start           # launch Chrome for it
+        vibatchium --session work go https://...  # use it
+        vibatchium session list                   # see running + on-disk
+        vibatchium session close work             # stop Chrome; keep profile
+        vibatchium session delete work            # destroy profile dir
     """
 
 
@@ -203,7 +203,7 @@ def session():
 @click.pass_context
 def session_new(ctx, name):
     """Create a new session/profile dir. Does NOT launch Chrome — run
-    `patchium --session NAME start` to actually open."""
+    `vibatchium --session NAME start` to actually open."""
     _emit(call("session_new", {"name": name}), ctx.obj["json"])
 
 
@@ -388,7 +388,7 @@ def stop(ctx):
               help="If set: save screenshot + markdown summary to this dir.")
 @click.option("--inline-screenshot", is_flag=True,
               help="Return the base64 screenshot inline in JSON (old default). "
-                   "Without this flag the CLI writes to ~/.cache/patchium/explores/ "
+                   "Without this flag the CLI writes to ~/.cache/vibatchium/explores/ "
                    "and returns a `screenshot_path` instead — avoids flooding agent "
                    "stdout with thousands of lines of base64.")
 @click.pass_context
@@ -403,9 +403,9 @@ def explore(ctx, url, intent, keep_open, screenshot, full_page, skip_verify,
 
     \b
     EXAMPLES:
-        patchium explore https://example.com
-        patchium explore https://docs.example.com -o ./scrape-out/
-        patchium explore https://maybe-dead.example --skip-verify
+        vibatchium explore https://example.com
+        vibatchium explore https://docs.example.com -o ./scrape-out/
+        vibatchium explore https://maybe-dead.example --skip-verify
     """
     import base64 as _b64
     import time as _time
@@ -470,9 +470,9 @@ def verify_url_cli(ctx, url, url_flag, check_http, timeout_ms):
 
     \b
     EXAMPLES:
-        patchium verify-url https://example.com
-        patchium verify-url --url https://example.com    # same thing
-        patchium verify_url https://example.com          # MCP-style alias
+        vibatchium verify-url https://example.com
+        vibatchium verify-url --url https://example.com    # same thing
+        vibatchium verify_url https://example.com          # MCP-style alias
     """
     final_url = url or url_flag
     if not final_url:
@@ -493,17 +493,17 @@ def verify_url_cli(ctx, url, url_flag, check_http, timeout_ms):
               help="Skip writing global AGENTS.md / CLAUDE.md blocks; only register MCP.")
 @click.pass_context
 def setup(ctx, agents, check, no_docs):
-    """Wire patchium into installed agent CLIs (Codex, Claude Code, Cursor).
+    """Wire vibatchium into installed agent CLIs (Codex, Claude Code, Cursor).
 
-    Registers patchium as an MCP server and writes a small pointer block in
-    each agent's global docs so any future agent session knows patchium is
+    Registers vibatchium as an MCP server and writes a small pointer block in
+    each agent's global docs so any future agent session knows vibatchium is
     available. Idempotent — safe to re-run.
 
     \b
-    patchium setup              # auto-detect and wire everything
-    patchium setup --check      # dry-run; show what would change
-    patchium setup --agent codex --agent claude
-    patchium setup --no-docs    # only MCP, skip global docs blocks
+    vibatchium setup              # auto-detect and wire everything
+    vibatchium setup --check      # dry-run; show what would change
+    vibatchium setup --agent codex --agent claude
+    vibatchium setup --no-docs    # only MCP, skip global docs blocks
     """
     from .setup_cmd import run_setup
     result = run_setup(list(agents) or None, dry_run=check,
@@ -569,8 +569,8 @@ def go(ctx, url, url_flag, wait_until, timeout_ms):
 
     \b
     EXAMPLES:
-        patchium go https://example.com
-        patchium go --url https://example.com    # same thing
+        vibatchium go https://example.com
+        vibatchium go --url https://example.com    # same thing
     """
     final_url = url or url_flag
     if not final_url:
@@ -1351,8 +1351,8 @@ def route_add(ctx, pattern, mode, body, status, content_type):
     """Add a route rule. PATTERN is a Playwright URL glob like `**/*.png`.
 
     Examples:
-      patchium route add "**/*.{png,jpg,css}" --mode abort
-      patchium route add "**/api/users" --mode fulfill --body '{"ok":true}' --content-type application/json
+      vibatchium route add "**/*.{png,jpg,css}" --mode abort
+      vibatchium route add "**/api/users" --mode fulfill --body '{"ok":true}' --content-type application/json
     """
     _emit(call("route_add", {"pattern": pattern, "mode": mode, "body": body,
                               "status": status, "content_type": content_type}),
@@ -1459,7 +1459,7 @@ def act(ctx, intent, llm):
 @click.option("--follow", is_flag=True, help="tail -f the log.")
 @click.pass_context
 def _logs_basic(ctx, lines, follow):
-    """[deprecated] Use `patchium logs` for filtered tailing."""
+    """[deprecated] Use `vibatchium logs` for filtered tailing."""
     from .daemon.paths import LOG_PATH
     import subprocess as _sub
     if not LOG_PATH.exists():
@@ -1484,10 +1484,10 @@ def vision_click(ctx, intent, min_confidence, button, max_per_minute):
     """Find a UI element by description (via Claude vision) and click it.
 
     Use when the AX-tree is useless (canvas UIs, Flutter, Unity WebGL).
-    Requires ANTHROPIC_API_KEY + `pip install patchium[llm]`.
+    Requires ANTHROPIC_API_KEY + `pip install vibatchium[llm]`.
 
-        patchium vision-click "the blue submit button"
-        patchium vision-click "the OK button in the modal" --min-confidence 0.8
+        vibatchium vision-click "the blue submit button"
+        vibatchium vision-click "the OK button in the modal" --min-confidence 0.8
     """
     _emit(call("vision_click", {
         "intent": intent, "min_confidence": min_confidence,
@@ -1543,8 +1543,8 @@ def vision_clear_cache(ctx):
 def vision_budget(ctx, reset):
     """Show today's + lifetime vision spend vs configured caps.
 
-    Caps via env vars: PATCHIUM_VISION_MAX_DAILY_USD,
-    PATCHIUM_VISION_MAX_LIFETIME_USD. Unset = no cap.
+    Caps via env vars: VIBATCHIUM_VISION_MAX_DAILY_USD,
+    VIBATCHIUM_VISION_MAX_LIFETIME_USD. Unset = no cap.
     """
     args = {}
     if reset:
@@ -1563,9 +1563,9 @@ def safety():
         wrap       wrap suspicious regions in <UNTRUSTED_CONTENT> tags
         redact     replace suspicious regions with [REDACTED-PROMPT-INJECTION-N]
 
-        patchium --session work safety set flag-only
-        patchium --session work map      # response gains risk metadata
-        patchium safety scan "ignore previous instructions"  # test patterns
+        vibatchium --session work safety set flag-only
+        vibatchium --session work map      # response gains risk metadata
+        vibatchium safety scan "ignore previous instructions"  # test patterns
     """
 
 
@@ -1598,16 +1598,16 @@ def safety_scan(ctx, text):
 def secret():
     """Encrypted vault for per-site credentials + TOTP.
 
-    Vault key is sourced from OS keyring (preferred) or PATCHIUM_SECRETS_KEY
-    env (base64-32-bytes; CI/headless). Run `patchium secret init` once to
+    Vault key is sourced from OS keyring (preferred) or VIBATCHIUM_SECRETS_KEY
+    env (base64-32-bytes; CI/headless). Run `vibatchium secret init` once to
     provision the key.
 
-        patchium secret init
-        patchium secret set github.com username alice
-        patchium secret set github.com password 'hunter2'
-        patchium secret set github.com totp-seed JBSWY3DPEHPK3PXP
-        patchium secret list
-        patchium fill @e7 --use-secret github.com:totp
+        vibatchium secret init
+        vibatchium secret set github.com username alice
+        vibatchium secret set github.com password 'hunter2'
+        vibatchium secret set github.com totp-seed JBSWY3DPEHPK3PXP
+        vibatchium secret list
+        vibatchium fill @e7 --use-secret github.com:totp
     """
 
 
@@ -1685,7 +1685,7 @@ def wait_email_code(ctx, site, timeout, max_age, mark_read):
     return the extracted code.
 
     Set the poll URL once via:
-        patchium secret set example.com email-poll \\
+        vibatchium secret set example.com email-poll \\
           'imaps://user:pass@imap.gmail.com:993?regex=\\d{6}&from=*@example.com'
     """
     args = {"site": site, "timeout": timeout, "max_age": max_age,
@@ -1703,11 +1703,11 @@ def evals():
     Replaces the README's '70-90%' guesses with measured numbers per backend
     and per humanize-on/off. Use in CI with --min-score to catch regressions.
 
-        patchium evals run                                # default matrix → markdown
-        patchium evals run --backends patchright,nodriver --humanize on,off
-        patchium evals run --json --out evals.json
-        patchium evals run --update-readme                # patches README in-place
-        patchium evals run --min-score 80                 # exit 1 if any cell <80
+        vibatchium evals run                                # default matrix → markdown
+        vibatchium evals run --backends patchright,nodriver --humanize on,off
+        vibatchium evals run --json --out evals.json
+        vibatchium evals run --update-readme                # patches README in-place
+        vibatchium evals run --min-score 80                 # exit 1 if any cell <80
     """
 
 
@@ -1715,7 +1715,7 @@ def evals():
 @click.option("--targets", default="sannysoft",
               help="Comma-separated target names or URLs (default: sannysoft).")
 @click.option("--backends", default="patchright",
-              help="Comma-separated backend names. nodriver requires patchium[nodriver].")
+              help="Comma-separated backend names. nodriver requires vibatchium[nodriver].")
 @click.option("--humanize", default="off",
               help="Comma-separated 'on','off' modes (default: off).")
 @click.option("--settle-ms", default=5000, type=int)
@@ -1723,7 +1723,7 @@ def evals():
               help="Write output to file instead of stdout.")
 @click.option("--json", "as_json", is_flag=True, help="Emit JSON instead of markdown.")
 @click.option("--update-readme", "update_readme_flag", is_flag=True,
-              help="Patch README.md between <!-- patchium-evals --> markers.")
+              help="Patch README.md between <!-- vibatchium-evals --> markers.")
 @click.option("--min-score", "min_score_arg", default=None, type=int,
               help="Exit non-zero if any cell scored below this (CI gate).")
 @click.pass_context
@@ -1756,7 +1756,7 @@ def evals_run(ctx, targets, backends, humanize, settle_ms, out_path,
         readme = _P.cwd() / "README.md"
         if not readme.exists():
             # Try relative to the package install (dev mode)
-            import patchium as _pm
+            import vibatchium as _pm
             readme = _P(_pm.__file__).resolve().parent.parent / "README.md"
         if readme.exists():
             changed = _evals.update_readme(readme, _evals.render_markdown(rows))
@@ -1790,9 +1790,9 @@ def humanize():
     OFF by default (Bezier paths are visible entropy — only enable when the
     target actually fingerprints mouse behavior, e.g. DataDome, PerimeterX).
 
-        patchium --session work humanize on
-        patchium --session work click @e3       # uses humanized click
-        patchium --session work humanize off
+        vibatchium --session work humanize on
+        vibatchium --session work click @e3       # uses humanized click
+        vibatchium --session work humanize off
     """
 
 
@@ -1822,11 +1822,11 @@ def proxy():
 
     Set a proxy that will be applied next time the session launches:
 
-        patchium --session work proxy set "http://user:pass@127.0.0.1:8888"
-        patchium --session work proxy set --path ~/.config/patchium-proxy.txt
-        patchium --session work start          # uses the configured proxy
-        patchium --session work proxy info     # exit IP, latency
-        patchium --session work proxy clear
+        vibatchium --session work proxy set "http://user:pass@127.0.0.1:8888"
+        vibatchium --session work proxy set --path ~/.config/vibatchium-proxy.txt
+        vibatchium --session work start          # uses the configured proxy
+        vibatchium --session work proxy info     # exit IP, latency
+        vibatchium --session work proxy clear
 
     Built-in providers (URL prefixes):
       http / socks5     generic
@@ -1876,10 +1876,10 @@ def checkpoint():
     A checkpoint captures everything needed to recreate a logged-in browser
     state later, even in a different session (Browserbase Contexts parity).
 
-        patchium --session work checkpoint save logged-in
-        patchium --session work checkpoint list
-        patchium --session work-2 checkpoint load logged-in --from-session work
-        patchium --session work checkpoint delete logged-in
+        vibatchium --session work checkpoint save logged-in
+        vibatchium --session work checkpoint list
+        vibatchium --session work-2 checkpoint load logged-in --from-session work
+        vibatchium --session work checkpoint delete logged-in
     """
 
 
@@ -1942,11 +1942,11 @@ def liveview():
     Watch what an agent is doing in real time. Read-only by default;
     --takeover forwards your clicks/keystrokes back into the session.
 
-        patchium liveview start                # bind 127.0.0.1:9223
-        patchium liveview start --takeover     # mouse/keyboard takeover mode
-        patchium liveview url                  # print viewer URL
+        vibatchium liveview start                # bind 127.0.0.1:9223
+        vibatchium liveview start --takeover     # mouse/keyboard takeover mode
+        vibatchium liveview url                  # print viewer URL
         # open the URL in any browser
-        patchium liveview stop
+        vibatchium liveview stop
     """
 
 
@@ -1991,7 +1991,7 @@ def liveview_url(ctx, session_name):
         _emit(res, True)
         return
     if not res.get("running"):
-        click.echo("live-view not running — `patchium liveview start` first", err=True)
+        click.echo("live-view not running — `vibatchium liveview start` first", err=True)
         sys.exit(1)
     target = res.get("session_url") or res.get("url")
     click.echo(target)
@@ -2016,7 +2016,7 @@ def fingerprint(ctx, target, url, extract, settle_ms):
       brotector  — Brotector (Patchright authors' own gauntlet)
 
     Use to replace the README's '70-90%' guesses with measured numbers per
-    backend. Run with `--backend nodriver` (via `patchium start --backend ...`)
+    backend. Run with `--backend nodriver` (via `vibatchium start --backend ...`)
     to compare stealth stacks on the same target.
     """
     args = {"target": target, "settle_ms": settle_ms}
@@ -2060,7 +2060,7 @@ def mcp(caps):
 def serve(host, port, insecure_no_auth, caps):
     """Run the FastAPI REST shim mirroring every daemon verb at POST /v1/<verb>.
 
-    Bearer token persists at ~/.cache/patchium/rest-token (mode 0600).
+    Bearer token persists at ~/.cache/vibatchium/rest-token (mode 0600).
     Set the same token in the Authorization header from any HTTP client.
     """
     if host not in ("127.0.0.1", "::1", "localhost") and not insecure_no_auth:
@@ -2118,7 +2118,7 @@ def pages(ctx):
               help="Number of parallel sessions. Defaults to the number of --intent args.")
 @click.option("--output-dir", "output_dir", default=None,
               help="Where to write per-thread markdown + screenshots. "
-                   "Default: ./patchium-research-<timestamp>/")
+                   "Default: ./vibatchium-research-<timestamp>/")
 @click.option("--headless/--headed", default=True,
               help="Headless by default (no desktop clutter); --headed if you want to watch.")
 @click.option("--safety", default="wrap", type=click.Choice(["off", "flag-only", "wrap", "redact"]),
@@ -2143,7 +2143,7 @@ def research(ctx, target, intents, threads, output_dir, headless, safety,
     EXAMPLE:
 
     \b
-        patchium research --target https://geminixprize.com \\
+        vibatchium research --target https://geminixprize.com \\
             --intent "prize structure and judging rubric" \\
             --intent "google tool stack pricing" \\
             --intent "prior xprize hackathon winners" \\
@@ -2168,7 +2168,7 @@ def research(ctx, target, intents, threads, output_dir, headless, safety,
     # Resolve output dir
     if output_dir is None:
         stamp = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-        output_dir = f"./patchium-research-{stamp}"
+        output_dir = f"./vibatchium-research-{stamp}"
     out = _P(output_dir).resolve()
     out.mkdir(parents=True, exist_ok=True)
     click.echo(f"output → {out}", err=True)
@@ -2283,7 +2283,7 @@ def research(ctx, target, intents, threads, output_dir, headless, safety,
     wall_s = (_dt.datetime.now() - t0).total_seconds()
     # Index report
     index_md = out / "index.md"
-    lines = ["# patchium research run", "",
+    lines = ["# vibatchium research run", "",
              f"- target: {target}",
              f"- threads: {n_threads}",
              f"- safety: {safety}",
@@ -2324,12 +2324,12 @@ def set_log_verbs_cli(ctx, mode):
 
     \b
     EXAMPLES:
-        patchium set-log-verbs on    # enable full per-verb log
-        patchium set-log-verbs off   # back to lifecycle-only logging
+        vibatchium set-log-verbs on    # enable full per-verb log
+        vibatchium set-log-verbs off   # back to lifecycle-only logging
 
     With ON, every handler call lands in the daemon log with args (creds
-    redacted). Pair with `patchium logs --session NAME --tail N`. Pre-existing
-    env equivalent: PATCHIUM_LOG_VERBS=1 (at daemon bootstrap).
+    redacted). Pair with `vibatchium logs --session NAME --tail N`. Pre-existing
+    env equivalent: VIBATCHIUM_LOG_VERBS=1 (at daemon bootstrap).
     """
     _emit(call("set_log_verbs", {"on": mode == "on"}), ctx.obj["json"])
 
@@ -2401,10 +2401,10 @@ def daemon_cmd():
 
 @daemon_cmd.command(name="start")
 @click.option("--max-sessions", default=None, type=int,
-              help="Concurrent session cap (default 4). Sets PATCHIUM_MAX_SESSIONS "
+              help="Concurrent session cap (default 4). Sets VIBATCHIUM_MAX_SESSIONS "
                    "for the daemon process. Persists for the daemon's lifetime.")
 @click.option("--log-verbs", is_flag=True,
-              help="Start with per-verb DEBUG audit log enabled (PATCHIUM_LOG_VERBS=1).")
+              help="Start with per-verb DEBUG audit log enabled (VIBATCHIUM_LOG_VERBS=1).")
 @click.option("--default-safety", default=None,
               type=click.Choice(["off", "flag-only", "wrap", "redact"]),
               help="Default safety mode for new sessions (default: flag-only).")
@@ -2415,7 +2415,7 @@ def daemon_cmd():
 def daemon_start(max_sessions, log_verbs, default_safety, default_headless):
     """Explicitly bootstrap the daemon with non-default settings.
 
-    For most uses you don't need this — `patchium start` auto-spawns
+    For most uses you don't need this — `vibatchium start` auto-spawns
     the daemon. Use this only when you need a higher session cap,
     full audit logging, or a non-default safety mode set at daemon
     start time.
@@ -2423,18 +2423,18 @@ def daemon_start(max_sessions, log_verbs, default_safety, default_headless):
     from .client import daemon_is_running, spawn_daemon
     if daemon_is_running():
         click.echo("daemon already running — stop it first with "
-                    "`patchium shutdown`", err=True)
+                    "`vibatchium shutdown`", err=True)
         sys.exit(1)
     env_overrides = {}
     if max_sessions is not None:
-        env_overrides["PATCHIUM_MAX_SESSIONS"] = str(max_sessions)
+        env_overrides["VIBATCHIUM_MAX_SESSIONS"] = str(max_sessions)
     if log_verbs:
-        env_overrides["PATCHIUM_LOG_VERBS"] = "1"
-        env_overrides["PATCHIUM_LOG_LEVEL"] = "DEBUG"
+        env_overrides["VIBATCHIUM_LOG_VERBS"] = "1"
+        env_overrides["VIBATCHIUM_LOG_LEVEL"] = "DEBUG"
     if default_headless:
-        env_overrides["PATCHIUM_DEFAULT_HEADLESS"] = "1"
+        env_overrides["VIBATCHIUM_DEFAULT_HEADLESS"] = "1"
     if default_safety:
-        env_overrides["PATCHIUM_DEFAULT_SAFETY"] = default_safety
+        env_overrides["VIBATCHIUM_DEFAULT_SAFETY"] = default_safety
     if env_overrides:
         os.environ.update(env_overrides)
         click.echo(f"applying env: {env_overrides}", err=True)
@@ -2469,7 +2469,7 @@ _CLI_GROUPS_BY_PREFIX = {
 
 
 # Global flags from the root `cli` command that may precede the verb.
-# When users write `patchium --session work session_close`, the rewriter has
+# When users write `vibatchium --session work session_close`, the rewriter has
 # to skip past `--session` + value before deciding what the verb is.
 _GLOBAL_FLAGS_WITH_VALUE = {"--session"}
 _GLOBAL_FLAGS_BOOLEAN = {"--json", "--version", "-h", "--help"}
@@ -2495,7 +2495,7 @@ _TOP_LEVEL_ALIASES = {
 def _find_verb_index(argv: list[str]) -> int:
     """Return the index of the verb (subcommand) in argv, skipping past
     global flags like `--session NAME`, `--json`, `--version`. Returns -1
-    if no verb is present (bare `patchium` or `patchium --help`).
+    if no verb is present (bare `vibatchium` or `vibatchium --help`).
     """
     i = 1
     while i < len(argv):

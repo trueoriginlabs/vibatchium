@@ -1,9 +1,9 @@
-"""Patchium MCP server — exposes the daemon's verbs as MCP tools over stdio.
+"""Vibatchium MCP server — exposes the daemon's verbs as MCP tools over stdio.
 
-Wire-up: `claude mcp add patchium python -m patchium.mcp_server`.
+Wire-up: `claude mcp add vibatchium python -m vibatchium.mcp_server`.
 
 The MCP server talks to the SAME daemon that the CLI uses. A browser session
-started by `patchium start` (or `patchium attach`) is immediately accessible to
+started by `vibatchium start` (or `vibatchium attach`) is immediately accessible to
 Claude Code via these tools, and vice versa — single source of browser truth.
 
 Tool naming follows the CLI verb names (go, map, click, fill, ...) so MCP
@@ -24,7 +24,7 @@ from . import __version__
 from .client import call as daemon_call, daemon_is_running, spawn_daemon
 
 
-server = Server("patchium")
+server = Server("vibatchium")
 
 
 # ─── tool schemas ─────────────────────────────────────────────────────────
@@ -53,7 +53,7 @@ TOOLS: list[tuple[str, str, dict, str, Any]] = [
          "profile": _str("Persistent profile dir (default: cache dir)."),
          "headless": _bool("Headless mode (not recommended for stealth)."),
          "backend": _str("Stealth backend: patchright (default) | nodriver | auto. "
-                         "nodriver needs `pip install patchium[nodriver]`."),
+                         "nodriver needs `pip install vibatchium[nodriver]`."),
          "stealth_mouse": _bool("Layer CDP-Patches humanized mouse.", False),
      }},
      "start", None),
@@ -74,7 +74,7 @@ TOOLS: list[tuple[str, str, dict, str, Any]] = [
       "required": ["url"]},
      "verify_url", None),
     ("set_log_verbs",
-     "Toggle the daemon's per-verb DEBUG audit log at runtime. Useful for non-trivial runs where you want a full call trail; tail $XDG_RUNTIME_DIR/patchium/daemon.log to see it.",
+     "Toggle the daemon's per-verb DEBUG audit log at runtime. Useful for non-trivial runs where you want a full call trail; tail $XDG_RUNTIME_DIR/vibatchium/daemon.log to see it.",
      {"type": "object",
       "properties": {"on": _bool("True to enable, false to disable.", False)},
       "required": ["on"]},
@@ -523,7 +523,7 @@ TOOLS: list[tuple[str, str, dict, str, Any]] = [
     ("vision_clear_cache", "Drop the on-disk vision coords cache.",
      {"type": "object", "properties": {}}, "vision_clear_cache", None),
     ("vision_budget",
-     "Report today + lifetime vision spend vs PATCHIUM_VISION_MAX_*_USD caps. "
+     "Report today + lifetime vision spend vs VIBATCHIUM_VISION_MAX_*_USD caps. "
      "reset='today'|'lifetime'|'all' clears the spend log.",
      {"type": "object", "properties": {
          "reset": _str("today | lifetime | all"),
@@ -638,7 +638,7 @@ _TOOL_BY_NAME = {t[0]: t for t in TOOLS}
 # areas (cuts prompt-token tax for LLMs that only need a subset). Mirrors
 # microsoft/playwright-mcp's --caps system.
 #
-# Pass via `patchium mcp --caps=core,session,nav,input,agent` to expose ONLY
+# Pass via `vibatchium mcp --caps=core,session,nav,input,agent` to expose ONLY
 # those buckets. Omit --caps (or pass `--caps=all`) for the full 80+ surface.
 #
 # A tool can belong to MULTIPLE caps; it's exposed if any of its caps is selected.
@@ -784,10 +784,10 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.Content]
     # canonical Patchright headed default (visual debugging); MCP-driven
     # agents almost always want headless (background scraping, fan-out,
     # no desktop clutter). Per-call `headless: false` still wins. Set
-    # PATCHIUM_MCP_HEADED_DEFAULT=1 to disable this override.
+    # VIBATCHIUM_MCP_HEADED_DEFAULT=1 to disable this override.
     if cmd == "start" and "headless" not in args:
         import os as _os
-        if _os.environ.get("PATCHIUM_MCP_HEADED_DEFAULT", "0").lower() \
+        if _os.environ.get("VIBATCHIUM_MCP_HEADED_DEFAULT", "0").lower() \
                 not in ("1", "true", "yes"):
             args["headless"] = True
 
@@ -814,7 +814,7 @@ async def main() -> None:
             read,
             write,
             InitializationOptions(
-                server_name="patchium",
+                server_name="vibatchium",
                 server_version=__version__,
                 capabilities=server.get_capabilities(
                     notification_options=NotificationOptions(),

@@ -1,10 +1,10 @@
 """Wave 7.7.5 — the "just works" layer.
 
-Real-run feedback: agents using the patchium MCP slip into anti-patterns
+Real-run feedback: agents using the vibatchium MCP slip into anti-patterns
 (no auto-start, headed by default, 4-6 calls for "go look at this URL")
 because the surface gives them primitives, not recipes. This wave adds
 three thin fixes that make the 80% case match vibium-style ergonomics
-without removing patchium's primitive power:
+without removing vibatchium's primitive power:
 
   1. `_go` auto-starts a session if none exists (headless)
   2. New `explore` verb: one call = verify_url → start → go → text →
@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import os
 
-from patchium.client import call, DaemonError
+from vibatchium.client import call, DaemonError
 
 
 # ─── 1. _go auto-starts ─────────────────────────────────────────────────
@@ -58,7 +58,7 @@ def test_go_auto_starts_when_no_session(local_server):
 
 
 def test_go_auto_start_can_be_disabled(monkeypatch, local_server):
-    """PATCHIUM_NO_AUTO_START=1 in the daemon env disables auto-start.
+    """VIBATCHIUM_NO_AUTO_START=1 in the daemon env disables auto-start.
     This is a unit-test on the resolution logic since we can't easily
     set daemon env from the test process."""
     def _should_auto_start(env_val: str) -> bool:
@@ -199,7 +199,7 @@ def test_mcp_injects_headless_default_when_unspecified():
     def _mcp_default_inject(cmd: str, args: dict) -> dict:
         out = dict(args)
         if cmd == "start" and "headless" not in out:
-            if os.environ.get("PATCHIUM_MCP_HEADED_DEFAULT", "0").lower() \
+            if os.environ.get("VIBATCHIUM_MCP_HEADED_DEFAULT", "0").lower() \
                     not in ("1", "true", "yes"):
                 out["headless"] = True
         return out
@@ -213,16 +213,16 @@ def test_mcp_injects_headless_default_when_unspecified():
 
 
 def test_mcp_headed_default_opt_out_env(monkeypatch):
-    """PATCHIUM_MCP_HEADED_DEFAULT=1 reverts to the canonical Patchright
+    """VIBATCHIUM_MCP_HEADED_DEFAULT=1 reverts to the canonical Patchright
     headed default, for operators who want visual debugging via MCP."""
     def _mcp_default_inject(cmd: str, args: dict) -> dict:
         out = dict(args)
         if cmd == "start" and "headless" not in out:
-            if os.environ.get("PATCHIUM_MCP_HEADED_DEFAULT", "0").lower() \
+            if os.environ.get("VIBATCHIUM_MCP_HEADED_DEFAULT", "0").lower() \
                     not in ("1", "true", "yes"):
                 out["headless"] = True
         return out
-    monkeypatch.setenv("PATCHIUM_MCP_HEADED_DEFAULT", "1")
+    monkeypatch.setenv("VIBATCHIUM_MCP_HEADED_DEFAULT", "1")
     # Now MCP doesn't inject — caller gets the daemon's default (headed)
     assert "headless" not in _mcp_default_inject("start", {})
 
@@ -231,13 +231,13 @@ def test_explore_in_mcp_core_bucket():
     """`explore` should be in the `core` capability bucket so any
     cap-gated MCP surface still exposes it (it's the canonical one-call
     workflow for agents)."""
-    from patchium.mcp_server import _CAP_BUCKETS
+    from vibatchium.mcp_server import _CAP_BUCKETS
     assert "explore" in _CAP_BUCKETS["core"]
 
 
 def test_mcp_lists_explore_tool_in_schema():
     """The MCP schema list must include `explore` so agents can discover it."""
-    from patchium.mcp_server import TOOLS
+    from vibatchium.mcp_server import TOOLS
     names = {t[0] for t in TOOLS}
     assert "explore" in names
     explore_tool = next(t for t in TOOLS if t[0] == "explore")

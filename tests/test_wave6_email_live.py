@@ -19,7 +19,7 @@ import time
 
 import pytest
 
-from patchium.secrets import (
+from vibatchium.secrets import (
     parse_email_poll_url, wait_for_email_code,
 )
 from ._imap_server import MiniIMAPServer

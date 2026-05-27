@@ -16,7 +16,7 @@ Flow:
 Caching:
   - Key: sha256(screenshot_bytes)[:16] + sha256(intent)[:16]
   - Value: `{x, y, confidence, ts}`
-  - Stored in `~/.cache/patchium/vision-cache.json` (TTL: 1 week)
+  - Stored in `~/.cache/vibatchium/vision-cache.json` (TTL: 1 week)
   - Repeat visits on identical pages skip the API call entirely.
 
 Rate-limiting:
@@ -43,7 +43,7 @@ import time
 from collections import deque
 from pathlib import Path
 
-log = logging.getLogger("patchium.vision")
+log = logging.getLogger("vibatchium.vision")
 
 
 # Pricing as of 2026-05 (per million tokens), Haiku 4.5
@@ -159,7 +159,7 @@ async def claude_locate(screenshot_png: bytes, description: str,
         import anthropic
     except ImportError as exc:
         raise RuntimeError(
-            "vision requires `pip install patchium[llm]` (anthropic SDK). "
+            "vision requires `pip install vibatchium[llm]` (anthropic SDK). "
             f"(import error: {exc})"
         ) from exc
     api_key = os.environ.get("ANTHROPIC_API_KEY")
@@ -274,26 +274,26 @@ def _env_cap(name: str) -> float | None:
 
 def check_budget(estimate_usd: float = PRE_CALL_COST_ESTIMATE_USD) -> dict:
     """Raise VisionBudgetExceeded if approving this call would breach either
-    PATCHIUM_VISION_MAX_DAILY_USD or PATCHIUM_VISION_MAX_LIFETIME_USD.
+    VIBATCHIUM_VISION_MAX_DAILY_USD or VIBATCHIUM_VISION_MAX_LIFETIME_USD.
 
     Returns the current spend snapshot when the call is allowed.
     """
-    daily_cap = _env_cap("PATCHIUM_VISION_MAX_DAILY_USD")
-    lifetime_cap = _env_cap("PATCHIUM_VISION_MAX_LIFETIME_USD")
+    daily_cap = _env_cap("VIBATCHIUM_VISION_MAX_DAILY_USD")
+    lifetime_cap = _env_cap("VIBATCHIUM_VISION_MAX_LIFETIME_USD")
     today = get_today_spend()
     lifetime = get_lifetime_spend()
     if daily_cap is not None and today + estimate_usd > daily_cap:
         raise VisionBudgetExceeded(
             f"daily vision budget exceeded: today ${today:.4f} + "
             f"est ${estimate_usd:.4f} > cap ${daily_cap:.2f}. "
-            f"Raise PATCHIUM_VISION_MAX_DAILY_USD or wait until tomorrow."
+            f"Raise VIBATCHIUM_VISION_MAX_DAILY_USD or wait until tomorrow."
         )
     if lifetime_cap is not None and lifetime + estimate_usd > lifetime_cap:
         raise VisionBudgetExceeded(
             f"lifetime vision budget exceeded: lifetime ${lifetime:.4f} + "
             f"est ${estimate_usd:.4f} > cap ${lifetime_cap:.2f}. "
-            f"Raise PATCHIUM_VISION_MAX_LIFETIME_USD or "
-            f"`patchium vision budget --reset-lifetime`."
+            f"Raise VIBATCHIUM_VISION_MAX_LIFETIME_USD or "
+            f"`vibatchium vision budget --reset-lifetime`."
         )
     return {
         "today": today, "lifetime": lifetime,

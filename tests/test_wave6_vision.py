@@ -15,7 +15,7 @@ from collections import deque
 
 import pytest
 
-from patchium.vision import (
+from vibatchium.vision import (
     VisionLowConfidence, VisionRateLimited,
     cache_clear, cache_get, cache_put, check_rate_limit,
     estimate_cost_usd, find_element,
@@ -61,7 +61,7 @@ def test_rate_limit_evicts_old_entries():
 
 
 def test_cache_roundtrip(tmp_path, monkeypatch):
-    from patchium import vision as _vision
+    from vibatchium import vision as _vision
     # Redirect cache to tmp
     monkeypatch.setattr(_vision, "_cache_path", lambda: tmp_path / "vc.json")
     img = b"\x89PNG\r\n\x1a\n" + b"\x00" * 100  # fake PNG
@@ -75,7 +75,7 @@ def test_cache_roundtrip(tmp_path, monkeypatch):
 
 
 def test_cache_ttl_expires(tmp_path, monkeypatch):
-    from patchium import vision as _vision
+    from vibatchium import vision as _vision
     monkeypatch.setattr(_vision, "_cache_path", lambda: tmp_path / "vc.json")
     img = b"\x89PNG" + b"\x01" * 50
     cache_put(img, "intent", {"x": 1, "y": 2, "confidence": 0.9, "rationale": ""})
@@ -84,7 +84,7 @@ def test_cache_ttl_expires(tmp_path, monkeypatch):
 
 
 def test_cache_clear(tmp_path, monkeypatch):
-    from patchium import vision as _vision
+    from vibatchium import vision as _vision
     monkeypatch.setattr(_vision, "_cache_path", lambda: tmp_path / "vc.json")
     cache_put(b"a", "x", {"x": 1, "y": 1, "confidence": 0.9, "rationale": ""})
     cache_put(b"b", "y", {"x": 1, "y": 1, "confidence": 0.9, "rationale": ""})
@@ -111,7 +111,7 @@ class _FakePage:
 
 @pytest.mark.asyncio
 async def test_find_element_uses_mocked_claude(tmp_path, monkeypatch):
-    from patchium import vision as _vision
+    from vibatchium import vision as _vision
     monkeypatch.setattr(_vision, "_cache_path", lambda: tmp_path / "vc.json")
 
     calls = []
@@ -132,7 +132,7 @@ async def test_find_element_uses_mocked_claude(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_find_element_cache_hit_skips_call(tmp_path, monkeypatch):
-    from patchium import vision as _vision
+    from vibatchium import vision as _vision
     monkeypatch.setattr(_vision, "_cache_path", lambda: tmp_path / "vc.json")
 
     calls = []
@@ -153,7 +153,7 @@ async def test_find_element_cache_hit_skips_call(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_find_element_low_confidence_raises(tmp_path, monkeypatch):
-    from patchium import vision as _vision
+    from vibatchium import vision as _vision
     monkeypatch.setattr(_vision, "_cache_path", lambda: tmp_path / "vc.json")
     async def fake_locate(png, desc):
         return {"x": 0, "y": 0, "confidence": 0.3, "rationale": "uncertain",
@@ -166,7 +166,7 @@ async def test_find_element_low_confidence_raises(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_find_element_rate_limit_raises(tmp_path, monkeypatch):
-    from patchium import vision as _vision
+    from vibatchium import vision as _vision
     monkeypatch.setattr(_vision, "_cache_path", lambda: tmp_path / "vc.json")
     async def fake_locate(png, desc):
         return {"x": 1, "y": 1, "confidence": 0.9, "rationale": "",
@@ -185,7 +185,7 @@ async def test_find_element_rate_limit_raises(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_find_element_dpr_scaling(tmp_path, monkeypatch):
-    from patchium import vision as _vision
+    from vibatchium import vision as _vision
     monkeypatch.setattr(_vision, "_cache_path", lambda: tmp_path / "vc.json")
     async def fake_locate(png, desc):
         return {"x": 200, "y": 100, "confidence": 0.95, "rationale": "",
@@ -202,16 +202,16 @@ async def test_find_element_dpr_scaling(tmp_path, monkeypatch):
 @pytest.fixture
 def _isolate_spend(tmp_path, monkeypatch):
     """Redirect both the vision cache AND the spend log to tmp + clear env caps."""
-    from patchium import vision as _vision
+    from vibatchium import vision as _vision
     monkeypatch.setattr(_vision, "_cache_path", lambda: tmp_path / "vc.json")
     monkeypatch.setattr(_vision, "_spend_path", lambda: tmp_path / "vs.json")
-    monkeypatch.delenv("PATCHIUM_VISION_MAX_DAILY_USD", raising=False)
-    monkeypatch.delenv("PATCHIUM_VISION_MAX_LIFETIME_USD", raising=False)
+    monkeypatch.delenv("VIBATCHIUM_VISION_MAX_DAILY_USD", raising=False)
+    monkeypatch.delenv("VIBATCHIUM_VISION_MAX_LIFETIME_USD", raising=False)
     return tmp_path
 
 
 def test_spend_persists_across_loads(_isolate_spend):
-    from patchium.vision import add_spend, get_today_spend, get_lifetime_spend
+    from vibatchium.vision import add_spend, get_today_spend, get_lifetime_spend
     assert get_today_spend() == 0.0
     add_spend(0.001)
     add_spend(0.002)
@@ -220,7 +220,7 @@ def test_spend_persists_across_loads(_isolate_spend):
 
 
 def test_no_caps_no_gate(_isolate_spend):
-    from patchium.vision import check_budget
+    from vibatchium.vision import check_budget
     # Without env vars set, check_budget never raises
     snap = check_budget()
     assert snap["daily_cap"] is None
@@ -228,8 +228,8 @@ def test_no_caps_no_gate(_isolate_spend):
 
 
 def test_daily_cap_blocks_when_exceeded(_isolate_spend, monkeypatch):
-    from patchium.vision import add_spend, check_budget, VisionBudgetExceeded
-    monkeypatch.setenv("PATCHIUM_VISION_MAX_DAILY_USD", "0.01")
+    from vibatchium.vision import add_spend, check_budget, VisionBudgetExceeded
+    monkeypatch.setenv("VIBATCHIUM_VISION_MAX_DAILY_USD", "0.01")
     # Push spend up close to cap
     add_spend(0.009)
     # Estimate 0.005 → 0.009 + 0.005 > 0.01 → raise
@@ -241,15 +241,15 @@ def test_daily_cap_blocks_when_exceeded(_isolate_spend, monkeypatch):
 
 
 def test_lifetime_cap_blocks_when_exceeded(_isolate_spend, monkeypatch):
-    from patchium.vision import add_spend, check_budget, VisionBudgetExceeded
-    monkeypatch.setenv("PATCHIUM_VISION_MAX_LIFETIME_USD", "0.10")
+    from vibatchium.vision import add_spend, check_budget, VisionBudgetExceeded
+    monkeypatch.setenv("VIBATCHIUM_VISION_MAX_LIFETIME_USD", "0.10")
     add_spend(0.099)
     with pytest.raises(VisionBudgetExceeded, match="lifetime"):
         check_budget(estimate_usd=0.005)
 
 
 def test_reset_spend_scopes(_isolate_spend):
-    from patchium.vision import add_spend, reset_spend, get_today_spend, get_lifetime_spend
+    from vibatchium.vision import add_spend, reset_spend, get_today_spend, get_lifetime_spend
     add_spend(0.05)
     # reset today only
     reset_spend(scope="today")
@@ -269,8 +269,8 @@ def test_reset_spend_scopes(_isolate_spend):
 async def test_find_element_enforces_budget(_isolate_spend, monkeypatch):
     """When the daily cap is set and exceeded, find_element refuses the call
     AND never invokes the Claude mock."""
-    from patchium.vision import add_spend, find_element, VisionBudgetExceeded
-    monkeypatch.setenv("PATCHIUM_VISION_MAX_DAILY_USD", "0.01")
+    from vibatchium.vision import add_spend, find_element, VisionBudgetExceeded
+    monkeypatch.setenv("VIBATCHIUM_VISION_MAX_DAILY_USD", "0.01")
     add_spend(0.009)
     calls = []
     async def fake_locate(png, desc):
@@ -286,7 +286,7 @@ async def test_find_element_enforces_budget(_isolate_spend, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_find_element_increments_spend_on_success(_isolate_spend):
-    from patchium.vision import find_element, get_today_spend
+    from vibatchium.vision import find_element, get_today_spend
     before = get_today_spend()
     async def fake_locate(png, desc):
         return {"x": 1, "y": 1, "confidence": 0.95, "rationale": "",
@@ -305,7 +305,7 @@ def test_vision_budget_handler_reports_caps():
     already-spawned daemon. We just verify the handler runs and returns
     the expected response shape.
     """
-    from patchium.client import call as _call
+    from vibatchium.client import call as _call
     res = _call("vision_budget")
     assert "today_usd" in res
     assert "lifetime_usd" in res

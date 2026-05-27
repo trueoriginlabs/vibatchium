@@ -1,4 +1,4 @@
-"""Pytest fixtures for patchium tests.
+"""Pytest fixtures for vibatchium tests.
 
 We start a fresh daemon per session, serve local HTML fixtures via http.server
 on a random port, and reset to a known page between tests so each test starts
@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from patchium.client import call, daemon_is_running, spawn_daemon
+from vibatchium.client import call, daemon_is_running, spawn_daemon
 
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
@@ -24,14 +24,14 @@ FIXTURES_DIR = Path(__file__).parent / "fixtures"
 @pytest.fixture(scope="session", autouse=True)
 def _daemon_lifecycle():
     """Spawn a fresh daemon for the whole test session; kill it at the end."""
-    # Wave 6.1b: force PATCHIUM_WARM=off in tests so pre-warm doesn't spawn
+    # Wave 6.1b: force VIBATCHIUM_WARM=off in tests so pre-warm doesn't spawn
     # extra Chromes and confuse process-counting assertions. Tests that need
     # warm behavior set the env explicitly inside the test.
-    os.environ["PATCHIUM_WARM"] = "off"
+    os.environ["VIBATCHIUM_WARM"] = "off"
     # Wave 6.3a: provide a deterministic test vault key so daemon-level vault
     # tests can encrypt/decrypt. Real users use keyring or their own env value.
     import base64 as _b64
-    os.environ["PATCHIUM_SECRETS_KEY"] = _b64.b64encode(b"\x02" * 32).decode()
+    os.environ["VIBATCHIUM_SECRETS_KEY"] = _b64.b64encode(b"\x02" * 32).decode()
     # ensure no prior daemon is around
     if daemon_is_running():
         try:
@@ -40,7 +40,7 @@ def _daemon_lifecycle():
             pass
         time.sleep(2)
     spawn_daemon(wait=10)
-    call("start", {"profile": "/tmp/patchium-test-profile", "headless": True})
+    call("start", {"profile": "/tmp/vibatchium-test-profile", "headless": True})
     yield
     try:
         call("stop")

@@ -23,101 +23,101 @@ import stat
 import subprocess
 from pathlib import Path
 
-from patchium.cli import _find_verb_index, _rewrite_mcp_aliases
+from vibatchium.cli import _find_verb_index, _rewrite_mcp_aliases
 
 
-def _patchium_bin() -> str:
-    return str(Path(__file__).parent.parent / ".venv" / "bin" / "patchium")
+def _vibatchium_bin() -> str:
+    return str(Path(__file__).parent.parent / ".venv" / "bin" / "vibatchium")
 
 
 # ─── C2: argv rewrite handles --session NAME verb_form ────────────────
 
 
 def test_find_verb_index_skips_session_flag():
-    assert _find_verb_index(["patchium", "--session", "work", "session_close"]) == 3
+    assert _find_verb_index(["vibatchium", "--session", "work", "session_close"]) == 3
 
 
 def test_find_verb_index_skips_json_flag():
-    assert _find_verb_index(["patchium", "--json", "status"]) == 2
+    assert _find_verb_index(["vibatchium", "--json", "status"]) == 2
 
 
 def test_find_verb_index_skips_combined_global_flags():
-    assert _find_verb_index(["patchium", "--json", "--session", "work", "go"]) == 4
+    assert _find_verb_index(["vibatchium", "--json", "--session", "work", "go"]) == 4
 
 
 def test_find_verb_index_no_verb_returns_minus_one():
-    assert _find_verb_index(["patchium"]) == -1
-    assert _find_verb_index(["patchium", "--help"]) == -1
-    assert _find_verb_index(["patchium", "--json"]) == -1
+    assert _find_verb_index(["vibatchium"]) == -1
+    assert _find_verb_index(["vibatchium", "--help"]) == -1
+    assert _find_verb_index(["vibatchium", "--json"]) == -1
 
 
 def test_argv_rewrite_handles_session_prefix():
     """Repro for the original bug: --session NAME session_close BROKE."""
-    out = _rewrite_mcp_aliases(["patchium", "--session", "work", "session_close"])
-    assert out == ["patchium", "--session", "work", "session", "close"]
+    out = _rewrite_mcp_aliases(["vibatchium", "--session", "work", "session_close"])
+    assert out == ["vibatchium", "--session", "work", "session", "close"]
 
 
 def test_argv_rewrite_handles_session_prefix_with_underscored_top_level():
-    out = _rewrite_mcp_aliases(["patchium", "--session", "work", "verify_url", "https://x"])
-    assert out == ["patchium", "--session", "work", "verify-url", "https://x"]
+    out = _rewrite_mcp_aliases(["vibatchium", "--session", "work", "verify_url", "https://x"])
+    assert out == ["vibatchium", "--session", "work", "verify-url", "https://x"]
 
 
 # ─── H3: top-level aliases (tabs/snapshot/goto/etc.) ──────────────────
 
 
 def test_alias_tabs_to_pages():
-    assert _rewrite_mcp_aliases(["patchium", "tabs"]) == ["patchium", "pages"]
+    assert _rewrite_mcp_aliases(["vibatchium", "tabs"]) == ["vibatchium", "pages"]
 
 
 def test_alias_snapshot_to_map():
-    assert _rewrite_mcp_aliases(["patchium", "snapshot"]) == ["patchium", "map"]
+    assert _rewrite_mcp_aliases(["vibatchium", "snapshot"]) == ["vibatchium", "map"]
 
 
 def test_alias_goto_to_go():
-    assert _rewrite_mcp_aliases(["patchium", "goto", "https://x"]) == \
-        ["patchium", "go", "https://x"]
+    assert _rewrite_mcp_aliases(["vibatchium", "goto", "https://x"]) == \
+        ["vibatchium", "go", "https://x"]
 
 
 def test_alias_navigate_open_visit_to_go():
     for verb in ("navigate", "open", "visit"):
-        assert _rewrite_mcp_aliases(["patchium", verb, "https://x"]) == \
-            ["patchium", "go", "https://x"]
+        assert _rewrite_mcp_aliases(["vibatchium", verb, "https://x"]) == \
+            ["vibatchium", "go", "https://x"]
 
 
 def test_alias_dom_to_html():
-    assert _rewrite_mcp_aliases(["patchium", "dom"]) == ["patchium", "html"]
+    assert _rewrite_mcp_aliases(["vibatchium", "dom"]) == ["vibatchium", "html"]
 
 
 def test_alias_get_text_to_text():
-    assert _rewrite_mcp_aliases(["patchium", "get-text"]) == ["patchium", "text"]
-    assert _rewrite_mcp_aliases(["patchium", "get_text"]) == ["patchium", "text"]
+    assert _rewrite_mcp_aliases(["vibatchium", "get-text"]) == ["vibatchium", "text"]
+    assert _rewrite_mcp_aliases(["vibatchium", "get_text"]) == ["vibatchium", "text"]
 
 
 def test_alias_is_state_to_is():
-    assert _rewrite_mcp_aliases(["patchium", "is_state"]) == ["patchium", "is"]
+    assert _rewrite_mcp_aliases(["vibatchium", "is_state"]) == ["vibatchium", "is"]
 
 
 def test_alias_tab_to_page_group_subcommand_passthrough():
     """`tab new myname` → `page new myname` (group + subcommand preserved)."""
-    assert _rewrite_mcp_aliases(["patchium", "tab", "new", "myname"]) == \
-        ["patchium", "page", "new", "myname"]
+    assert _rewrite_mcp_aliases(["vibatchium", "tab", "new", "myname"]) == \
+        ["vibatchium", "page", "new", "myname"]
 
 
 def test_alias_works_after_session_flag():
-    out = _rewrite_mcp_aliases(["patchium", "--session", "work", "tabs"])
-    assert out == ["patchium", "--session", "work", "pages"]
+    out = _rewrite_mcp_aliases(["vibatchium", "--session", "work", "tabs"])
+    assert out == ["vibatchium", "--session", "work", "pages"]
 
 
 # ─── H6: set-log-verbs CLI command exists ─────────────────────────────
 
 
 def test_set_log_verbs_cli_command_exists():
-    from patchium.cli import cli
+    from vibatchium.cli import cli
     assert "set-log-verbs" in cli.commands
 
 
 def test_set_log_verbs_underscored_alias_works_via_help():
-    r = subprocess.run([_patchium_bin(), "set_log_verbs", "--help"],
+    r = subprocess.run([_vibatchium_bin(), "set_log_verbs", "--help"],
                       capture_output=True, text=True, timeout=10)
     assert r.returncode == 0
     assert "set-log-verbs" in r.stdout
@@ -128,7 +128,7 @@ def test_set_log_verbs_underscored_alias_works_via_help():
 
 
 def test_attr_in_mcp_tools():
-    from patchium.mcp_server import TOOLS
+    from vibatchium.mcp_server import TOOLS
     names = {t[0] for t in TOOLS}
     assert "attr" in names
     attr_tool = next(t for t in TOOLS if t[0] == "attr")
@@ -139,7 +139,7 @@ def test_attr_in_mcp_tools():
 
 
 def test_value_in_mcp_tools():
-    from patchium.mcp_server import TOOLS
+    from vibatchium.mcp_server import TOOLS
     names = {t[0] for t in TOOLS}
     assert "value" in names
     value_tool = next(t for t in TOOLS if t[0] == "value")
@@ -149,7 +149,7 @@ def test_value_in_mcp_tools():
 def test_text_html_now_use_target_param():
     """text/html schemas should advertise `target` (not `selector`) to match
     click/fill/hover naming. Both names accepted at runtime."""
-    from patchium.mcp_server import TOOLS
+    from vibatchium.mcp_server import TOOLS
     for verb in ("text", "html"):
         tool = next(t for t in TOOLS if t[0] == verb)
         assert "target" in tool[2]["properties"]
@@ -161,7 +161,7 @@ def test_text_html_now_use_target_param():
 def test_text_accepts_target_param(local_server):
     """The fix: text() should accept `target` kwarg (modern) AND `selector`
     (legacy). Both should route through _resolve_target."""
-    from patchium.client import call
+    from vibatchium.client import call
     call("go", {"url": f"{local_server}/simple.html"})
     # Use `target` (modern)
     r1 = call("text", {"target": "h1"})
@@ -172,7 +172,7 @@ def test_text_accepts_target_param(local_server):
 
 
 def test_attr_routes_through_resolver(local_server):
-    from patchium.client import call
+    from vibatchium.client import call
     call("go", {"url": f"{local_server}/simple.html"})
     # Plain CSS still works
     r = call("attr", {"target": "h1", "name": "id"})
@@ -181,7 +181,7 @@ def test_attr_routes_through_resolver(local_server):
 
 
 def test_attr_requires_target_or_selector():
-    from patchium.client import call, DaemonError
+    from vibatchium.client import call, DaemonError
     import pytest
     with pytest.raises(DaemonError):
         call("attr", {"name": "href"})
@@ -191,20 +191,20 @@ def test_attr_requires_target_or_selector():
 
 
 def test_go_accepts_url_flag(local_server):
-    r = subprocess.run([_patchium_bin(), "go", "--url", f"{local_server}/simple.html"],
+    r = subprocess.run([_vibatchium_bin(), "go", "--url", f"{local_server}/simple.html"],
                       capture_output=True, text=True, timeout=15)
     assert r.returncode == 0, f"stderr: {r.stderr}"
     assert "simple.html" in r.stdout
 
 
 def test_go_positional_still_works(local_server):
-    r = subprocess.run([_patchium_bin(), "go", f"{local_server}/simple.html"],
+    r = subprocess.run([_vibatchium_bin(), "go", f"{local_server}/simple.html"],
                       capture_output=True, text=True, timeout=15)
     assert r.returncode == 0, f"stderr: {r.stderr}"
 
 
 def test_go_with_no_url_errors_clearly():
-    r = subprocess.run([_patchium_bin(), "go"],
+    r = subprocess.run([_vibatchium_bin(), "go"],
                       capture_output=True, text=True, timeout=10)
     assert r.returncode != 0
 
@@ -217,7 +217,7 @@ def test_screenshot_default_lands_in_cache_with_0600(local_server):
     perms leak (umask → 0600). Daemon-side change pins the bytes-then-
     secure_write order."""
     name = "audit_screenshot_perms"
-    from patchium.client import call, DaemonError
+    from vibatchium.client import call, DaemonError
     try:
         call("session_close", {"name": name})
     except DaemonError:
@@ -231,13 +231,13 @@ def test_screenshot_default_lands_in_cache_with_0600(local_server):
         call("start", {"headless": True}, session=name)
         call("go", {"url": f"{local_server}/simple.html"}, session=name)
         # CLI default: no -o
-        r = subprocess.run([_patchium_bin(), "--session", name, "screenshot"],
+        r = subprocess.run([_vibatchium_bin(), "--session", name, "screenshot"],
                           capture_output=True, text=True, timeout=15)
         assert r.returncode == 0, f"stderr: {r.stderr}"
         # Path printed to stdout
         path = r.stdout.strip()
         assert path.endswith(".png")
-        assert "patchium" in path  # under CACHE_DIR/patchium/
+        assert "vibatchium" in path  # under CACHE_DIR/vibatchium/
         # The file exists and has 0600 perms
         p = Path(path)
         assert p.exists()
@@ -259,7 +259,7 @@ def test_explore_default_uses_cache_dir_with_0700(local_server, tmp_path):
     parent dir 0700, PNG 0600."""
     name = "audit_explore_perms"
     env = {**os.environ, "HOME": str(tmp_path)}
-    r = subprocess.run([_patchium_bin(),
+    r = subprocess.run([_vibatchium_bin(),
                        "--session", name,
                        "explore", f"{local_server}/simple.html",
                        "--skip-verify"],
@@ -281,27 +281,27 @@ def test_explore_default_uses_cache_dir_with_0700(local_server, tmp_path):
 
 def test_no_session_error_dispatcher_path():
     """Verb gated at dispatcher (click) — clean no-session message."""
-    r = subprocess.run([_patchium_bin(), "--session", "nonexistent_xyz",
+    r = subprocess.run([_vibatchium_bin(), "--session", "nonexistent_xyz",
                        "click", "@e1"],
                       capture_output=True, text=True, timeout=10)
     assert r.returncode != 0
     assert "no session" in r.stderr
-    assert "run `patchium start" in r.stderr
+    assert "run `vibatchium start" in r.stderr
     assert "RuntimeError:" not in r.stderr  # ← THE fix
 
 
 def test_no_session_error_handler_path():
     """UNLOCKED_VERBS (wait_url) hit handler-level check — message should
     now MATCH the dispatcher path exactly."""
-    r = subprocess.run([_patchium_bin(), "--session", "nonexistent_xyz",
+    r = subprocess.run([_vibatchium_bin(), "--session", "nonexistent_xyz",
                        "wait", "url", "*example*", "--timeout", "500"],
                       capture_output=True, text=True, timeout=10)
     assert r.returncode != 0
     assert "no session" in r.stderr
-    assert "run `patchium start" in r.stderr
+    assert "run `vibatchium start" in r.stderr
     assert "RuntimeError:" not in r.stderr  # ← THE fix
 
 
 def test_session_not_started_exception_class_exists():
-    from patchium.daemon.handlers import SessionNotStarted
+    from vibatchium.daemon.handlers import SessionNotStarted
     assert issubclass(SessionNotStarted, Exception)

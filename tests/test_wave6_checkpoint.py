@@ -14,8 +14,8 @@ import shutil
 
 import pytest
 
-from patchium.client import call, DaemonError
-from patchium.daemon.paths import PROFILES_DIR
+from vibatchium.client import call, DaemonError
+from vibatchium.daemon.paths import PROFILES_DIR
 
 
 def _ensure_clean(name: str) -> None:
@@ -88,8 +88,8 @@ def test_checkpoint_load_restores_cookies(local_server):
 
 def test_checkpoint_cross_session_load(local_server):
     """Save in session A → load into freshly-created session B."""
-    name_a = "patchium_test_w6_ckpt_a"
-    name_b = "patchium_test_w6_ckpt_b"
+    name_a = "vibatchium_test_w6_ckpt_a"
+    name_b = "vibatchium_test_w6_ckpt_b"
     _ensure_clean(name_a)
     _ensure_clean(name_b)
     call("session_new", {"name": name_a})

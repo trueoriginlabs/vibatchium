@@ -7,7 +7,7 @@ the `chrome` object). They do NOT exercise:
   1. Chrome process flags visible via `ps` (e.g. `--no-sandbox` triggers
      a visible yellow infobar AND is a layer-7 detector signal — but is
      invisible to a JS-runtime probe).
-  2. File permissions of patchium-written artifacts (cookies, HAR, network
+  2. File permissions of vibatchium-written artifacts (cookies, HAR, network
      dumps, vision/observe caches, checkpoints). Inheriting umask 0664 from
      the user's profile leaks session state to every other system user.
   3. The full `chrome.runtime` object shape (Patchright sets `window.chrome`
@@ -24,8 +24,8 @@ import subprocess
 
 import pytest
 
-from patchium.client import call, DaemonError
-from patchium.daemon.paths import (
+from vibatchium.client import call, DaemonError
+from vibatchium.daemon.paths import (
     CACHE_DIR, CONFIG_DIR, DEFAULT_PROFILE_DIR, PROFILES_DIR,
 )
 
@@ -55,8 +55,8 @@ def test_no_sandbox_flag_is_not_present(local_server):
     `--no-sandbox`. We `ignore_default_args=['--no-sandbox']` in
     browser.py:launch_session. If that's regressed, the yellow infobar
     comes back and the fingerprint becomes obviously bot-shaped."""
-    # The conftest default session uses /tmp/patchium-test-profile.
-    argv = _chrome_argv_for_profile("patchium-test-profile")
+    # The conftest default session uses /tmp/vibatchium-test-profile.
+    argv = _chrome_argv_for_profile("vibatchium-test-profile")
     if not argv:
         pytest.skip("no running Chrome found for the test profile")
     no_sandbox = [a for a in argv if a == "--no-sandbox"]
@@ -127,9 +127,9 @@ def test_config_and_profile_dirs_are_0700():
 
 def test_active_session_file_is_0600(local_server):
     """The active-session file holds the current session name. Whether
-    that's sensitive is debatable, but inconsistent perms across patchium
+    that's sensitive is debatable, but inconsistent perms across vibatchium
     files are exactly how leaks creep in — enforce 0600."""
-    from patchium.daemon.paths import ACTIVE_SESSION_PATH, ACTIVE_PROFILE_PATH
+    from vibatchium.daemon.paths import ACTIVE_SESSION_PATH, ACTIVE_PROFILE_PATH
     # Trigger a write
     call("session_use", {"name": "default"})
     for p in (ACTIVE_SESSION_PATH, ACTIVE_PROFILE_PATH):
@@ -196,7 +196,7 @@ def test_har_file_is_0600(local_server, tmp_path):
 def test_vision_cache_is_0600(monkeypatch, tmp_path):
     """Vision cache holds (screenshot hash, intent) → coords entries.
     The intent corpus can describe sensitive workflows. 0600."""
-    from patchium import vision
+    from vibatchium import vision
     # Redirect cache to tmp so we don't clobber the user's real cache
     cache_file = tmp_path / "vision-cache.json"
     monkeypatch.setattr(vision, "_cache_path", lambda: cache_file)
@@ -211,7 +211,7 @@ def test_vision_cache_is_0600(monkeypatch, tmp_path):
 def test_observe_cache_is_0600(monkeypatch, tmp_path):
     """Observe cache stores (url, intent) → plan. Same intent-corpus
     concern as vision. 0600."""
-    from patchium.daemon import observe
+    from vibatchium.daemon import observe
     cache_file = tmp_path / "observe-cache.json"
     monkeypatch.setattr(observe, "CACHE_PATH", cache_file)
     observe.cache_put("https://example.com", "log in",
@@ -228,7 +228,7 @@ def test_observe_cache_is_0600(monkeypatch, tmp_path):
 def test_secure_write_atomic_and_0600(tmp_path):
     """The helper itself: never leaves the file world-readable, even if
     the user's umask is 0002 / 0022."""
-    from patchium.daemon.paths import secure_write
+    from vibatchium.daemon.paths import secure_write
     old_umask = os.umask(0o002)
     try:
         target = tmp_path / "nested" / "file.json"  # also creates parent
@@ -248,7 +248,7 @@ def test_secure_write_atomic_and_0600(tmp_path):
 
 def test_secure_mkdir_is_0700(tmp_path):
     """secure_mkdir narrows to 0700 even under umask 0002."""
-    from patchium.daemon.paths import secure_mkdir
+    from vibatchium.daemon.paths import secure_mkdir
     old_umask = os.umask(0o002)
     try:
         d = secure_mkdir(tmp_path / "deep" / "nested")
@@ -265,7 +265,7 @@ def test_daemon_log_is_0600(local_server):
     """The daemon log holds lifecycle events including `secret set
     site=X key=Y` lines — site names are metadata-sensitive. Must be
     0600 not 0664. (Audit miss: logging.basicConfig inherits umask.)"""
-    from patchium.daemon.paths import LOG_PATH
+    from vibatchium.daemon.paths import LOG_PATH
     # conftest has already started the daemon, which runs basicConfig
     # + the chmod-to-0600. The log file should exist at LOG_PATH and
     # be 0600.
@@ -282,7 +282,7 @@ def test_verb_log_redacts_secret_values():
     """The redactor must strip `value` from secret_set, `text` from fill,
     `url` from proxy_set, `expr` from eval. Direct unit test on the
     redaction helper, so the live audit log can be trusted."""
-    from patchium.daemon.server import _redact_for_log
+    from vibatchium.daemon.server import _redact_for_log
     # secret_set: value redacted
     r = _redact_for_log("secret_set", {"site": "github", "key": "totp-seed",
                                          "value": "JBSWY3DPEHPK3PXP"})

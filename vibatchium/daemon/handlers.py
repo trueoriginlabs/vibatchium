@@ -18,7 +18,7 @@ from .paths import (
 )
 from .registry import current_session_ctx
 
-log = logging.getLogger("patchium.handlers")
+log = logging.getLogger("vibatchium.handlers")
 
 
 import re as _re
@@ -61,7 +61,7 @@ def _need_session(daemon):
         except LookupError:
             name = DEFAULT_SESSION_NAME
         suffix = (f" --session {name}" if name != DEFAULT_SESSION_NAME else "")
-        raise SessionNotStarted(f"no session {name!r} — run `patchium start{suffix}` first")
+        raise SessionNotStarted(f"no session {name!r} — run `vibatchium start{suffix}` first")
     # Repair a stale session.page if the previously-active page has detached
     # (popup-then-close, navigation-cancelled, target-crashed). Pick the
     # newest live page from the context as the fallback.
@@ -124,7 +124,7 @@ def _resolve_target(daemon, target: str):
         if daemon._snapshot is None:
             raise RuntimeError(
                 f"ref {target!r} cannot be resolved — last `map` was invalidated by "
-                f"a navigation. Run `patchium map` to refresh the snapshot first."
+                f"a navigation. Run `vibatchium map` to refresh the snapshot first."
             )
         return elements.resolve(s.page, daemon._snapshot, target)
     return elements.resolve_target(s.page, daemon._snapshot, target)
@@ -190,7 +190,7 @@ def register_all(daemon) -> None:
             def _head():
                 req = _ureq.Request(url, method="HEAD")
                 req.add_header("User-Agent",
-                               "Mozilla/5.0 (compatible; patchium-verify/1.0)")
+                               "Mozilla/5.0 (compatible; vibatchium-verify/1.0)")
                 with _ureq.urlopen(req, timeout=timeout_s) as r:
                     return r.status
             try:
@@ -229,8 +229,8 @@ def register_all(daemon) -> None:
         log.info("log_verbs toggled to %s", on)
         return {"log_verbs": on,
                 "note": ("per-verb DEBUG log enabled — set "
-                         "PATCHIUM_LOG_LEVEL=DEBUG and tail "
-                         "$XDG_RUNTIME_DIR/patchium/daemon.log "
+                         "VIBATCHIUM_LOG_LEVEL=DEBUG and tail "
+                         "$XDG_RUNTIME_DIR/vibatchium/daemon.log "
                          "to see verb traffic") if on else "off"}
 
     # ─── lifecycle ────────────────────────────────────────────────────────
@@ -256,7 +256,7 @@ def register_all(daemon) -> None:
                 profile_dir = p
             else:
                 # bare name → also makes that the session name (so the user can do
-                # `patchium start --profile work` and address it later as `--session work`)
+                # `vibatchium start --profile work` and address it later as `--session work`)
                 if name == DEFAULT_SESSION_NAME:
                     name = raw
                 profile_dir = PROFILES_DIR / raw
@@ -268,7 +268,7 @@ def register_all(daemon) -> None:
             return {"already_started": True, "mode": entry.session.mode,
                     "session": name, "profile": str(entry.profile_dir)}
 
-        # Wave 7.7.4: PATCHIUM_DEFAULT_HEADLESS env flips the start default
+        # Wave 7.7.4: VIBATCHIUM_DEFAULT_HEADLESS env flips the start default
         # from headed → headless. Use case: fan-out background scraping
         # workflows (research / parallel sessions) where headed Chrome
         # windows pollute the operator's desktop. Set once at daemon init,
@@ -277,7 +277,7 @@ def register_all(daemon) -> None:
         if "headless" in args:
             headless = bool(args["headless"])
         else:
-            env_default = os.environ.get("PATCHIUM_DEFAULT_HEADLESS", "0").lower()
+            env_default = os.environ.get("VIBATCHIUM_DEFAULT_HEADLESS", "0").lower()
             headless = env_default in ("1", "true", "yes", "on")
         stealth_mouse = bool(args.get("stealth_mouse"))
         backend = args.get("backend") or "patchright"
@@ -320,7 +320,7 @@ def register_all(daemon) -> None:
         Idempotent: re-creating an existing session is a no-op that reports
         `created=false, exists=true`.
 
-        Wave 6.1b: if PATCHIUM_WARM ∈ {opportunistic, both} (default both),
+        Wave 6.1b: if VIBATCHIUM_WARM ∈ {opportunistic, both} (default both),
         also schedules a background Chrome pre-spawn at this profile dir so
         a subsequent `start` call finds it warm. Pass `prewarm=false` to opt
         out per-call.
@@ -331,7 +331,7 @@ def register_all(daemon) -> None:
         p.mkdir(parents=True, exist_ok=True)
         prewarm_requested = args.get("prewarm", True)
         if prewarm_requested and not d.registry.has(name):
-            # Wave 7.7.4: respect PATCHIUM_DEFAULT_HEADLESS for prewarm too,
+            # Wave 7.7.4: respect VIBATCHIUM_DEFAULT_HEADLESS for prewarm too,
             # so the pre-spawned Chrome matches what `start` will eventually
             # use. Otherwise a default-headless setup would get a headed
             # prewarm that doesn't claim cleanly.
@@ -339,7 +339,7 @@ def register_all(daemon) -> None:
                 _prewarm_headless = bool(args["headless"])
             else:
                 _prewarm_headless = os.environ.get(
-                    "PATCHIUM_DEFAULT_HEADLESS", "0"
+                    "VIBATCHIUM_DEFAULT_HEADLESS", "0"
                 ).lower() in ("1", "true", "yes", "on")
             d.registry.schedule_prewarm(name, p, headless=_prewarm_headless)
         return {
@@ -362,7 +362,7 @@ def register_all(daemon) -> None:
         name = validate_name(args.get("name"), kind="session name")
         if name not in list_session_names():
             raise ValueError(
-                f"unknown session: {name!r} — create with `patchium session new {name}`"
+                f"unknown session: {name!r} — create with `vibatchium session new {name}`"
             )
         set_active_session_name(name)
         return {"active": name}
@@ -918,15 +918,15 @@ def register_all(daemon) -> None:
 
         Wave 7.7.5 ergonomic: if no session is running for the current
         session-name, auto-spawn one (headless by default for `go`-first
-        callers — the assumption is they're using patchium for content
-        extraction, not visual debugging). Set PATCHIUM_NO_AUTO_START=1
+        callers — the assumption is they're using vibatchium for content
+        extraction, not visual debugging). Set VIBATCHIUM_NO_AUTO_START=1
         to disable and require explicit `start` first.
         """
         from . import backends as _backends
         # Wave 7.7.5: auto-start if no session present
         name = current_session_ctx.get()
         if (d.registry.get(name) is None
-                and os.environ.get("PATCHIUM_NO_AUTO_START", "0").lower()
+                and os.environ.get("VIBATCHIUM_NO_AUTO_START", "0").lower()
                     not in ("1", "true", "yes")):
             log.info("auto-start session=%s (no existing session for `go`)", name)
             await d._handlers["start"](d, {"headless": True})
@@ -964,9 +964,9 @@ def register_all(daemon) -> None:
         if wall:
             out["walled"] = wall
             # Wave 7.7.3 observability: walled-page detection now logs at
-            # INFO level so post-run forensics (`patchium logs --since 1h`)
+            # INFO level so post-run forensics (`vibatchium logs --since 1h`)
             # can find "Reddit blocked at 21:24" without needing
-            # PATCHIUM_LOG_VERBS=1 to have been on. Closes the gap the
+            # VIBATCHIUM_LOG_VERBS=1 to have been on. Closes the gap the
             # second dogfood run surfaced (operator hit Reddit block;
             # detection happened but left no trace in the daemon log).
             name = current_session_ctx.get()
@@ -980,8 +980,8 @@ def register_all(daemon) -> None:
             if current_backend in (None, "patchright"):
                 out["advice"] = (
                     f"page looks {wall}-walled; try "
-                    f"`patchium session close {name} && "
-                    f"patchium --session {name} start --backend nodriver`"
+                    f"`vibatchium session close {name} && "
+                    f"vibatchium --session {name} start --backend nodriver`"
                 )
         return out
 

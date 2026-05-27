@@ -1,12 +1,12 @@
 """Filesystem locations for the daemon socket, pidfile, profiles, and session registry.
 
-Patchium uses a **1:1 profile↔session** model: every named session has a
-matching profile dir under `~/.config/patchium/profiles/<name>/`. The OS-level
+Vibatchium uses a **1:1 profile↔session** model: every named session has a
+matching profile dir under `~/.config/vibatchium/profiles/<name>/`. The OS-level
 lock on Chrome's `user-data-dir` enforces this — two sessions cannot share a
 profile concurrently — so the 1:1 mapping is the path of least surprise.
 
 - "session name" is the active identifier the CLI/MCP uses to address one
-  concurrent browser (e.g. `patchium --session work click @e3`).
+  concurrent browser (e.g. `vibatchium --session work click @e3`).
 - "profile dir" is the on-disk Chrome user-data-dir that holds cookies,
   localStorage, IndexedDB, etc. It persists across `session close` so
   re-opening keeps you logged in.
@@ -60,9 +60,9 @@ def validate_name(name: str | None, *, kind: str = "name") -> str:
 
 _xdg_runtime = os.environ.get("XDG_RUNTIME_DIR")
 if _xdg_runtime and Path(_xdg_runtime).is_dir():
-    CACHE_DIR = Path(_xdg_runtime) / "patchium"
+    CACHE_DIR = Path(_xdg_runtime) / "vibatchium"
 else:
-    CACHE_DIR = Path.home() / ".cache" / "patchium"
+    CACHE_DIR = Path.home() / ".cache" / "vibatchium"
 
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 # Wave 7.5d: enforce 0700 on the cache root so other system users can't
@@ -75,7 +75,7 @@ except OSError:
 
 # Profiles live OUTSIDE the runtime dir so they survive reboots. Sock+pid stay
 # in the runtime dir so a stale socket doesn't persist across reboots.
-CONFIG_DIR = Path.home() / ".config" / "patchium"
+CONFIG_DIR = Path.home() / ".config" / "vibatchium"
 CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 try:
     os.chmod(CONFIG_DIR, 0o700)
@@ -88,7 +88,7 @@ try:
 except OSError:
     pass
 # Wave 7.5e: retroactively narrow any pre-existing profile sub-dirs (created
-# by older patchium versions under loose umask). These hold cookies +
+# by older vibatchium versions under loose umask). These hold cookies +
 # localStorage — same risk as their parent. Only touch the dir mode, not
 # Chrome's inner files (those are 0700 because Chrome chmods them itself).
 for _pdir in PROFILES_DIR.iterdir() if PROFILES_DIR.exists() else ():
@@ -98,7 +98,7 @@ for _pdir in PROFILES_DIR.iterdir() if PROFILES_DIR.exists() else ():
         except OSError:
             pass
 # Also retroactively narrow the legacy `chrome-profile` dir that older
-# patchium versions created directly under CACHE_DIR (pre-multi-session
+# vibatchium versions created directly under CACHE_DIR (pre-multi-session
 # layout). New code uses PROFILES_DIR/<name> instead.
 _legacy_chrome_profile = CACHE_DIR / "chrome-profile"
 if _legacy_chrome_profile.is_dir():
@@ -133,9 +133,9 @@ DEFAULT_SESSION_NAME = "default"
 def secure_write(path: Path, content: str | bytes) -> None:
     """Write a file with 0600 perms regardless of umask.
 
-    Use this for every file patchium produces that could carry sensitive
+    Use this for every file vibatchium produces that could carry sensitive
     data (cookies, auth headers, request bodies, cached intents, secrets).
-    Caller-controlled output paths (`patchium screenshot -o foo.png`) are
+    Caller-controlled output paths (`vibatchium screenshot -o foo.png`) are
     explicitly NOT routed through this — the user picked the path and
     may want to share the artifact; for those, document the perms model
     instead of forcing it.
@@ -166,7 +166,7 @@ def secure_write(path: Path, content: str | bytes) -> None:
 
 
 def secure_mkdir(path: Path) -> Path:
-    """mkdir -p with 0700 perms — for any dir patchium creates that may
+    """mkdir -p with 0700 perms — for any dir vibatchium creates that may
     hold sensitive children (checkpoints, network dumps, vision cache)."""
     path = Path(path)
     path.mkdir(parents=True, exist_ok=True)

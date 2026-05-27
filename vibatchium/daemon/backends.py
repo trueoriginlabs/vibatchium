@@ -6,9 +6,9 @@ Two backends ship today:
   + `channel='chrome'` + headed + no-viewport. The 2026 Cloudflare benchmark
   (Paterson) puts it at 25 OK / 3 gated / 3 blocked across 31 targets.
 
-- **nodriver** (optional, opt-in via `pip install patchium[nodriver]`): uses
+- **nodriver** (optional, opt-in via `pip install vibatchium[nodriver]`): uses
   the `nodriver` library to spawn Chrome with its hardened launch flags
-  (no chromedriver injection, expert-mode CDP), then patchium connects via
+  (no chromedriver injection, expert-mode CDP), then vibatchium connects via
   Patchright `connect_over_cdp` for the action layer. Same 2026 benchmark:
   28 OK / 3 gated / 0 blocked — the only tool with zero hard blocks. Useful
   when Patchright hits Cloudflare Turnstile interactive challenges.
@@ -30,7 +30,7 @@ from patchright.async_api import Playwright
 
 from .browser import BrowserSession, attach_session, launch_session
 
-log = logging.getLogger("patchium.backends")
+log = logging.getLogger("vibatchium.backends")
 
 
 VALID_BACKENDS = {"patchright", "nodriver", "auto"}
@@ -99,13 +99,13 @@ async def launch_nodriver_session(
     Patchright's CDP-message patches still apply over CDP (per the project
     README — they're at the client protocol layer, not the launch layer).
 
-    Requires `pip install patchium[nodriver]` (which pulls the `nodriver` lib).
+    Requires `pip install vibatchium[nodriver]` (which pulls the `nodriver` lib).
     """
     try:
         import nodriver as uc  # noqa: F401
     except ImportError as exc:
         raise RuntimeError(
-            "nodriver backend requires `pip install patchium[nodriver]`. "
+            "nodriver backend requires `pip install vibatchium[nodriver]`. "
             f"(import error: {exc})"
         ) from exc
 

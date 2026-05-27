@@ -1,5 +1,5 @@
 """Lifecycle + navigation tests."""
-from patchium.client import call
+from vibatchium.client import call
 
 
 def test_status_running():
@@ -10,7 +10,7 @@ def test_status_running():
 def test_go_and_back(local_server):
     call("go", {"url": f"{local_server}/simple.html"})
     assert call("url")["url"].endswith("/simple.html")
-    assert "Patchium Test Page" in call("title")["title"]
+    assert "Vibatchium Test Page" in call("title")["title"]
     call("go", {"url": f"{local_server}/second.html"})
     assert call("url")["url"].endswith("/second.html")
     call("back")
@@ -22,7 +22,7 @@ def test_go_and_back(local_server):
 def test_text_extracts_body(local_server):
     call("go", {"url": f"{local_server}/simple.html"})
     body = call("text")["text"]
-    assert "Hello, Patchium" in body
+    assert "Hello, Vibatchium" in body
     assert "This is a fixture page" in body
 
 
@@ -31,4 +31,4 @@ def test_eval_isolated_context(local_server):
     res = call("eval", {"expr": "2 + 2"})
     assert res["value"] == 4
     res = call("eval", {"expr": "document.title"})
-    assert res["value"] == "Patchium Test Page"
+    assert res["value"] == "Vibatchium Test Page"

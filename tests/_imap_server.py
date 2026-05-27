@@ -1,4 +1,4 @@
-"""Minimal in-process IMAP4 server for testing patchium's email-code polling.
+"""Minimal in-process IMAP4 server for testing vibatchium's email-code polling.
 
 Implements just enough RFC 3501 to exercise `wait_for_email_code` against
 the REAL `imaplib.IMAP4` client (the mock test exercises our parsing only;

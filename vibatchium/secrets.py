@@ -5,11 +5,11 @@ Unlocks every auth-gated flow that breaks at 2FA today.
 
 ### Storage
 
-A single encrypted blob at `~/.config/patchium/secrets.enc`:
+A single encrypted blob at `~/.config/vibatchium/secrets.enc`:
   - file mode: 0600
   - format: `[24-byte nonce][ciphertext]` (PyNaCl SecretBox = XSalsa20-Poly1305)
   - key: 32 bytes, sourced from one of (priority order):
-      1. `PATCHIUM_SECRETS_KEY` env var (base64) — CI / headless servers
+      1. `VIBATCHIUM_SECRETS_KEY` env var (base64) — CI / headless servers
       2. OS keyring (gnome-keyring / macOS Keychain / Windows Cred Mgr)
 
 ### Schema
@@ -53,13 +53,13 @@ import struct
 import time
 from pathlib import Path
 
-log = logging.getLogger("patchium.secrets")
+log = logging.getLogger("vibatchium.secrets")
 
 
-VAULT_PATH = Path.home() / ".config" / "patchium" / "secrets.enc"
-KEY_SERVICE = "patchium"
+VAULT_PATH = Path.home() / ".config" / "vibatchium" / "secrets.enc"
+KEY_SERVICE = "vibatchium"
 KEY_ACCOUNT = "secrets-key"
-ENV_KEY = "PATCHIUM_SECRETS_KEY"
+ENV_KEY = "VIBATCHIUM_SECRETS_KEY"
 
 # Vault key is 32 bytes (SecretBox key size). Stored as base64 in env/keyring.
 KEY_BYTES = 32
@@ -69,8 +69,8 @@ KEY_BYTES = 32
 
 
 class VaultLocked(RuntimeError):
-    """Vault key not available — caller must set PATCHIUM_SECRETS_KEY,
-    initialize keyring (`patchium secret init`), or set the key explicitly."""
+    """Vault key not available — caller must set VIBATCHIUM_SECRETS_KEY,
+    initialize keyring (`vibatchium secret init`), or set the key explicitly."""
 
 
 def _key_from_env() -> bytes | None:
@@ -109,8 +109,8 @@ def get_vault_key() -> bytes:
     key = _key_from_env() or _key_from_keyring()
     if key is None:
         raise VaultLocked(
-            "vault key not available. Either set PATCHIUM_SECRETS_KEY "
-            "(base64-32-bytes) or run `patchium secret init` to provision "
+            "vault key not available. Either set VIBATCHIUM_SECRETS_KEY "
+            "(base64-32-bytes) or run `vibatchium secret init` to provision "
             "the OS keyring."
         )
     return key

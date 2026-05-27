@@ -1,7 +1,7 @@
 """Tests for Wave 4: HAR export, eval_handle, stealth-mouse fallback."""
 import json
 
-from patchium.client import call
+from vibatchium.client import call
 
 
 def test_har_capture_writes_valid_har(local_server, tmp_path):
@@ -16,7 +16,7 @@ def test_har_capture_writes_valid_har(local_server, tmp_path):
     assert har_path.exists()
     doc = json.loads(har_path.read_text())
     assert doc["log"]["version"] == "1.2"
-    assert doc["log"]["creator"]["name"] == "patchium"
+    assert doc["log"]["creator"]["name"] == "vibatchium"
     # at least one entry should be the simple.html request
     urls = [e["request"]["url"] for e in doc["log"]["entries"]]
     assert any("simple.html" in u for u in urls), f"no simple.html in HAR: {urls}"
@@ -76,7 +76,7 @@ def test_handle_invalidates_on_navigation(local_server):
 def test_handle_eval_unknown_id_errors(local_server):
     """Using an unknown handle id gives a clear error."""
     import pytest
-    from patchium.client import DaemonError
+    from vibatchium.client import DaemonError
     with pytest.raises(DaemonError, match="unknown handle"):
         call("handle_eval", {"handle": "h_nonexistent", "expr": "(x) => x"})
 
@@ -86,7 +86,7 @@ def test_stealth_mouse_falls_back_cleanly():
     not crash. (Session fixture starts WITHOUT --stealth-mouse, so this is
     covered by direct CLI smoke in the README — here we just import-check.)
     """
-    from patchium.stealth import humanize_mouse_available
+    from vibatchium.stealth import humanize_mouse_available
     ok, info = humanize_mouse_available()
     # We don't assert ok=False because the test machine might have cdp_patches;
     # we just assert the function returns a (bool, str) tuple cleanly.

@@ -4,14 +4,14 @@ Both gaps surfaced by the second dogfood run:
   - Reddit block was invisible in the daemon log (walled detection
     happens in _go but doesn't INFO-log) → fix: log.info on detection
   - 6 sequential same-name sessions cold-launched 5 of 6 times because
-    warm pool doesn't refill after close → fix: PATCHIUM_WARM_RECYCLE=1
+    warm pool doesn't refill after close → fix: VIBATCHIUM_WARM_RECYCLE=1
 """
 from __future__ import annotations
 
 import os
 import time
 
-from patchium.client import call, DaemonError
+from vibatchium.client import call, DaemonError
 
 
 # ─── walled-page detection now logs ─────────────────────────────────────
@@ -19,15 +19,15 @@ from patchium.client import call, DaemonError
 
 def test_walled_page_detection_writes_info_log(local_server):
     """When `is_walled()` matches, the daemon must emit an INFO line
-    so `patchium logs --since 1m` can surface 'X blocked at T'."""
-    from patchium.daemon.paths import LOG_PATH
+    so `vibatchium logs --since 1m` can surface 'X blocked at T'."""
+    from vibatchium.daemon.paths import LOG_PATH
     if not LOG_PATH.exists():
         import pytest
         pytest.skip("daemon log not present yet")
     # Fixture with a title the detector recognises (must match a substring
     # in CLOUDFLARE_TITLES — "just a moment" / "checking your browser").
     import pathlib
-    fixtures_dir = pathlib.Path("/home/mono/projects/patchium/tests/fixtures")
+    fixtures_dir = pathlib.Path("/home/mono/projects/vibatchium/tests/fixtures")
     walled_html = fixtures_dir / "_walled_probe.html"
     walled_html.write_text(
         "<!DOCTYPE html>"
@@ -64,33 +64,33 @@ def test_walled_page_detection_writes_info_log(local_server):
 
 
 def test_warm_recycle_disabled_by_default():
-    """Without PATCHIUM_WARM_RECYCLE, close-then-new should NOT have a
+    """Without VIBATCHIUM_WARM_RECYCLE, close-then-new should NOT have a
     pre-warmed Chrome waiting."""
-    from patchium.daemon.paths import LOG_PATH
+    from vibatchium.daemon.paths import LOG_PATH
     if not LOG_PATH.exists():
         import pytest
         pytest.skip("daemon log not present yet")
-    # The conftest sets PATCHIUM_WARM=off, so recycle wouldn't fire even
+    # The conftest sets VIBATCHIUM_WARM=off, so recycle wouldn't fire even
     # if enabled. This is more a documentation test — confirm the flag
     # default is OFF / absent in env.
-    assert os.environ.get("PATCHIUM_WARM_RECYCLE", "0") in ("0", "", None)
+    assert os.environ.get("VIBATCHIUM_WARM_RECYCLE", "0") in ("0", "", None)
 
 
 def test_warm_recycle_flag_log_line_when_enabled(monkeypatch, local_server):
-    """With PATCHIUM_WARM_RECYCLE=1 AND warm mode enabled, the close()
+    """With VIBATCHIUM_WARM_RECYCLE=1 AND warm mode enabled, the close()
     should emit a 'warm-recycle scheduled' log line. We can't test the
-    actual pre-spawn here because conftest forces PATCHIUM_WARM=off
+    actual pre-spawn here because conftest forces VIBATCHIUM_WARM=off
     for test determinism — but we can verify the close path RESPECTS
     the flag (doesn't crash, logs the scheduling decision when both
     flags align).
     """
     # Direct unit test on the close path with both flags set in proc env
-    from patchium.daemon import registry as _reg
-    monkeypatch.setenv("PATCHIUM_WARM_RECYCLE", "1")
-    monkeypatch.setenv("PATCHIUM_WARM", "opportunistic")
+    from vibatchium.daemon import registry as _reg
+    monkeypatch.setenv("VIBATCHIUM_WARM_RECYCLE", "1")
+    monkeypatch.setenv("VIBATCHIUM_WARM", "opportunistic")
     # Both required by the gate in close():
     assert _reg.get_warm_mode() in {"opportunistic", "both"}
-    assert os.environ["PATCHIUM_WARM_RECYCLE"] == "1"
+    assert os.environ["VIBATCHIUM_WARM_RECYCLE"] == "1"
     # The actual log emission is verified by inspection during real runs;
     # tested at module-state level here so refactors break this test.
 
@@ -99,7 +99,7 @@ def test_warm_recycle_does_not_fire_without_env(local_server):
     """With WARM_RECYCLE unset, closing a session leaves no scheduled
     re-warm — the next session_new on the same name does NOT find
     a warm Chrome."""
-    from patchium.daemon.paths import LOG_PATH
+    from vibatchium.daemon.paths import LOG_PATH
     if not LOG_PATH.exists():
         import pytest
         pytest.skip("daemon log not present yet")
@@ -128,16 +128,16 @@ def test_warm_recycle_does_not_fire_without_env(local_server):
             pass
 
 
-# ─── patchium logs filters reveal walled detections ─────────────────────
+# ─── vibatchium logs filters reveal walled detections ─────────────────────
 
 
-def test_patchium_logs_can_find_walled_detections(local_server):
-    """End-to-end: trigger a walled page, then use `patchium logs` to
+def test_vibatchium_logs_can_find_walled_detections(local_server):
+    """End-to-end: trigger a walled page, then use `vibatchium logs` to
     find the detection event. This is the operator's debugging flow."""
     import pathlib
     import subprocess
     import sys
-    fixtures_dir = pathlib.Path("/home/mono/projects/patchium/tests/fixtures")
+    fixtures_dir = pathlib.Path("/home/mono/projects/vibatchium/tests/fixtures")
     walled_html = fixtures_dir / "_walled_logs_probe.html"
     # Title must match a substring in DATADOME_TITLES: "blocked - datadome"
     # or "you've been blocked".
@@ -150,7 +150,7 @@ def test_patchium_logs_can_find_walled_detections(local_server):
         call("go", {"url": f"{local_server}/_walled_logs_probe.html"})
         time.sleep(0.3)
         out = subprocess.run(
-            [sys.executable, "-m", "patchium.cli", "logs",
+            [sys.executable, "-m", "vibatchium.cli", "logs",
              "--since", "1m", "--tail", "50"],
             capture_output=True, text=True, timeout=10,
         )

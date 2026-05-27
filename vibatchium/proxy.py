@@ -11,7 +11,7 @@ Built-in providers:
 
 Per-session model: the proxy is stored at <profile_dir>/proxy.json and applied
 at launch time (Playwright accepts proxy config only at launch, not runtime).
-To switch a session's proxy: `patchium proxy set/clear`, then restart the
+To switch a session's proxy: `vibatchium proxy set/clear`, then restart the
 session (close + start).
 
 WebRTC leak guard: when a proxy is configured, the session's Chrome flags
@@ -33,7 +33,7 @@ from pathlib import Path
 from collections.abc import Callable
 from urllib.parse import parse_qsl, urlparse
 
-log = logging.getLogger("patchium.proxy")
+log = logging.getLogger("vibatchium.proxy")
 
 
 class ProxyParseError(ValueError):

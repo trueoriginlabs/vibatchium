@@ -1,11 +1,11 @@
-# Wave 6.4b — patchium Docker image.
+# Wave 6.4b — vibatchium Docker image.
 #
 # Multi-stage build to keep the runtime image lean. The builder stage installs
 # Patchright + Chrome (~800 MB transient); the runtime stage copies just the
 # wheel + system Chrome + venv.
 #
-# Build:    docker build -t patchium:0.3.0 .
-# Run:      docker run -p 8000:8000 -p 9223:9223 patchium:0.3.0
+# Build:    docker build -t vibatchium:0.5.0 .
+# Run:      docker run -p 8000:8000 -p 9223:9223 vibatchium:0.5.0
 #           # REST shim on 8000; live-view on 9223.
 # Variants: --build-arg EXTRAS=all,nodriver for the optional stealth backend.
 
@@ -22,7 +22,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /build
 COPY pyproject.toml README.md LICENSE ./
-COPY patchium/ ./patchium/
+COPY vibatchium/ ./vibatchium/
 
 RUN python -m venv /opt/venv \
     && /opt/venv/bin/pip install --upgrade pip build \
@@ -54,8 +54,8 @@ ENV PATH=/opt/venv/bin:$PATH
 ENV PYTHONUNBUFFERED=1
 ENV DISPLAY=:99
 # Wave 6.1b: turn warm-pool ON by default in the image so first session start
-# is snappy. Operator can override with -e PATCHIUM_WARM=off.
-ENV PATCHIUM_WARM=both
+# is snappy. Operator can override with -e VIBATCHIUM_WARM=off.
+ENV VIBATCHIUM_WARM=both
 # In a container, headless is the only sane default. Live-view + REST still work.
 # Users who want headed mode can run with `-e DISPLAY=$DISPLAY -v /tmp/.X11-unix`.
 
@@ -70,6 +70,6 @@ EXPOSE 8000 9223
 # tini reaps zombies — Patchright + multi-session forks a lot of Chromes.
 ENTRYPOINT ["/usr/bin/tini", "--"]
 
-# Default: REST shim. Override with `docker run patchium:latest patchium mcp`
-# for stdio MCP, or `... patchium start` for one-shot CLI use.
-CMD ["sh", "-c", "Xvfb :99 -screen 0 1920x1080x24 & exec patchium serve --host 0.0.0.0 --port 8000"]
+# Default: REST shim. Override with `docker run vibatchium:latest vb mcp`
+# for stdio MCP, or `... vb start` for one-shot CLI use.
+CMD ["sh", "-c", "Xvfb :99 -screen 0 1920x1080x24 & exec vb serve --host 0.0.0.0 --port 8000"]

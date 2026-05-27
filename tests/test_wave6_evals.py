@@ -15,7 +15,7 @@ import tempfile
 from pathlib import Path
 
 
-from patchium.evals import (
+from vibatchium.evals import (
     render_markdown, render_json, min_score, update_readme,
 )
 
@@ -112,9 +112,9 @@ def test_update_readme_patches_marked_region():
         readme.write_text(
             "# Title\n\nIntro.\n\n"
             "## Stealth\n\n"
-            "<!-- patchium-evals -->\n"
+            "<!-- vibatchium-evals -->\n"
             "old table\n"
-            "<!-- /patchium-evals -->\n\n"
+            "<!-- /vibatchium-evals -->\n\n"
             "## Other\n"
         )
         changed = update_readme(readme, "| new | table |\n|---|---|\n| a | b |")
@@ -123,15 +123,15 @@ def test_update_readme_patches_marked_region():
         assert "old table" not in content
         assert "new | table" in content
         # Markers still there
-        assert "<!-- patchium-evals -->" in content
-        assert "<!-- /patchium-evals -->" in content
+        assert "<!-- vibatchium-evals -->" in content
+        assert "<!-- /vibatchium-evals -->" in content
 
 
 def test_update_readme_idempotent():
     with tempfile.TemporaryDirectory() as td:
         readme = Path(td) / "README.md"
         readme.write_text(
-            "<!-- patchium-evals -->\nold\n<!-- /patchium-evals -->\n"
+            "<!-- vibatchium-evals -->\nold\n<!-- /vibatchium-evals -->\n"
         )
         update_readme(readme, "fresh content")
         # Second call with same content → no change

@@ -1,6 +1,6 @@
 """Wave 7.7.8 — fixes for friction observed in a real Codex run.
 
-Codex tried "use patchium to make an aave forums account" and burned 3 retries:
+Codex tried "use vibatchium to make an aave forums account" and burned 3 retries:
   1. `verify_url X` → "No such command" (hyphenated alias missing)
   2. `verify-url --url X` → "No such option" (CLI was positional-only)
   3. `explore <url>` → returned 2,800 lines of base64 PNG in stdout
@@ -13,40 +13,40 @@ import json
 import subprocess
 from pathlib import Path
 
-from patchium.cli import _rewrite_mcp_aliases, cli
+from vibatchium.cli import _rewrite_mcp_aliases, cli
 
 
 # ─── Bug 1: argv rewrite handles top-level hyphenated commands ─────────
 
 
 def test_argv_rewrite_verify_url_underscore_to_hyphen():
-    """`patchium verify_url X` should rewrite to `patchium verify-url X`."""
-    out = _rewrite_mcp_aliases(["patchium", "verify_url", "https://example.com"])
-    assert out == ["patchium", "verify-url", "https://example.com"]
+    """`vibatchium verify_url X` should rewrite to `vibatchium verify-url X`."""
+    out = _rewrite_mcp_aliases(["vibatchium", "verify_url", "https://example.com"])
+    assert out == ["vibatchium", "verify-url", "https://example.com"]
 
 
 def test_argv_rewrite_leaves_existing_underscored_commands_alone():
     """Real underscored commands (if any) should pass through untouched."""
     # `setup` exists as-is (no underscore), this just confirms non-rewrite path
-    out = _rewrite_mcp_aliases(["patchium", "setup", "--check"])
-    assert out == ["patchium", "setup", "--check"]
+    out = _rewrite_mcp_aliases(["vibatchium", "setup", "--check"])
+    assert out == ["vibatchium", "setup", "--check"]
 
 
 def test_argv_rewrite_no_op_when_no_hyphenated_equivalent():
     """If neither underscored nor hyphenated form exists, don't invent one."""
     # `not_a_real_command` doesn't exist either way
-    out = _rewrite_mcp_aliases(["patchium", "not_a_real_command", "X"])
-    assert out == ["patchium", "not_a_real_command", "X"]
+    out = _rewrite_mcp_aliases(["vibatchium", "not_a_real_command", "X"])
+    assert out == ["vibatchium", "not_a_real_command", "X"]
 
 
 def test_argv_rewrite_session_prefix_still_works():
     """Regression: existing group-prefix rewrite (session_new → session new) still fires."""
-    out = _rewrite_mcp_aliases(["patchium", "session_new", "foo"])
-    assert out == ["patchium", "session", "new", "foo"]
+    out = _rewrite_mcp_aliases(["vibatchium", "session_new", "foo"])
+    assert out == ["vibatchium", "session", "new", "foo"]
 
 
 def test_argv_rewrite_short_argv_safe():
-    assert _rewrite_mcp_aliases(["patchium"]) == ["patchium"]
+    assert _rewrite_mcp_aliases(["vibatchium"]) == ["vibatchium"]
     assert _rewrite_mcp_aliases([]) == []
 
 
@@ -58,13 +58,13 @@ def test_verify_url_command_registered_with_hyphen():
 # ─── Bug 2: verify-url accepts both positional and --url flag ──────────
 
 
-def _patchium_bin() -> str:
+def _vibatchium_bin() -> str:
     """Path to the venv binary so tests don't depend on PATH state."""
-    return str(Path(__file__).parent.parent / ".venv" / "bin" / "patchium")
+    return str(Path(__file__).parent.parent / ".venv" / "bin" / "vibatchium")
 
 
 def test_verify_url_positional_form_works():
-    r = subprocess.run([_patchium_bin(), "verify-url", "https://example.com"],
+    r = subprocess.run([_vibatchium_bin(), "verify-url", "https://example.com"],
                       capture_output=True, text=True, timeout=10)
     assert r.returncode == 0, f"stderr: {r.stderr}"
     data = json.loads(r.stdout)
@@ -73,7 +73,7 @@ def test_verify_url_positional_form_works():
 
 def test_verify_url_flag_form_works():
     """The form Codex tried first: `verify-url --url X`."""
-    r = subprocess.run([_patchium_bin(), "verify-url", "--url", "https://example.com"],
+    r = subprocess.run([_vibatchium_bin(), "verify-url", "--url", "https://example.com"],
                       capture_output=True, text=True, timeout=10)
     assert r.returncode == 0, f"stderr: {r.stderr}"
     data = json.loads(r.stdout)
@@ -82,7 +82,7 @@ def test_verify_url_flag_form_works():
 
 def test_verify_url_underscore_alias_via_argv_rewrite():
     """The other form Codex tried: `verify_url X` (MCP-style underscore)."""
-    r = subprocess.run([_patchium_bin(), "verify_url", "https://example.com"],
+    r = subprocess.run([_vibatchium_bin(), "verify_url", "https://example.com"],
                       capture_output=True, text=True, timeout=10)
     assert r.returncode == 0, f"stderr: {r.stderr}"
     data = json.loads(r.stdout)
@@ -90,7 +90,7 @@ def test_verify_url_underscore_alias_via_argv_rewrite():
 
 
 def test_verify_url_no_url_at_all_errors_clearly():
-    r = subprocess.run([_patchium_bin(), "verify-url"],
+    r = subprocess.run([_vibatchium_bin(), "verify-url"],
                       capture_output=True, text=True, timeout=10)
     assert r.returncode != 0
     assert "URL required" in r.stderr or "URL required" in r.stdout
@@ -110,7 +110,7 @@ def test_explore_default_writes_screenshot_to_cache(local_server, tmp_path):
     # /run/user/UID and we can't redirect via HOME alone.
     env = {k: v for k, v in _os.environ.items() if k != "XDG_RUNTIME_DIR"}
     env["HOME"] = str(tmp_path)
-    r = subprocess.run([_patchium_bin(),
+    r = subprocess.run([_vibatchium_bin(),
                        "--session", "codex_friction_default_test",
                        "explore", f"{local_server}/simple.html", "--skip-verify"],
                       capture_output=True, text=True, timeout=30, env=env)
@@ -122,17 +122,17 @@ def test_explore_default_writes_screenshot_to_cache(local_server, tmp_path):
     shot = Path(data["screenshot_path"])
     assert shot.exists()
     assert shot.stat().st_size > 0
-    # Path can be either XDG_RUNTIME_DIR/patchium/explores/ (if daemon
-    # was started with XDG set) OR HOME/.cache/patchium/explores/ (if not).
+    # Path can be either XDG_RUNTIME_DIR/vibatchium/explores/ (if daemon
+    # was started with XDG set) OR HOME/.cache/vibatchium/explores/ (if not).
     # Wave 7.7.10 routes through paths.CACHE_DIR which prefers XDG.
-    assert "patchium/explores/" in str(shot)
+    assert "vibatchium/explores/" in str(shot)
 
 
 def test_explore_inline_screenshot_flag_preserves_base64(local_server, tmp_path):
     """--inline-screenshot opts back into the old inline-base64 behavior."""
     import os as _os
     env = {**_os.environ, "HOME": str(tmp_path)}
-    r = subprocess.run([_patchium_bin(),
+    r = subprocess.run([_vibatchium_bin(),
                        "--session", "codex_friction_inline_test",
                        "explore", f"{local_server}/simple.html",
                        "--skip-verify", "--inline-screenshot"],
@@ -147,7 +147,7 @@ def test_explore_inline_screenshot_flag_preserves_base64(local_server, tmp_path)
 def test_explore_output_dir_still_writes_markdown(local_server, tmp_path):
     """Pre-existing -o behavior unchanged: writes landing.png + explore.md."""
     out = tmp_path / "scrape-out"
-    r = subprocess.run([_patchium_bin(),
+    r = subprocess.run([_vibatchium_bin(),
                        "--session", "codex_friction_outputdir_test",
                        "explore", f"{local_server}/simple.html",
                        "--skip-verify", "-o", str(out)],

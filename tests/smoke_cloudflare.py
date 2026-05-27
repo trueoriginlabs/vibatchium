@@ -29,7 +29,7 @@ SUCCESS_MARKERS = (
 
 
 def smoke() -> int:
-    profile_dir = Path(tempfile.gettempdir()) / "patchium-smoke-profile"
+    profile_dir = Path(tempfile.gettempdir()) / "vibatchium-smoke-profile"
     profile_dir.mkdir(exist_ok=True)
     print(f"[+] profile dir: {profile_dir}")
 
@@ -59,21 +59,21 @@ def smoke() -> int:
 
         if cf_hit and not success_hit:
             print("[!] FAIL: Cloudflare wall still showing.")
-            page.screenshot(path="/tmp/patchium-smoke-fail.png")
-            print("[!] screenshot: /tmp/patchium-smoke-fail.png")
+            page.screenshot(path="/tmp/vibatchium-smoke-fail.png")
+            print("[!] screenshot: /tmp/vibatchium-smoke-fail.png")
             ctx.close()
             return 1
 
         if success_hit:
             print("[+] PASS: Cloudflare cleared, HackerOne policy page reached.")
-            page.screenshot(path="/tmp/patchium-smoke-pass.png")
-            print("[+] screenshot: /tmp/patchium-smoke-pass.png")
+            page.screenshot(path="/tmp/vibatchium-smoke-pass.png")
+            print("[+] screenshot: /tmp/vibatchium-smoke-pass.png")
             ctx.close()
             return 0
 
         print("[?] ambiguous: neither CF markers nor success markers found.")
-        page.screenshot(path="/tmp/patchium-smoke-ambiguous.png")
-        print("[?] screenshot: /tmp/patchium-smoke-ambiguous.png")
+        page.screenshot(path="/tmp/vibatchium-smoke-ambiguous.png")
+        print("[?] screenshot: /tmp/vibatchium-smoke-ambiguous.png")
         print(f"[?] first 500 chars of body: {body[:500]}")
         ctx.close()
         return 2
