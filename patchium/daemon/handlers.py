@@ -935,6 +935,26 @@ def register_all(daemon) -> None:
         wait_until = args.get("wait_until", "domcontentloaded")
         timeout = int(args.get("timeout_ms", 60_000))
         resp = await s.page.goto(url, wait_until=wait_until, timeout=timeout)
+        # Wave 7.7.12: bounded SPA-hydration wait. `domcontentloaded` fires
+        # before client-side render on heavy SPAs (Immunefi, HackerOne,
+        # bughunters.google.com) — without this wait, `text` returned ""
+        # and screenshots came back uniform-blank-white. SSR sites satisfy
+        # the predicate in <50ms (no cost); SPAs get up to 5s to hydrate.
+        # Opt out per-call with `wait_for_render=False` for raw DCL behavior.
+        if args.get("wait_for_render", True):
+            min_chars = int(args.get("min_chars", 100))
+            render_timeout = int(args.get("render_timeout_ms", 5000))
+            try:
+                await s.page.wait_for_function(
+                    "(n) => document.body && "
+                    "document.body.innerText.trim().length > n",
+                    arg=min_chars,
+                    timeout=render_timeout,
+                )
+            except Exception:  # noqa: BLE001
+                # Bounded — proceed even if page is genuinely empty
+                # (about:blank, error pages, asset URLs, etc.).
+                pass
         _invalidate_snapshot(d)
         s.frame_ref = None
         status = resp.status if resp else None

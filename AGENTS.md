@@ -31,7 +31,7 @@ $PB verify_url --url https://maybe-dead.example       # ~50ms DNS pre-check
 - ❌ `pip install patchium` — Debian/Ubuntu blocks system pip (PEP 668). The `.venv` is set up; use the binary.
 - ❌ `python -m patchium.cli` — `python` doesn't exist on Debian, only `python3`. Use the binary.
 - ❌ `start && go && text` for a simple lookup. Use `explore` — one call, auto-headless, auto-closes.
-- ❌ Headed Chrome for background work. `explore`/`research` are headless; if calling `start` directly, pass `--headless` or set `PATCHIUM_DEFAULT_HEADLESS=1`.
+- ❌ Headed Chrome for background work. `explore`/`research` are headless; `start` invoked from an agent (no TTY) is headless too as of Wave 7.7.11. If you ever see a window pop up, you're either running from a real terminal or someone passed `--headed` — pass `--headless` explicitly or set `PATCHIUM_DEFAULT_HEADLESS=1` to force it.
 - ❌ Direct domain probes without `verify_url`. A bad URL guess burns 30s of nav timeout; `verify_url` is 50ms.
 
 ## Tool routing
@@ -52,7 +52,7 @@ When `explore`/`research` aren't enough:
 
 ```bash
 $PB session new mywork
-$PB --session mywork start --headless
+$PB --session mywork start              # headless by default for agent / non-TTY use
 $PB --session mywork go https://example.com
 $PB --session mywork text
 $PB --session mywork click @e3
