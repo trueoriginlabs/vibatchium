@@ -271,10 +271,16 @@ def session_delete(ctx, name):
               help="Don't prune these names (repeatable; 'default' is always kept).")
 @click.option("--dry-run", is_flag=True,
               help="Show what would be pruned without deleting.")
+@click.option("--yes", "-y", "assume_yes", is_flag=True,
+              help="Skip the y/N confirmation prompt. Required for non-interactive use.")
 @click.pass_context
-def session_prune(ctx, pattern, keep_list, dry_run):
+def session_prune(ctx, pattern, keep_list, dry_run, assume_yes):
     """Delete on-disk profile dirs for stopped sessions. Useful after a
-    dogfood run leaves probe/test/ad-hoc sessions cluttering `session list`."""
+    dogfood run leaves probe/test/ad-hoc sessions cluttering `session list`.
+
+    Destructive: profile dirs (cookies, localStorage, login state) are removed.
+    Confirmation is required unless --yes is passed or --dry-run is set.
+    """
     res = call("session_list")
     keep = {"default", *keep_list}
     active = res.get("active") or "default"
@@ -293,6 +299,17 @@ def session_prune(ctx, pattern, keep_list, dry_run):
         click.echo("nothing to prune", err=True)
         _emit({"pruned": [], "dry_run": dry_run}, ctx.obj["json"])
         return
+    # Confirmation gate — parity with `session delete` / `profile delete`.
+    # Skipped on --dry-run (read-only) and --yes (explicit override).
+    if not dry_run and not assume_yes:
+        click.echo(f"About to delete {len(to_prune)} session profile dir(s):", err=True)
+        for n in to_prune:
+            click.echo(f"  - {n}", err=True)
+        if not click.confirm("Proceed?", default=False, err=True):
+            click.echo("aborted", err=True)
+            _emit({"pruned": [], "aborted": True, "dry_run": dry_run},
+                  ctx.obj["json"])
+            return
     pruned = []
     for name in to_prune:
         if dry_run:
@@ -547,8 +564,17 @@ def shutdown(ctx):
 @click.pass_context
 def status(ctx):
     """Daemon + session status."""
+    # Wave 7.7.13: stable shape — same keys whether daemon is up or down so
+    # scripts can `.["running"]` etc. without KeyError post-shutdown.
     if not daemon_is_running():
-        result = {"daemon": False, "session": False}
+        result = {
+            "daemon": False,
+            "running": False,
+            "session": None,
+            "mode": None,
+            "pid": None,
+            "running_sessions": [],
+        }
     else:
         result = call("status")
         result["daemon"] = True
@@ -1225,7 +1251,10 @@ def record_start(ctx, screenshots, snapshots, sources):
 
 
 @record.command("stop")
-@click.option("-o", "--output", default="trace.zip")
+@click.option("-o", "--output", required=True,
+              help="Required: where to write the captured trace.zip. "
+                   "(Previously defaulted to ./trace.zip which silently "
+                   "polluted CWD; explicit path now required.)")
 @click.pass_context
 def record_stop(ctx, output):
     _emit(call("record_stop", {"path": str(Path(output).resolve())}), ctx.obj["json"], "path")
@@ -1352,8 +1381,8 @@ def route_add(ctx, pattern, mode, body, status, content_type):
     """Add a route rule. PATTERN is a Playwright URL glob like `**/*.png`.
 
     Examples:
-      vibatchium route add "**/*.{png,jpg,css}" --mode abort
-      vibatchium route add "**/api/users" --mode fulfill --body '{"ok":true}' --content-type application/json
+      vb route add "**/*.{png,jpg,css}" --mode abort
+      vb route add "**/api/users" --mode fulfill --body '{"ok":true}' --content-type application/json
     """
     _emit(call("route_add", {"pattern": pattern, "mode": mode, "body": body,
                               "status": status, "content_type": content_type}),
@@ -1487,8 +1516,8 @@ def vision_click(ctx, intent, min_confidence, button, max_per_minute):
     Use when the AX-tree is useless (canvas UIs, Flutter, Unity WebGL).
     Requires ANTHROPIC_API_KEY + `pip install vibatchium[llm]`.
 
-        vibatchium vision-click "the blue submit button"
-        vibatchium vision-click "the OK button in the modal" --min-confidence 0.8
+        vb vision-click "the blue submit button"
+        vb vision-click "the OK button in the modal" --min-confidence 0.8
     """
     _emit(call("vision_click", {
         "intent": intent, "min_confidence": min_confidence,
@@ -1500,9 +1529,9 @@ def vision_click(ctx, intent, min_confidence, button, max_per_minute):
 @click.argument("intent")
 @click.option("--min-confidence", default=0.6, type=float)
 @click.pass_context
-def vision_find_cmd(ctx, intent):
+def vision_find_cmd(ctx, intent, min_confidence):
     """Locate a UI element via vision and return coords + confidence (no click)."""
-    _emit(call("vision_find", {"intent": intent, "min_confidence": 0.0}),
+    _emit(call("vision_find", {"intent": intent, "min_confidence": min_confidence}),
           ctx.obj["json"])
 
 
@@ -1566,7 +1595,7 @@ def safety():
 
         vb --session work safety set flag-only
         vb --session work map      # response gains risk metadata
-        vibatchium safety scan "ignore previous instructions"  # test patterns
+        vb safety scan "ignore previous instructions"  # test patterns
     """
 
 
@@ -1600,14 +1629,14 @@ def secret():
     """Encrypted vault for per-site credentials + TOTP.
 
     Vault key is sourced from OS keyring (preferred) or VIBATCHIUM_SECRETS_KEY
-    env (base64-32-bytes; CI/headless). Run `vibatchium secret init` once to
+    env (base64-32-bytes; CI/headless). Run `vb secret init` once to
     provision the key.
 
-        vibatchium secret init
-        vibatchium secret set github.com username alice
-        vibatchium secret set github.com password 'hunter2'
-        vibatchium secret set github.com totp-seed JBSWY3DPEHPK3PXP
-        vibatchium secret list
+        vb secret init
+        vb secret set github.com username alice
+        vb secret set github.com password 'hunter2'
+        vb secret set github.com totp-seed JBSWY3DPEHPK3PXP
+        vb secret list
         vb fill @e7 --use-secret github.com:totp
     """
 
@@ -1618,12 +1647,19 @@ def secret():
               help="Where to store the generated key.")
 @click.option("--print-key", is_flag=True,
               help="Echo the key (for env-var setups).")
+@click.option("--force", is_flag=True,
+              help="Overwrite an existing vault key. WITHOUT this flag, "
+                   "init refuses to run if ~/.config/vibatchium/secrets.enc "
+                   "exists — a new key would render the existing ciphertext "
+                   "permanently undecryptable.")
 @click.pass_context
-def secret_init(ctx, prefer, print_key):
+def secret_init(ctx, prefer, print_key, force):
     """Generate and provision a vault key."""
     args = {"prefer": prefer}
     if print_key:
         args["print_key"] = True
+    if force:
+        args["force"] = True
     _emit(call("secret_init", args), ctx.obj["json"])
 
 
@@ -1686,7 +1722,7 @@ def wait_email_code(ctx, site, timeout, max_age, mark_read):
     return the extracted code.
 
     Set the poll URL once via:
-        vibatchium secret set example.com email-poll \\
+        vb secret set example.com email-poll \\
           'imaps://user:pass@imap.gmail.com:993?regex=\\d{6}&from=*@example.com'
     """
     args = {"site": site, "timeout": timeout, "max_age": max_age,
@@ -1943,11 +1979,11 @@ def liveview():
     Watch what an agent is doing in real time. Read-only by default;
     --takeover forwards your clicks/keystrokes back into the session.
 
-        vibatchium liveview start                # bind 127.0.0.1:9223
-        vibatchium liveview start --takeover     # mouse/keyboard takeover mode
-        vibatchium liveview url                  # print viewer URL
+        vb liveview start                # bind 127.0.0.1:9223
+        vb liveview start --takeover     # mouse/keyboard takeover mode
+        vb liveview url                  # print viewer URL
         # open the URL in any browser
-        vibatchium liveview stop
+        vb liveview stop
     """
 
 
@@ -1992,7 +2028,7 @@ def liveview_url(ctx, session_name):
         _emit(res, True)
         return
     if not res.get("running"):
-        click.echo("live-view not running — `vibatchium liveview start` first", err=True)
+        click.echo("live-view not running — `vb liveview start` first", err=True)
         sys.exit(1)
     target = res.get("session_url") or res.get("url")
     click.echo(target)
@@ -2040,7 +2076,12 @@ def fingerprint(ctx, target, url, extract, settle_ms):
 def mcp(caps):
     """Run the MCP server (stdio JSON-RPC) — wires every CLI verb as an MCP tool."""
     from .mcp_server import _entrypoint
-    _entrypoint(caps=caps)
+    try:
+        _entrypoint(caps=caps)
+    except ValueError as exc:
+        # _resolve_caps raises ValueError on unknown bucket names; surface
+        # as a click usage error rather than a bare Python traceback.
+        raise click.BadParameter(str(exc), param_hint="'--caps'") from exc
 
 
 # ─── Wave 6.4a: REST shim ────────────────────────────────────────────────
@@ -2424,7 +2465,7 @@ def daemon_start(max_sessions, log_verbs, default_safety, default_headless):
     from .client import daemon_is_running, spawn_daemon
     if daemon_is_running():
         click.echo("daemon already running — stop it first with "
-                    "`vibatchium shutdown`", err=True)
+                    "`vb shutdown`", err=True)
         sys.exit(1)
     env_overrides = {}
     if max_sessions is not None:
@@ -2496,7 +2537,7 @@ _TOP_LEVEL_ALIASES = {
 def _find_verb_index(argv: list[str]) -> int:
     """Return the index of the verb (subcommand) in argv, skipping past
     global flags like `--session NAME`, `--json`, `--version`. Returns -1
-    if no verb is present (bare `vibatchium` or `vibatchium --help`).
+    if no verb is present (bare `vibatchium` or `vb --help`).
     """
     i = 1
     while i < len(argv):

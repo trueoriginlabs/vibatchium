@@ -3,7 +3,7 @@
 Wire-up: `claude mcp add vibatchium python -m vibatchium.mcp_server`.
 
 The MCP server talks to the SAME daemon that the CLI uses. A browser session
-started by `vibatchium start` (or `vibatchium attach`) is immediately accessible to
+started by `vb start` (or `vb attach`) is immediately accessible to
 Claude Code via these tools, and vice versa — single source of browser truth.
 
 Tool naming follows the CLI verb names (go, map, click, fill, ...) so MCP
@@ -144,6 +144,26 @@ TOOLS: list[tuple[str, str, dict, str, Any]] = [
                          False)},
       "required": ["target"]},
      "click", None),
+    ("dblclick", "Double-click an @eN ref or CSS selector.",
+     {"type": "object",
+      "properties": {"target": _str("@eN ref or selector."),
+                     "timeout_ms": _int("Timeout in ms.", 30_000)},
+      "required": ["target"]},
+     "dblclick", None),
+    ("focus", "Focus an element (without clicking).",
+     {"type": "object",
+      "properties": {"target": _str("@eN ref or selector."),
+                     "timeout_ms": _int("Timeout in ms.", 30_000)},
+      "required": ["target"]},
+     "focus", None),
+    ("select", "Pick option(s) on a <select>; choose by value/label/index.",
+     {"type": "object",
+      "properties": {"target": _str("@eN or selector for the <select>."),
+                     "value": _str("Option value attribute."),
+                     "label": _str("Option visible label."),
+                     "index": _int("Zero-based option index.")},
+      "required": ["target"]},
+     "select", None),
     ("fill", "Clear an input and fill it with text. With use_secret, value comes from the encrypted vault.",
      {"type": "object",
       "properties": {"target": _str("@eN ref or selector."),
@@ -212,6 +232,20 @@ TOOLS: list[tuple[str, str, dict, str, Any]] = [
      "storage_restore", None),
     ("cookies", "List current cookies.",
      {"type": "object", "properties": {}}, "cookies", None),
+    ("wait_selector", "Wait until a CSS selector reaches a state.",
+     {"type": "object",
+      "properties": {"selector": _str("CSS selector."),
+                     "state": _str("visible|hidden|attached|detached"),
+                     "timeout_ms": _int("Timeout in ms.", 30_000)},
+      "required": ["selector"]},
+     "wait_selector", None),
+    ("wait_ref", "Wait until an @eN ref reaches a state.",
+     {"type": "object",
+      "properties": {"ref": _str("@eN ref from the last snapshot."),
+                     "state": _str("visible|hidden|attached|detached"),
+                     "timeout_ms": _int("Timeout in ms.", 30_000)},
+      "required": ["ref"]},
+     "wait_ref", None),
     ("wait_url", "Wait until the URL matches a glob/regex.",
      {"type": "object",
       "properties": {"pattern": _str("URL pattern."),
@@ -237,6 +271,8 @@ TOOLS: list[tuple[str, str, dict, str, Any]] = [
      {"type": "object", "properties": {"index": _int("Tab index.")},
       "required": ["index"]},
      "page_switch", None),
+    ("page_close", "Close the current tab; the next tab becomes active.",
+     {"type": "object", "properties": {}}, "page_close", None),
     ("find", "Locate elements by semantic strategy (text/label/placeholder/role/testid/xpath/alt/title/css).",
      {"type": "object",
       "properties": {"kind": _str("text|label|placeholder|role|testid|xpath|alt|title|css"),
@@ -638,7 +674,7 @@ _TOOL_BY_NAME = {t[0]: t for t in TOOLS}
 # areas (cuts prompt-token tax for LLMs that only need a subset). Mirrors
 # microsoft/playwright-mcp's --caps system.
 #
-# Pass via `vibatchium mcp --caps=core,session,nav,input,agent` to expose ONLY
+# Pass via `vb mcp --caps=core,session,nav,input,agent` to expose ONLY
 # those buckets. Omit --caps (or pass `--caps=all`) for the full 80+ surface.
 #
 # A tool can belong to MULTIPLE caps; it's exposed if any of its caps is selected.
@@ -726,8 +762,6 @@ def _filter_tools(caps: set[str] | None) -> list[tuple]:
     allowed_names = set(_ALWAYS_EXPOSED)
     for bucket in caps:
         allowed_names |= _CAP_BUCKETS.get(bucket, set())
-    # `sleep`/`ping` always make sense for any cap; include them
-    allowed_names |= {"sleep", "ping"} & {t[0] for t in TOOLS}
     return [t for t in TOOLS if t[0] in allowed_names]
 
 
@@ -762,21 +796,30 @@ async def list_tools() -> list[types.Tool]:
     ]
 
 
+def _err(msg: str) -> types.CallToolResult:
+    """Build an MCP error result with isError=True so spec-compliant clients
+    (Claude Code, etc.) can distinguish failures from successful text returns.
+    Without isError, callers must string-sniff 'error:' prefixes."""
+    return types.CallToolResult(
+        content=[types.TextContent(type="text", text=msg)],
+        isError=True,
+    )
+
+
 @server.call_tool()
-async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.Content]:
+async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.Content] | types.CallToolResult:
     # If caps are active, refuse calls to tools outside the filter — protects
     # against an LLM hallucinating a tool name that wasn't in list_tools.
     if _ACTIVE_CAPS is not None:
         allowed = {t[0] for t in _filter_tools(_ACTIVE_CAPS)}
         if name not in allowed:
-            return [types.TextContent(
-                type="text",
-                text=f"tool {name!r} is not in the enabled capabilities "
-                     f"({sorted(_ACTIVE_CAPS)})",
-            )]
+            return _err(
+                f"tool {name!r} is not in the enabled capabilities "
+                f"({sorted(_ACTIVE_CAPS)})"
+            )
     entry = _TOOL_BY_NAME.get(name)
     if entry is None:
-        return [types.TextContent(type="text", text=f"unknown tool: {name}")]
+        return _err(f"unknown tool: {name}")
     _name, _desc, _schema, cmd, mapper = entry
     args = mapper(arguments) if mapper else dict(arguments or {})
 
@@ -803,7 +846,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.Content]
     try:
         result = await asyncio.to_thread(daemon_call, cmd, args, session=session)
     except Exception as exc:  # noqa: BLE001
-        return [types.TextContent(type="text", text=f"error: {type(exc).__name__}: {exc}")]
+        return _err(f"error: {type(exc).__name__}: {exc}")
 
     return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
 

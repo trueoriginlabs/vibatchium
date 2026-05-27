@@ -1,0 +1,112 @@
+# Changelog
+
+All notable changes to vibatchium are documented here. Versions follow
+[Semantic Versioning](https://semver.org/spec/v2.0.0.html). Until 1.0,
+minor bumps may include breaking changes; we'll always call them out here.
+
+## [0.5.1] — 2026-05-28
+
+### Fixed (BLOCKERs surfaced post-rename audit)
+- **`vb vision-find` crashed on every invocation** — click decorator declared
+  `--min-confidence` but the function signature didn't accept it
+  (`cli.py:1503`).
+- **`vb secret init` silently destroyed existing vaults** — running it against
+  an already-initialized `secrets.enc` would write a fresh keyring entry,
+  rendering all prior entries permanently undecryptable. Now requires
+  `--force` and raises `VaultAlreadyInitialized` otherwise
+  (`secrets.py:119`).
+- **`vb secret init` raw `ModuleNotFoundError: No module named 'nacl'`** —
+  wrapped with install hint (`pip install vibatchium[secrets]`).
+- **`vb serve` printed "REST listening" before crashing** on missing fastapi
+  import — import check now runs first, no misleading banner (`rest.py:328`).
+- **REST API OpenAPI version was hardcoded `"0.3.0"`** — now sources from
+  `__version__` (`rest.py:114`).
+- **xscraper cross-project import broken**: the in-tree rename of
+  `patchium/` → `vibatchium/` left `~/projects/xscraper`'s editable
+  install pointing at a non-existent package. xscraper's `pyproject.toml`,
+  imports, and adapter file renamed to depend on `vibatchium`. All 48
+  xscraper tests pass.
+
+### Added
+- **6 missing MCP tools registered**: `dblclick`, `focus`, `select`,
+  `page_close`, `wait_selector`, `wait_ref` (`mcp_server.py`). The handlers
+  always existed; only the MCP advertisement was missing. Tool count goes
+  118 → 124.
+- **`isError=True` on MCP error returns** — `vb mcp` errors are now
+  spec-compliant; clients can distinguish failures from successful text
+  returns without string-sniffing (`mcp_server.py:805`).
+- **`vb session prune --yes`** — confirmation prompt required for destructive
+  prune (parity with `session delete` and `profile delete`).
+- **`vb record stop --output` required** — previously defaulted to
+  `./trace.zip` and silently polluted CWD (`cli.py:1255`).
+- **`vb status` stable shape post-shutdown** — same keys whether daemon is
+  running or not. Scripts that key off `status["running"]` no longer break
+  on shutdown (`cli.py:565`).
+- **`vb mcp --caps=<bogus>`** now reports a clean `click.BadParameter`
+  instead of a bare Python traceback (`cli.py:2047`).
+- **Defensive token extraction in `vision.py`** — Anthropic SDK response
+  shape drift now logs a warning instead of silently returning 0 (which
+  would corrupt spend tracking).
+- **`stealth-mouse` PID-extraction fix** — passes Chrome PID from Patchright
+  internals instead of a `BrowserContext` (CDP-Patches 1.1 has a broken
+  `isinstance` dispatch that can't accept the context). Tested-by-design
+  on X11 + xdotool/wmctrl; cannot be smoke-verified on Wayland.
+
+### Changed
+- **23+ shipped error messages updated** `vibatchium <verb>` →  `vb <verb>`.
+  Every error that hinted at "run `vibatchium foo`" was telling users to
+  type a command that doesn't exist (the binary is `vb`).
+- **Stealth-mouse docs** rewritten to reflect that `[stealth-mouse]` is no
+  longer a pip extra; users install CDP-Patches via `pip install
+  git+https://github.com/Kaliiiiiiiiii-Vinyzu/CDP-Patches.git@main`.
+- **Dependency upper bounds** added to all extras and core deps
+  (`patchright<2.0`, `click<9.0`, `mcp<2.0`, `anthropic<1.0`, `aiohttp<4.0`,
+  `fastapi<2.0`, etc.). Future major upgrades won't silently break the
+  install.
+
+### Removed
+- Dead code `{"sleep", "ping"} & {…}` union in `mcp_server.py:766` — the
+  intersection was always empty (neither verb has an MCP tool entry).
+
+### Operations notes for users upgrading from 0.5.0
+- If you ran `vb` against a state directory containing live profiles, those
+  remain in `~/.config/vibatchium/` and `~/.cache/vibatchium/` — no further
+  migration needed.
+- If you had a `secrets.enc` from 0.5.0 with no recoverable keyring entry,
+  the new `vb secret init` will refuse to clobber it. Archive it (or pass
+  `--force`) before re-initializing.
+
+## [0.5.0] — 2026-05-27
+
+### Breaking
+- **Package rename**: `patchium` → `vibatchium`. Binary `patchium` → `vb`.
+  No backwards-compat alias. Nothing was ever published as `patchium` on
+  PyPI so external users are unaffected; local installs must
+  `pip install vibatchium`.
+- **State directories moved**: `~/.config/patchium/` → `~/.config/vibatchium/`,
+  `~/.cache/patchium/` → `~/.cache/vibatchium/`. Manual migration required
+  for existing profiles and the secrets vault.
+- **Env var prefix renamed**: `PATCHIUM_*` → `VIBATCHIUM_*` across the
+  runtime and tests (e.g. `PATCHIUM_DEFAULT_HEADLESS` →
+  `VIBATCHIUM_DEFAULT_HEADLESS`).
+- **MCP tool prefix renamed**: `mcp__patchium__*` → `mcp__vibatchium__*` —
+  existing agent skills/configs referencing the old prefix must be updated.
+- **`[stealth-mouse]` pip extra removed** — CDP-Patches is git-only and PyPI
+  forbids `git+https://` deps in published metadata. Users who want
+  stealth-mouse install separately:
+  `pip install git+https://github.com/Kaliiiiiiiiii-Vinyzu/CDP-Patches.git@main`.
+
+### Added
+- **Wave 7.7.11**: tri-state `--headless/--headed` CLI flag with TTY-aware
+  default. Agent/pipe contexts (no TTY) default to headless; interactive
+  terminals default to headed. `VIBATCHIUM_DEFAULT_HEADLESS=1` overrides
+  everywhere; explicit `--headless` / `--headed` always wins.
+- **Wave 7.7.12**: bounded SPA-hydration wait after `goto` (5s, body.innerText
+  > 100 chars). Fixes empty `text`/`screenshot` on Immunefi, HackerOne,
+  bughunters.google.com. Opt out per-call with `wait_for_render=false`.
+- **GitHub Actions Trusted Publishing** to PyPI via OIDC — no long-lived
+  tokens. Tag pushes (`v*`) trigger build + publish + GitHub release.
+
+### Fixed
+- `network_start` accepts `url_filter` + `capture_response_headers`
+  (pre-rename).

@@ -61,7 +61,7 @@ def _need_session(daemon):
         except LookupError:
             name = DEFAULT_SESSION_NAME
         suffix = (f" --session {name}" if name != DEFAULT_SESSION_NAME else "")
-        raise SessionNotStarted(f"no session {name!r} — run `vibatchium start{suffix}` first")
+        raise SessionNotStarted(f"no session {name!r} — run `vb start{suffix}` first")
     # Repair a stale session.page if the previously-active page has detached
     # (popup-then-close, navigation-cancelled, target-crashed). Pick the
     # newest live page from the context as the fallback.
@@ -124,7 +124,7 @@ def _resolve_target(daemon, target: str):
         if daemon._snapshot is None:
             raise RuntimeError(
                 f"ref {target!r} cannot be resolved — last `map` was invalidated by "
-                f"a navigation. Run `vibatchium map` to refresh the snapshot first."
+                f"a navigation. Run `vb map` to refresh the snapshot first."
             )
         return elements.resolve(s.page, daemon._snapshot, target)
     return elements.resolve_target(s.page, daemon._snapshot, target)
@@ -256,7 +256,7 @@ def register_all(daemon) -> None:
                 profile_dir = p
             else:
                 # bare name → also makes that the session name (so the user can do
-                # `vibatchium start --profile work` and address it later as `--session work`)
+                # `vb start --profile work` and address it later as `--session work`)
                 if name == DEFAULT_SESSION_NAME:
                     name = raw
                 profile_dir = PROFILES_DIR / raw
@@ -362,7 +362,7 @@ def register_all(daemon) -> None:
         name = validate_name(args.get("name"), kind="session name")
         if name not in list_session_names():
             raise ValueError(
-                f"unknown session: {name!r} — create with `vibatchium session new {name}`"
+                f"unknown session: {name!r} — create with `vb session new {name}`"
             )
         set_active_session_name(name)
         return {"active": name}
@@ -391,9 +391,16 @@ def register_all(daemon) -> None:
     async def _secret_init(d, args):
         """Provision the vault key in the OS keyring (or print to stdout for
         env-var setups). Returns the base64 key only if `print_key=true` is
-        passed — by default just confirms storage."""
+        passed — by default just confirms storage.
+
+        Refuses to run against an existing vault unless `force=true` — a
+        fresh key would orphan the existing ciphertext silently.
+        """
         from .. import secrets as _secrets
-        info = _secrets.init_vault_key(prefer=args.get("prefer", "keyring"))
+        info = _secrets.init_vault_key(
+            prefer=args.get("prefer", "keyring"),
+            force=bool(args.get("force", False)),
+        )
         if not args.get("print_key"):
             info = {"stored_in": info["stored_in"]}
         else:
@@ -964,7 +971,7 @@ def register_all(daemon) -> None:
         if wall:
             out["walled"] = wall
             # Wave 7.7.3 observability: walled-page detection now logs at
-            # INFO level so post-run forensics (`vibatchium logs --since 1h`)
+            # INFO level so post-run forensics (`vb logs --since 1h`)
             # can find "Reddit blocked at 21:24" without needing
             # VIBATCHIUM_LOG_VERBS=1 to have been on. Closes the gap the
             # second dogfood run surfaced (operator hit Reddit block;
@@ -980,8 +987,8 @@ def register_all(daemon) -> None:
             if current_backend in (None, "patchright"):
                 out["advice"] = (
                     f"page looks {wall}-walled; try "
-                    f"`vibatchium session close {name} && "
-                    f"vibatchium --session {name} start --backend nodriver`"
+                    f"`vb session close {name} && "
+                    f"vb --session {name} start --backend nodriver`"
                 )
         return out
 

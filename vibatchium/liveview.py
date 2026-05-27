@@ -73,7 +73,7 @@ async function refresh() {
   const data = await r.json();
   const ul = document.getElementById('sessions');
   if (data.sessions.length === 0) {
-    ul.innerHTML = '<li class="empty">no sessions running — try `vibatchium session new foo && vibatchium --session foo start`</li>';
+    ul.innerHTML = '<li class="empty">no sessions running — try `vb session new foo && vb --session foo start`</li>';
     return;
   }
   ul.innerHTML = data.sessions.map(s =>

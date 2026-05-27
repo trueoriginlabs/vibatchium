@@ -286,7 +286,7 @@ def test_no_session_error_dispatcher_path():
                       capture_output=True, text=True, timeout=10)
     assert r.returncode != 0
     assert "no session" in r.stderr
-    assert "run `vibatchium start" in r.stderr
+    assert "run `vb start" in r.stderr  # v0.5.0+ binary name
     assert "RuntimeError:" not in r.stderr  # ← THE fix
 
 
@@ -298,7 +298,7 @@ def test_no_session_error_handler_path():
                       capture_output=True, text=True, timeout=10)
     assert r.returncode != 0
     assert "no session" in r.stderr
-    assert "run `vibatchium start" in r.stderr
+    assert "run `vb start" in r.stderr  # v0.5.0+ binary name
     assert "RuntimeError:" not in r.stderr  # ← THE fix
 
 

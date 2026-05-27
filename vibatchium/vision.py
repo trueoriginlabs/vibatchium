@@ -189,16 +189,30 @@ async def claude_locate(screenshot_png: bytes, description: str,
     text = resp.content[0].text  # type: ignore[attr-defined]
     text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip(), flags=re.M)
     data = json.loads(text)
+    # Defensive usage extraction — Anthropic SDK 0.40+ exposes usage as a
+    # Usage object on the response. Earlier silent-zero fallback would mask
+    # spend-tracking corruption if the SDK ever restructures the envelope.
+    # Log a clear warning instead of silently zeroing.
     tokens = getattr(resp, "usage", None)
+    if tokens is None:
+        log.warning("Anthropic response missing 'usage' field — spend tracking "
+                    "will under-report. SDK version drift?")
+        in_tok, out_tok = 0, 0
+    else:
+        in_tok = getattr(tokens, "input_tokens", None)
+        out_tok = getattr(tokens, "output_tokens", None)
+        if in_tok is None or out_tok is None:
+            log.warning("Anthropic usage object missing input_tokens/output_tokens "
+                        "(got: %r). Spend tracking degraded; check SDK version.",
+                        tokens)
+            in_tok = in_tok or 0
+            out_tok = out_tok or 0
     return {
         "x": int(data["x"]),
         "y": int(data["y"]),
         "confidence": float(data.get("confidence", 0)),
         "rationale": data.get("rationale", ""),
-        "tokens": {
-            "input": getattr(tokens, "input_tokens", 0) if tokens else 0,
-            "output": getattr(tokens, "output_tokens", 0) if tokens else 0,
-        },
+        "tokens": {"input": int(in_tok), "output": int(out_tok)},
     }
 
 
@@ -293,7 +307,7 @@ def check_budget(estimate_usd: float = PRE_CALL_COST_ESTIMATE_USD) -> dict:
             f"lifetime vision budget exceeded: lifetime ${lifetime:.4f} + "
             f"est ${estimate_usd:.4f} > cap ${lifetime_cap:.2f}. "
             f"Raise VIBATCHIUM_VISION_MAX_LIFETIME_USD or "
-            f"`vibatchium vision budget --reset-lifetime`."
+            f"`vb vision budget --reset-lifetime`."
         )
     return {
         "today": today, "lifetime": lifetime,

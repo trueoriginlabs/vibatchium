@@ -6,7 +6,7 @@ lock on Chrome's `user-data-dir` enforces this — two sessions cannot share a
 profile concurrently — so the 1:1 mapping is the path of least surprise.
 
 - "session name" is the active identifier the CLI/MCP uses to address one
-  concurrent browser (e.g. `vibatchium --session work click @e3`).
+  concurrent browser (e.g. `vb --session work click @e3`).
 - "profile dir" is the on-disk Chrome user-data-dir that holds cookies,
   localStorage, IndexedDB, etc. It persists across `session close` so
   re-opening keeps you logged in.
@@ -135,7 +135,7 @@ def secure_write(path: Path, content: str | bytes) -> None:
 
     Use this for every file vibatchium produces that could carry sensitive
     data (cookies, auth headers, request bodies, cached intents, secrets).
-    Caller-controlled output paths (`vibatchium screenshot -o foo.png`) are
+    Caller-controlled output paths (`vb screenshot -o foo.png`) are
     explicitly NOT routed through this — the user picked the path and
     may want to share the artifact; for those, document the perms model
     instead of forcing it.

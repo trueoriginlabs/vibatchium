@@ -11,7 +11,7 @@ Built-in providers:
 
 Per-session model: the proxy is stored at <profile_dir>/proxy.json and applied
 at launch time (Playwright accepts proxy config only at launch, not runtime).
-To switch a session's proxy: `vibatchium proxy set/clear`, then restart the
+To switch a session's proxy: `vb proxy set/clear`, then restart the
 session (close + start).
 
 WebRTC leak guard: when a proxy is configured, the session's Chrome flags

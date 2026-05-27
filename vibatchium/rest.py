@@ -111,8 +111,9 @@ def build_app(*, require_auth: bool = True, token: str | None = None,
     _expected_token = token  # closure
     _allowed = _allowed_verbs(caps)  # None = unrestricted
 
-    app = FastAPI(title="vibatchium", version="0.3.0",
-                  description="REST shim over the vibatchium daemon")
+    from . import __version__ as _pkg_version
+    app = FastAPI(title="vibatchium", version=_pkg_version,
+                  description="REST shim over the vb daemon")
 
     def _check_auth(request) -> None:
         if not require_auth:
@@ -329,6 +330,8 @@ def serve(*, host: str = "127.0.0.1", port: int = 8000,
            require_auth: bool = True, token: str | None = None,
            caps: str | None = None) -> None:
     """Run the REST shim. Blocks until interrupted."""
+    # Import-checks BEFORE any banner output. Print-then-crash would mislead
+    # log-watchers into thinking the server is listening when it isn't.
     try:
         import uvicorn
     except ImportError as exc:
@@ -336,6 +339,8 @@ def serve(*, host: str = "127.0.0.1", port: int = 8000,
             "REST shim requires `pip install vibatchium[rest]` "
             f"(import error: {exc})"
         ) from exc
+    # build_app() does its own fastapi import-check; surface that before banners.
+    app = build_app(require_auth=require_auth, token=token, caps=caps)
     if require_auth and token is None:
         token = get_or_create_token()
         print(f"\n  vibatchium REST listening on http://{host}:{port}", flush=True)
@@ -349,5 +354,4 @@ def serve(*, host: str = "127.0.0.1", port: int = 8000,
     elif not require_auth:
         print(f"\n  WARNING: REST shim listening on http://{host}:{port} WITHOUT AUTH", flush=True)
         print("  Don't expose to a public network!\n", flush=True)
-    app = build_app(require_auth=require_auth, token=token, caps=caps)
     uvicorn.run(app, host=host, port=port, log_level="info")

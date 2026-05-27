@@ -267,7 +267,7 @@ class Daemon:
                         return {
                             "id": req_id, "ok": False,
                             "error": f"no session {session_name!r} — "
-                                     f"run `vibatchium start"
+                                     f"run `vb start"
                                      f"{' --session ' + session_name if session_name != DEFAULT_SESSION_NAME else ''}` first",
                         }
                 else:

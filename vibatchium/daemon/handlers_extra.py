@@ -31,7 +31,7 @@ except Exception:  # noqa: BLE001
 
 def _session(d):
     if d.session is None:
-        raise RuntimeError("no browser session — run `vibatchium start` or `attach` first")
+        raise RuntimeError("no browser session — run `vb start` or `attach` first")
     return d.session
 
 
