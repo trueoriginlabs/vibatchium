@@ -1,4 +1,4 @@
-"""`vibatchium setup` — wire vibatchium into agent CLIs (Codex, Claude Code, Cursor).
+"""`vb setup` — wire vibatchium into agent CLIs (Codex, Claude Code, Cursor).
 
 Detects which agent tools are installed and registers vibatchium as an MCP server
 + writes a small global instructions block pointing at the vibatchium binary.

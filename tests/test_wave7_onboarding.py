@@ -200,14 +200,16 @@ def test_session_prune_dry_run_doesnt_delete(local_server):
 
 
 def test_session_prune_actually_deletes(local_server):
-    """Without --dry-run, matching sessions are deleted on disk."""
+    """Without --dry-run, matching sessions are deleted on disk.
+    v0.5.1+ requires --yes for non-interactive prune (safety parity with
+    session/profile delete)."""
     from vibatchium.client import call, DaemonError
     name = "actually_prune_me"
     call("session_new", {"name": name})
     try:
         out = subprocess.run(
             [sys.executable, "-m", "vibatchium.cli", "--json",
-             "session", "prune", "--pattern", "actually_prune"],
+             "session", "prune", "--pattern", "actually_prune", "--yes"],
             capture_output=True, text=True, timeout=10,
         )
         assert out.returncode == 0, out.stderr

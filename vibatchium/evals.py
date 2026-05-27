@@ -1,4 +1,4 @@
-"""Wave 6.2c — vibatchium evals benchmark suite.
+"""Wave 6.2c — vb evals benchmark suite.
 
 Runs the `fingerprint` scorer across a matrix of (target × backend × humanize)
 and emits a markdown/JSON table. Used to:

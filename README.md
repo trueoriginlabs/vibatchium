@@ -100,4 +100,4 @@ For the REST shim: without `--caps`, the bearer token grants every verb includin
 
 ## License
 
-Apache-2.0 (core). Optional extras pull their own licenses: `nodriver` (AGPL-3.0), `stealth-mouse` / CDP-Patches (GPL-3.0). Never required for the base install.
+Apache-2.0 (core). Optional extras pull their own licenses: `nodriver` (AGPL-3.0). CDP-Patches (GPL-3.0) installs separately (not a pip extra — PyPI forbids `git+https://` deps): `pip install git+https://github.com/Kaliiiiiiiiii-Vinyzu/CDP-Patches.git@main`. Never required for the base install.

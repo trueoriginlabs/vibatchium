@@ -70,7 +70,7 @@ KEY_BYTES = 32
 
 class VaultLocked(RuntimeError):
     """Vault key not available — caller must set VIBATCHIUM_SECRETS_KEY,
-    initialize keyring (`vibatchium secret init`), or set the key explicitly."""
+    initialize keyring (`vb secret init`), or set the key explicitly."""
 
 
 def _key_from_env() -> bytes | None:
@@ -110,20 +110,47 @@ def get_vault_key() -> bytes:
     if key is None:
         raise VaultLocked(
             "vault key not available. Either set VIBATCHIUM_SECRETS_KEY "
-            "(base64-32-bytes) or run `vibatchium secret init` to provision "
+            "(base64-32-bytes) or run `vb secret init` to provision "
             "the OS keyring."
         )
     return key
 
 
-def init_vault_key(prefer: str = "keyring") -> dict:
+class VaultAlreadyInitialized(RuntimeError):
+    """Raised when `init_vault_key` is called against an existing vault
+    without force=True. Prevents the silent-data-loss footgun where a
+    fresh key would render the existing encrypted vault undecryptable."""
+
+
+def init_vault_key(prefer: str = "keyring", *, force: bool = False) -> dict:
     """Generate a fresh 32-byte vault key and store it. Returns metadata
     about where the key was stored (caller may want to print the env value
     for CI/headless setups).
 
     `prefer`: 'keyring' (default) | 'env' (just print, don't store)
+    `force`: required when an existing vault file is present. Without it,
+        raises VaultAlreadyInitialized — a fresh key would silently render
+        the existing ciphertext unrecoverable on next read.
     """
-    from nacl.utils import random as _nacl_random
+    try:
+        from nacl.utils import random as _nacl_random
+    except ImportError as exc:
+        raise RuntimeError(
+            "vault key init requires pynacl. Install with: "
+            "`pip install vibatchium[secrets]`"
+        ) from exc
+
+    # Existence check: a vault file already encrypted to some prior key
+    # MUST NOT be invisibly orphaned by generating a new one.
+    if VAULT_PATH.exists() and not force:
+        raise VaultAlreadyInitialized(
+            f"vault already initialized at {VAULT_PATH} ({VAULT_PATH.stat().st_size} bytes). "
+            f"Generating a new key would render existing entries undecryptable. "
+            f"Pass force=True (CLI: `--force`) to overwrite, OR archive "
+            f"{VAULT_PATH} first if you may need to recover old entries with "
+            f"the original key."
+        )
+
     key = _nacl_random(KEY_BYTES)
     encoded = base64.b64encode(key).decode()
     out = {"key_b64": encoded, "stored_in": None}

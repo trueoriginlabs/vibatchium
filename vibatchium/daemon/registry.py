@@ -117,7 +117,7 @@ class SessionEntry:
     # content field gets `prompt_injection_risk` + `signals` metadata
     # without any content mutation. ~1ms per scraped paragraph; no
     # behavioral change for agents that don't read the metadata. To
-    # disable: `vibatchium safety set off` per session, or set the
+    # disable: `vb safety set off` per session, or set the
     # VIBATCHIUM_DEFAULT_SAFETY env var.
     flags: dict = field(default_factory=lambda: {
         "safety_mode": _default_safety_mode(),
@@ -138,8 +138,8 @@ class SessionRegistry:
     """Holds all live sessions; serializes registry mutations with `mutate_lock`.
 
     Per-session locks live ON the entry (`entry.lock`) so concurrent operations
-    on DIFFERENT sessions don't block each other — `vibatchium --session A click @e1`
-    and `vibatchium --session B fill @e2 hello` run truly in parallel.
+    on DIFFERENT sessions don't block each other — `vb --session A click @e1`
+    and `vb --session B fill @e2 hello` run truly in parallel.
 
     The `mutate_lock` only serializes session create/close/delete events.
     """
@@ -328,21 +328,21 @@ class SessionRegistry:
         if name in self._entries:
             raise RuntimeError(
                 f"session {name!r} already running — "
-                f"use `vibatchium --session {name} stop` first"
+                f"use `vb --session {name} stop` first"
             )
         cap = get_max_sessions()
         if len(self._entries) >= cap:
             raise SessionLimitError(
                 f"VIBATCHIUM_MAX_SESSIONS={cap} reached "
                 f"({len(self._entries)} sessions running). "
-                f"Close one with `vibatchium session close <name>` or raise the cap."
+                f"Close one with `vb session close <name>` or raise the cap."
             )
         pdir = profile_dir if profile_dir is not None else session_dir(name)
         pdir.mkdir(parents=True, exist_ok=True)
         pw = await self._ensure_pw()
         from . import backends as _backends
         # Wave 6.2a: resolve persisted per-session proxy (if any). A proxy
-        # configured via `vibatchium proxy set` lives in <profile_dir>/proxy.json.
+        # configured via `vb proxy set` lives in <profile_dir>/proxy.json.
         from ..proxy import load_session_proxy, parse as _parse_proxy
         proxy_cfg = None
         proxy_url = load_session_proxy(pdir)

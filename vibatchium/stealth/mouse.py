@@ -30,6 +30,20 @@ import logging
 log = logging.getLogger("vibatchium.stealth.mouse")
 
 
+def _resolve_browser_pid(context) -> int | None:
+    """Best-effort: pull the Chrome OS PID out of a Patchright BrowserContext.
+
+    Walks `context._impl_obj._channel._connection._transport._proc.pid`. All
+    underscored internals — fragile by design but the only path that exists
+    in Playwright 1.x. Returns None if any link in the chain is missing so
+    the caller can raise a useful error rather than AttributeError.
+    """
+    try:
+        return context._impl_obj._channel._connection._transport._proc.pid
+    except AttributeError:
+        return None
+
+
 def humanize_mouse_available() -> tuple[bool, str]:
     """Return (available, version_or_reason).
 
@@ -62,7 +76,7 @@ async def install_humanized_mouse(session, *, button_dwell_ms: int = 60) -> None
     if not available:
         raise RuntimeError(
             "stealth-mouse layer requested but `cdp_patches` is not installed. "
-            "Install with: `pip install vibatchium[stealth-mouse]` "
+            "Install with: `pip install git+https://github.com/Kaliiiiiiiiii-Vinyzu/CDP-Patches.git@main` "
             f"(import error: {info})"
         )
     if getattr(session, "_stealth_mouse_installed", False):
@@ -77,13 +91,25 @@ async def install_humanized_mouse(session, *, button_dwell_ms: int = 60) -> None
             f"This may indicate a version mismatch — pin to the tested commit."
         ) from exc
 
-    # cdp_patches.AsyncInput takes either a Browser, Page, or pid; the Page
-    # path is the one that matches our Patchright session.
-    try:
-        input_layer = await AsyncInput(browser=session.page)
-    except TypeError:
-        # Older API: positional arg
-        input_layer = await AsyncInput(session.page)  # type: ignore[arg-type]
+    # CDP-Patches 1.1 has two bugs in its browser→pid dispatch:
+    #   1) `browser=session.page` silently dies (it stringifies the Page repr
+    #      as the PID, then can't find a window for it).
+    #   2) `browser=context` hits `TypeError: isinstance() arg 2 must be a
+    #      type` because cdp_patches.input.browsers exports `AsyncContext`
+    #      etc. as bare strings, not classes.
+    # We sidestep both by passing the Chrome PID directly — when `pid=` is
+    # set, CDP-Patches's broken `get_async_browser_pid` is never called.
+    # The PID lives at a Patchright/Playwright internal; resolution is
+    # try/except so a future API rename doesn't kill stealth-mouse outright.
+    pid = _resolve_browser_pid(session.page.context)
+    if pid is None:
+        raise RuntimeError(
+            "could not resolve Chrome PID from Patchright context — the "
+            "internal attribute chain `_impl_obj._channel._connection._"
+            "transport._proc.pid` did not exist. Patchright/Playwright "
+            "may have moved it; stealth-mouse cannot continue."
+        )
+    input_layer = await AsyncInput(pid=pid)
 
     session._input_layer = input_layer
     session._stealth_mouse_installed = True
