@@ -33,8 +33,10 @@ annotate = ["pillow>=10.0"]
 # Claude observe→act LLM backend (heuristic backend is always available).
 llm = ["anthropic>=0.40"]
 # Humanized mouse trajectories — defeats Brotector / DataDome aggressive.
-# CDP-Patches has no SPDX file in its repo; pinned for vendor-and-pin safety.
-stealth-mouse = ["cdp-patches @ git+https://github.com/Kaliiiiiiiiii-Vinyzu/CDP-Patches.git@main"]
+# CDP-Patches is not on PyPI; the published wheel cannot list a git+https
+# direct dependency. Users who want stealth-mouse install it separately:
+#   pip install vibatchium
+#   pip install git+https://github.com/Kaliiiiiiiiii-Vinyzu/CDP-Patches.git@main
 # Wave 5.4: nodriver backend for the hardest Cloudflare gates. AGPL-3.0
 # (copyleft); commercial integrators should consult licensing.
 nodriver = ["nodriver>=0.50.0"]
@@ -68,12 +70,6 @@ vb = "vibatchium.cli:main"
 Homepage = "https://github.com/trueoriginlabs/vibatchium"
 Issues = "https://github.com/trueoriginlabs/vibatchium/issues"
 Source = "https://github.com/trueoriginlabs/vibatchium"
-
-[tool.hatch.metadata]
-# Required because the optional `stealth-mouse` extra references CDP-Patches
-# via git+https (not on PyPI). Direct references are allowed; consumers will
-# need pip>=22 to install that extra.
-allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["vibatchium"]
