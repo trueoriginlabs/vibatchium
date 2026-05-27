@@ -17,7 +17,7 @@ import time
 
 import pytest
 
-from patchium.client import call, DaemonError
+from vibatchium.client import call, DaemonError
 
 
 PORT = 9224  # avoid 9223 in case a real daemon's serving there

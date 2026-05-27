@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import pytest
 
-from patchium.safety import classify, classify_html, extract_hidden_text
+from vibatchium.safety import classify, classify_html, extract_hidden_text
 
 
 # ─── §19 task-coupling — the winningest pattern in their VPLs ────────────
@@ -181,7 +181,7 @@ def test_section19g_normal_numbered_list_not_flagged():
     assert "numbered_exfil_protocol" not in r["signals"]
 
 
-# ─── §7 hidden-DOM smuggling (the patchium-specific surface) ────────────
+# ─── §7 hidden-DOM smuggling (the vibatchium-specific surface) ────────────
 
 
 def test_extract_hidden_text_html_comment():

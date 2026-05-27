@@ -1,6 +1,6 @@
 """Frames, storage round-trip, waits, network capture, multi-page."""
 
-from patchium.client import call
+from vibatchium.client import call
 
 
 def test_frames_list(local_server):
@@ -30,13 +30,13 @@ def test_frame_switch_and_interact(local_server):
 def test_storage_roundtrip(local_server, tmp_path):
     call("go", {"url": f"{local_server}/simple.html"})
     # write a localStorage value via eval
-    call("eval", {"expr": "localStorage.setItem('patchium_test_key', 'roundtrip_ok'); 'set'"})
+    call("eval", {"expr": "localStorage.setItem('vibatchium_test_key', 'roundtrip_ok'); 'set'"})
     state_path = tmp_path / "state.json"
     call("storage_export", {"path": str(state_path)})
     assert state_path.exists()
     # state json should contain the value
     contents = state_path.read_text()
-    assert "patchium_test_key" in contents
+    assert "vibatchium_test_key" in contents
     assert "roundtrip_ok" in contents
 
 

@@ -1,5 +1,5 @@
 """Tests for observe/act planning and profile management."""
-from patchium.client import call
+from vibatchium.client import call
 
 
 def test_observe_heuristic_match(local_server):
@@ -52,16 +52,16 @@ def test_profile_lifecycle():
     initial = call("profile_list")
     assert initial["active"] in initial["profiles"]
     # create
-    res = call("profile_new", {"name": "patchium_test_prof"})
+    res = call("profile_new", {"name": "vibatchium_test_prof"})
     assert res["created"] is True or res.get("exists")
     # listed
     listed = call("profile_list")
-    assert "patchium_test_prof" in listed["profiles"]
+    assert "vibatchium_test_prof" in listed["profiles"]
     # cannot delete active (skip — would require switching sessions)
     # delete
-    call("profile_delete", {"name": "patchium_test_prof"})
+    call("profile_delete", {"name": "vibatchium_test_prof"})
     after = call("profile_list")
-    assert "patchium_test_prof" not in after["profiles"]
+    assert "vibatchium_test_prof" not in after["profiles"]
 
 
 def test_count_extra(local_server):

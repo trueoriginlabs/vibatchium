@@ -18,7 +18,7 @@ process is the sweet spot:
 - Single daemon = simple IPC + simple MCP routing
 - N Chrome processes = real fingerprint isolation per session
 - Profile↔session 1:1 enforced by OS user-data-dir lock
-- ~200-400 MB RAM per Chrome; default cap 4 sessions (PATCHIUM_MAX_SESSIONS)
+- ~200-400 MB RAM per Chrome; default cap 4 sessions (VIBATCHIUM_MAX_SESSIONS)
 
 The interface is shaped so a future "remote session" (process-per-session,
 arch C) could be added behind the same `SessionEntry` surface without
@@ -45,31 +45,31 @@ from .paths import (
     session_dir,
 )
 
-log = logging.getLogger("patchium.registry")
+log = logging.getLogger("vibatchium.registry")
 
 
 # The contextvar that carries the current-call's session name through the
 # async task. Set by the dispatcher before invoking a handler; read by the
 # daemon's session-resolving properties.
 current_session_ctx: ContextVar[str] = ContextVar(
-    "patchium_current_session", default=DEFAULT_SESSION_NAME
+    "vibatchium_current_session", default=DEFAULT_SESSION_NAME
 )
 
 
 def get_max_sessions() -> int:
     """Concurrent-session cap — read at every call so it's testable."""
     try:
-        return max(1, int(os.environ.get("PATCHIUM_MAX_SESSIONS", "4")))
+        return max(1, int(os.environ.get("VIBATCHIUM_MAX_SESSIONS", "4")))
     except ValueError:
         return 4
 
 
 def _default_safety_mode() -> str:
-    """Wave 7.7.1: default safety mode for new sessions. Reads PATCHIUM_DEFAULT_SAFETY
+    """Wave 7.7.1: default safety mode for new sessions. Reads VIBATCHIUM_DEFAULT_SAFETY
     (off | flag-only | wrap | redact). Defaults to `flag-only` — every scraped
     content field gets risk metadata, no content mutation, ~1ms overhead. To
-    silence entirely set PATCHIUM_DEFAULT_SAFETY=off."""
-    val = os.environ.get("PATCHIUM_DEFAULT_SAFETY", "flag-only").lower()
+    silence entirely set VIBATCHIUM_DEFAULT_SAFETY=off."""
+    val = os.environ.get("VIBATCHIUM_DEFAULT_SAFETY", "flag-only").lower()
     if val in ("off", "flag-only", "wrap", "redact"):
         return val
     return "flag-only"
@@ -86,7 +86,7 @@ def get_warm_mode() -> str:
     - both (default): apply both. Best end-to-end latency.
     - off: do neither; pure on-demand (the pre-Wave-6 behavior).
     """
-    val = os.environ.get("PATCHIUM_WARM", "both").lower()
+    val = os.environ.get("VIBATCHIUM_WARM", "both").lower()
     if val not in {"eager", "opportunistic", "both", "off"}:
         return "both"
     return val
@@ -117,8 +117,8 @@ class SessionEntry:
     # content field gets `prompt_injection_risk` + `signals` metadata
     # without any content mutation. ~1ms per scraped paragraph; no
     # behavioral change for agents that don't read the metadata. To
-    # disable: `patchium safety set off` per session, or set the
-    # PATCHIUM_DEFAULT_SAFETY env var.
+    # disable: `vibatchium safety set off` per session, or set the
+    # VIBATCHIUM_DEFAULT_SAFETY env var.
     flags: dict = field(default_factory=lambda: {
         "safety_mode": _default_safety_mode(),
     })
@@ -131,15 +131,15 @@ class SessionEntry:
 
 
 class SessionLimitError(RuntimeError):
-    """Raised when PATCHIUM_MAX_SESSIONS would be exceeded."""
+    """Raised when VIBATCHIUM_MAX_SESSIONS would be exceeded."""
 
 
 class SessionRegistry:
     """Holds all live sessions; serializes registry mutations with `mutate_lock`.
 
     Per-session locks live ON the entry (`entry.lock`) so concurrent operations
-    on DIFFERENT sessions don't block each other — `patchium --session A click @e1`
-    and `patchium --session B fill @e2 hello` run truly in parallel.
+    on DIFFERENT sessions don't block each other — `vibatchium --session A click @e1`
+    and `vibatchium --session B fill @e2 hello` run truly in parallel.
 
     The `mutate_lock` only serializes session create/close/delete events.
     """
@@ -149,7 +149,7 @@ class SessionRegistry:
         self.mutate_lock = asyncio.Lock()
         # Wave 5: one Playwright driver subprocess shared across all sessions.
         # Spawned lazily on the first create/attach OR eagerly at daemon init
-        # if PATCHIUM_WARM in {eager,both}. Per-session driver subprocess would
+        # if VIBATCHIUM_WARM in {eager,both}. Per-session driver subprocess would
         # saturate fds on long-running daemons with frequent session churn.
         self._pw: Playwright | None = None
         # Wave 6.1b: opportunistic per-session pre-warm.
@@ -178,12 +178,12 @@ class SessionRegistry:
 
     async def warmup(self) -> None:
         """Eager Playwright driver pre-start. Called from daemon.run() at
-        startup if PATCHIUM_WARM ∈ {eager, both}. Fast — ~150ms — and
+        startup if VIBATCHIUM_WARM ∈ {eager, both}. Fast — ~150ms — and
         non-blocking by virtue of being awaited once before serving traffic."""
         mode = get_warm_mode()
         if mode in {"eager", "both"}:
             await self._ensure_pw()
-            log.info("pre-warmed Playwright driver (PATCHIUM_WARM=%s)", mode)
+            log.info("pre-warmed Playwright driver (VIBATCHIUM_WARM=%s)", mode)
 
     def schedule_prewarm(self, name: str, profile_dir: Path,
                           headless: bool = False) -> None:
@@ -202,13 +202,13 @@ class SessionRegistry:
             return  # already in-flight
         if name in self._entries:
             return  # already running for real
-        # Wave 7 fix: warm pre-spawns must count toward PATCHIUM_MAX_SESSIONS
+        # Wave 7 fix: warm pre-spawns must count toward VIBATCHIUM_MAX_SESSIONS
         # (each one is a real Chrome holding ~200-400 MB). The cap is enforced
         # in create() but opportunistic prewarms previously slipped past it.
         cap = get_max_sessions()
         in_flight = sum(1 for t in self._warm_tasks.values() if not t.done())
         if len(self._entries) + len(self._warm_sessions) + in_flight >= cap:
-            log.debug("skipping prewarm of %s — at PATCHIUM_MAX_SESSIONS=%d",
+            log.debug("skipping prewarm of %s — at VIBATCHIUM_MAX_SESSIONS=%d",
                       name, cap)
             return
 
@@ -318,31 +318,31 @@ class SessionRegistry:
           headless: opt out of headed mode (NOT recommended for stealth).
           stealth_mouse: layer CDP-Patches humanized input.
           backend: 'patchright' (default), 'nodriver', or 'auto'.
-                   nodriver requires `pip install patchium[nodriver]` and
+                   nodriver requires `pip install vibatchium[nodriver]` and
                    uses its hardened launch flags + Patchright connect_over_cdp.
 
         Raises:
-          SessionLimitError if PATCHIUM_MAX_SESSIONS would be exceeded.
+          SessionLimitError if VIBATCHIUM_MAX_SESSIONS would be exceeded.
           RuntimeError if a session with this name is already running.
         """
         if name in self._entries:
             raise RuntimeError(
                 f"session {name!r} already running — "
-                f"use `patchium --session {name} stop` first"
+                f"use `vibatchium --session {name} stop` first"
             )
         cap = get_max_sessions()
         if len(self._entries) >= cap:
             raise SessionLimitError(
-                f"PATCHIUM_MAX_SESSIONS={cap} reached "
+                f"VIBATCHIUM_MAX_SESSIONS={cap} reached "
                 f"({len(self._entries)} sessions running). "
-                f"Close one with `patchium session close <name>` or raise the cap."
+                f"Close one with `vibatchium session close <name>` or raise the cap."
             )
         pdir = profile_dir if profile_dir is not None else session_dir(name)
         pdir.mkdir(parents=True, exist_ok=True)
         pw = await self._ensure_pw()
         from . import backends as _backends
         # Wave 6.2a: resolve persisted per-session proxy (if any). A proxy
-        # configured via `patchium proxy set` lives in <profile_dir>/proxy.json.
+        # configured via `vibatchium proxy set` lives in <profile_dir>/proxy.json.
         from ..proxy import load_session_proxy, parse as _parse_proxy
         proxy_cfg = None
         proxy_url = load_session_proxy(pdir)
@@ -418,7 +418,7 @@ class SessionRegistry:
             raise RuntimeError(f"session {name!r} already attached")
         cap = get_max_sessions()
         if len(self._entries) >= cap:
-            raise SessionLimitError(f"PATCHIUM_MAX_SESSIONS={cap} reached")
+            raise SessionLimitError(f"VIBATCHIUM_MAX_SESSIONS={cap} reached")
         pw = await self._ensure_pw()
         sess = await attach_session(cdp_url, pw=pw)
         entry = SessionEntry(name=name, profile_dir=session_dir(name), session=sess)
@@ -432,7 +432,7 @@ class SessionRegistry:
         Returns True if the session was running and is now closed.
         Idempotent — closing an absent session returns False without error.
 
-        Wave 7.7.3: when PATCHIUM_WARM_RECYCLE=1, also re-prewarm this
+        Wave 7.7.3: when VIBATCHIUM_WARM_RECYCLE=1, also re-prewarm this
         session's profile in the background after teardown so a
         subsequent `start` with the same name finds it warm. Helps the
         "sequential sessions under the same name" workflow (competitor
@@ -458,7 +458,7 @@ class SessionRegistry:
             log.warning("close_session(%s) failed: %s", name, exc)
         log.info("session closed name=%s", name)
         # Wave 7.7.3 warm recycle
-        recycle = os.environ.get("PATCHIUM_WARM_RECYCLE", "0").lower() in (
+        recycle = os.environ.get("VIBATCHIUM_WARM_RECYCLE", "0").lower() in (
             "1", "true", "yes", "on"
         )
         if recycle and get_warm_mode() in {"opportunistic", "both"}:

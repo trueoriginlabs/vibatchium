@@ -13,7 +13,7 @@ from patchright.async_api import (
     async_playwright,
 )
 
-log = logging.getLogger("patchium.browser")
+log = logging.getLogger("vibatchium.browser")
 
 
 @dataclass
@@ -129,10 +129,10 @@ async def launch_session(profile_dir: Path, headless: bool = False,
     # infobar — readable in every screenshot and obviously bot-shaped —
     # and (b) is a strong fingerprint signal that real users rarely show.
     # On any working Linux user-namespace setup the sandbox runs fine; only
-    # disable as an explicit opt-out via PATCHIUM_DISABLE_SANDBOX=1 (Docker
+    # disable as an explicit opt-out via VIBATCHIUM_DISABLE_SANDBOX=1 (Docker
     # images / restricted environments).
     ignore_default_args = None
-    if os.environ.get("PATCHIUM_DISABLE_SANDBOX", "0") not in ("1", "true", "yes"):
+    if os.environ.get("VIBATCHIUM_DISABLE_SANDBOX", "0") not in ("1", "true", "yes"):
         ignore_default_args = ["--no-sandbox"]
     launch_kwargs = {
         "user_data_dir": str(profile_dir),

@@ -7,7 +7,7 @@ Verifies:
 - session_list reports running + on-disk state
 - session_close stops Chrome but preserves profile dir
 - Per-session lock — concurrent verbs on different sessions don't serialize
-- PATCHIUM_SESSION env var resolves the right session
+- VIBATCHIUM_SESSION env var resolves the right session
 - session_delete refuses to remove a running or active session
 - profile_* legacy verbs still work (1:1 alias)
 """
@@ -20,8 +20,8 @@ import threading
 
 import pytest
 
-from patchium.client import call, DaemonError
-from patchium.daemon.paths import PROFILES_DIR, get_active_session_name
+from vibatchium.client import call, DaemonError
+from vibatchium.daemon.paths import PROFILES_DIR, get_active_session_name
 
 
 # ─── helpers ──────────────────────────────────────────────────────────────
@@ -54,7 +54,7 @@ def test_default_session_active_after_conftest_start():
 
 def test_session_new_creates_dir_without_launching():
     """session_new makes the on-disk dir; Chrome is NOT launched until `start`."""
-    name = "patchium_test_w5_new"
+    name = "vibatchium_test_w5_new"
     _ensure_clean(name)
     res = call("session_new", {"name": name})
     assert res["created"] is True
@@ -68,7 +68,7 @@ def test_session_new_creates_dir_without_launching():
 
 
 def test_session_new_idempotent():
-    name = "patchium_test_w5_idem"
+    name = "vibatchium_test_w5_idem"
     _ensure_clean(name)
     a = call("session_new", {"name": name})
     b = call("session_new", {"name": name})
@@ -87,7 +87,7 @@ def test_session_list_shows_default_running():
 
 def test_two_parallel_sessions_isolate_cookies(local_server):
     """Run two sessions in parallel; cookies in one don't leak to the other."""
-    name_a, name_b = "patchium_test_w5_a", "patchium_test_w5_b"
+    name_a, name_b = "vibatchium_test_w5_a", "vibatchium_test_w5_b"
     _ensure_clean(name_a)
     _ensure_clean(name_b)
     # Spin up both sessions (the daemon already runs 'default')
@@ -129,8 +129,8 @@ def test_two_parallel_sessions_isolate_cookies(local_server):
 
 def test_per_session_lock_does_not_serialize_across_sessions(local_server):
     """A long-running op (sleep) on session A must not block a verb on session B."""
-    name_a = "patchium_test_w5_lock_a"
-    name_b = "patchium_test_w5_lock_b"
+    name_a = "vibatchium_test_w5_lock_a"
+    name_b = "vibatchium_test_w5_lock_b"
     _ensure_clean(name_a)
     _ensure_clean(name_b)
     call("session_new", {"name": name_a})
@@ -175,23 +175,23 @@ def test_per_session_lock_does_not_serialize_across_sessions(local_server):
 
 
 def test_session_via_env_var(local_server):
-    """PATCHIUM_SESSION env var routes calls without the `session=` kwarg."""
-    name = "patchium_test_w5_env"
+    """VIBATCHIUM_SESSION env var routes calls without the `session=` kwarg."""
+    name = "vibatchium_test_w5_env"
     _ensure_clean(name)
     call("session_new", {"name": name})
     call("start", {"headless": True}, session=name)
     try:
-        prior = os.environ.get("PATCHIUM_SESSION")
-        os.environ["PATCHIUM_SESSION"] = name
+        prior = os.environ.get("VIBATCHIUM_SESSION")
+        os.environ["VIBATCHIUM_SESSION"] = name
         try:
             res = call("status")
             assert res["session"] == name
             assert res["running"] is True
         finally:
             if prior is None:
-                os.environ.pop("PATCHIUM_SESSION", None)
+                os.environ.pop("VIBATCHIUM_SESSION", None)
             else:
-                os.environ["PATCHIUM_SESSION"] = prior
+                os.environ["VIBATCHIUM_SESSION"] = prior
     finally:
         call("session_close", {"name": name})
         call("session_delete", {"name": name})
@@ -212,7 +212,7 @@ def test_session_delete_refuses_default():
 
 def test_session_close_then_reopen_preserves_cookies(local_server):
     """The whole point: close session, reopen, cookies/storage still there."""
-    name = "patchium_test_w5_persist"
+    name = "vibatchium_test_w5_persist"
     _ensure_clean(name)
     call("session_new", {"name": name})
     call("start", {"headless": True}, session=name)
@@ -235,7 +235,7 @@ def test_session_close_then_reopen_preserves_cookies(local_server):
 
 def test_profile_legacy_aliases_still_work():
     """profile_list / profile_new / profile_delete remain functional aliases."""
-    name = "patchium_test_w5_legacy"
+    name = "vibatchium_test_w5_legacy"
     _ensure_clean(name)
     res = call("profile_new", {"name": name})
     assert res["created"] is True or res.get("exists")

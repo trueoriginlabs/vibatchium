@@ -7,13 +7,13 @@ Protocol: one JSON line per direction.
 
 Multi-session (Wave 5+): requests may include `"args": {"_session": "<name>"}`
 to address a specific session. Without the field, the request hits the active
-session (`~/.config/patchium/active-session` → 'default'). The daemon holds
+session (`~/.config/vibatchium/active-session` → 'default'). The daemon holds
 multiple BrowserSessions concurrently via SessionRegistry, with per-session
 locks so verbs on DIFFERENT sessions don't serialize.
 
 Each session runs in its own Chrome process (separate `launch_persistent_context`)
 giving real fingerprint isolation — independent TLS/GPU/audio, independent
-ephemeral ports. ~200-400 MB RAM per session; cap via PATCHIUM_MAX_SESSIONS.
+ephemeral ports. ~200-400 MB RAM per session; cap via VIBATCHIUM_MAX_SESSIONS.
 
 Clients (CLI, MCP server) connect, send one request, read one response, close.
 Sessions are long-lived across many such connections.
@@ -34,7 +34,7 @@ from . import handlers, handlers_extra
 from .paths import DEFAULT_SESSION_NAME, LOG_PATH, PID_PATH, SOCK_PATH, get_active_session_name
 from .registry import SessionEntry, SessionRegistry, current_session_ctx
 
-log = logging.getLogger("patchium.server")
+log = logging.getLogger("vibatchium.server")
 
 
 # Wave 7.5e: fields that must be redacted from per-verb DEBUG logs.
@@ -126,10 +126,10 @@ class Daemon:
         self._stopping = asyncio.Event()
         # Wave 7.6: daemon-level flags (runtime-mutable). `log_verbs` controls
         # per-verb DEBUG logging; initial value from env so existing scripts
-        # that set PATCHIUM_LOG_VERBS=1 keep working without a daemon restart
+        # that set VIBATCHIUM_LOG_VERBS=1 keep working without a daemon restart
         # being needed to change it.
         self.flags: dict[str, Any] = {
-            "log_verbs": os.environ.get("PATCHIUM_LOG_VERBS", "0") in ("1", "true", "yes"),
+            "log_verbs": os.environ.get("VIBATCHIUM_LOG_VERBS", "0") in ("1", "true", "yes"),
         }
         handlers.register_all(self)
         handlers_extra.register_extra(self)
@@ -267,7 +267,7 @@ class Daemon:
                         return {
                             "id": req_id, "ok": False,
                             "error": f"no session {session_name!r} — "
-                                     f"run `patchium start"
+                                     f"run `vibatchium start"
                                      f"{' --session ' + session_name if session_name != DEFAULT_SESSION_NAME else ''}` first",
                         }
                 else:
@@ -320,7 +320,7 @@ class Daemon:
                 _, w = await asyncio.open_unix_connection(str(SOCK_PATH))
                 w.close()
                 await w.wait_closed()
-                print(f"[patchium] daemon already running at {SOCK_PATH}", file=sys.stderr)
+                print(f"[vibatchium] daemon already running at {SOCK_PATH}", file=sys.stderr)
                 sys.exit(2)
             except (OSError, ConnectionRefusedError):
                 SOCK_PATH.unlink(missing_ok=True)
@@ -371,10 +371,10 @@ class Daemon:
 
 
 def main() -> None:
-    # Wave 7.5e: level controlled by PATCHIUM_LOG_LEVEL (default INFO).
-    # Setting it to DEBUG together with PATCHIUM_LOG_VERBS=1 produces a
+    # Wave 7.5e: level controlled by VIBATCHIUM_LOG_LEVEL (default INFO).
+    # Setting it to DEBUG together with VIBATCHIUM_LOG_VERBS=1 produces a
     # full audit trail of every verb dispatched.
-    level_name = os.environ.get("PATCHIUM_LOG_LEVEL", "INFO").upper()
+    level_name = os.environ.get("VIBATCHIUM_LOG_LEVEL", "INFO").upper()
     level = getattr(logging, level_name, logging.INFO)
     logging.basicConfig(
         filename=str(LOG_PATH),

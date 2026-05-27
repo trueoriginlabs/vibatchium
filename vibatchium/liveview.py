@@ -33,7 +33,7 @@ import logging
 from collections import defaultdict
 from typing import TYPE_CHECKING
 
-log = logging.getLogger("patchium.liveview")
+log = logging.getLogger("vibatchium.liveview")
 
 if TYPE_CHECKING:
     from .daemon.registry import SessionRegistry
@@ -47,7 +47,7 @@ INDEX_HTML = """<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>patchium — live-view</title>
+<title>vibatchium — live-view</title>
 <style>
   body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
          background: #0a0a0a; color: #e0e0e0; margin: 0; padding: 32px; }
@@ -64,7 +64,7 @@ INDEX_HTML = """<!doctype html>
 </style>
 </head>
 <body>
-<h1>patchium <span class="meta">live-view</span></h1>
+<h1>vibatchium <span class="meta">live-view</span></h1>
 <p class="meta">Running sessions (auto-refresh every 5s):</p>
 <ul id="sessions"></ul>
 <script>
@@ -73,7 +73,7 @@ async function refresh() {
   const data = await r.json();
   const ul = document.getElementById('sessions');
   if (data.sessions.length === 0) {
-    ul.innerHTML = '<li class="empty">no sessions running — try `patchium session new foo && patchium --session foo start`</li>';
+    ul.innerHTML = '<li class="empty">no sessions running — try `vibatchium session new foo && vibatchium --session foo start`</li>';
     return;
   }
   ul.innerHTML = data.sessions.map(s =>
@@ -91,7 +91,7 @@ VIEWER_HTML = """<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>patchium — {name}</title>
+<title>vibatchium — {name}</title>
 <style>
   body {{ margin: 0; background: #000; overflow: hidden;
           font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }}
@@ -252,7 +252,7 @@ class LiveViewServer:
             from aiohttp import web
         except ImportError as exc:
             raise RuntimeError(
-                "live-view requires `pip install patchium[liveview]` "
+                "live-view requires `pip install vibatchium[liveview]` "
                 f"(import error: {exc})"
             ) from exc
 

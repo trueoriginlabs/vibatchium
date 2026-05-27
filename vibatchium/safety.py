@@ -240,7 +240,7 @@ PATTERNS: list[tuple[re.Pattern, str, str]] = [
 
 def extract_hidden_text(html: str) -> dict:
     """Pull text that would NOT render to a human but a DOM-traversing
-    agent (text/html extraction in patchium's case) would still see.
+    agent (text/html extraction in vibatchium's case) would still see.
 
     Vectors covered:
       - HTML comments (<!-- ... -->)

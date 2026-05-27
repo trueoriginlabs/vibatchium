@@ -1,27 +1,27 @@
-# patchium
+# vibatchium
 
 **Agent-piloted browser automation that clears Cloudflare.**
 Patched Playwright + multi-session daemon + credential vault + vision clicking + prompt-injection safety. One MCP server, N parallel Chromes, persistent per-session profiles.
 
 ```
-pipx install git+https://github.com/monodev-eth/patchium
+pipx install git+https://github.com/trueoriginlabs/vibatchium
 patchright install chrome
-patchium setup        # auto-register with Codex / Claude Code / Cursor (idempotent)
+vb setup        # auto-register with Codex / Claude Code / Cursor (idempotent)
 ```
 
 > **Coding agents (Codex / Cursor / Claude Code):** read [`AGENTS.md`](AGENTS.md) first — it has the one-call recipes (`explore`, `research`) and the env-discovery traps to skip.
 
 ```
-patchium explore https://example.com                      # one-call: text + screenshot
-patchium research --target https://example.com \          # parallel fan-out, N intents
+vb explore https://example.com                      # one-call: text + screenshot
+vb research --target https://example.com \          # parallel fan-out, N intents
   --intent "pricing model" --intent "customers" --intent "tech stack"
 ```
 
 **Status:** active development, alpha. PyPI version lags — install from source / git URL. 384 tests green. 31/31 on bot.sannysoft.com. Cleared HackerOne Cloudflare cold-launch. Apache-2.0 (GPL/AGPL only via opt-in extras).
 
-## Why patchium
+## Why vibatchium
 
-|  | Vibium | Patchwright | Browser-Use | patchium |
+|  | Vibium | Patchwright | Browser-Use | vibatchium |
 |---|---|---|---|---|
 | LLM-friendly `@eN` refs + `map` / `diff map` | ✅ | ❌ | ❌ | ✅ |
 | Cloudflare CDP-leak patches | ❌ | ✅ | ❌ | ✅ |
@@ -40,19 +40,19 @@ patchium research --target https://example.com \          # parallel fan-out, N 
 ## Multi-session in 10 lines
 
 ```
-patchium session new work
-patchium --session work start
-patchium --session work go https://github.com           # log in by hand once
-patchium session new banking
-patchium --session banking start
-patchium --session banking go https://bank.example.com
-patchium --session work click @e3 &                     # truly parallel —
-patchium --session banking fill @e5 hi &                # separate Chromes, no cookie bleed
+vb session new work
+vb --session work start
+vb --session work go https://github.com           # log in by hand once
+vb session new banking
+vb --session banking start
+vb --session banking go https://bank.example.com
+vb --session work click @e3 &                     # truly parallel —
+vb --session banking fill @e5 hi &                # separate Chromes, no cookie bleed
 wait
-patchium session list
+vb session list
 ```
 
-Active-session resolution: `--session FLAG` → `$PATCHIUM_SESSION` env → `~/.config/patchium/active-session` → `default`. Cap via `PATCHIUM_MAX_SESSIONS=4` (default 4).
+Active-session resolution: `--session FLAG` → `$VIBATCHIUM_SESSION` env → `~/.config/vibatchium/active-session` → `default`. Cap via `VIBATCHIUM_MAX_SESSIONS=4` (default 4).
 
 ## Documentation
 
@@ -65,10 +65,10 @@ Active-session resolution: `--session FLAG` → `$PATCHIUM_SESSION` env → `~/.
 
 | Mode | Surface | Auth |
 |---|---|---|
-| `patchium mcp` | stdio JSON-RPC; `--caps=...` gates the bucket set | n/a (stdio) |
-| `patchium serve` | FastAPI on `127.0.0.1:8000`; every verb at `POST /v1/<verb>`; WebSocket live-view at `/v1/stream/<session>` | bearer token (`~/.cache/patchium/rest-token`, mode 0600) |
+| `vb mcp` | stdio JSON-RPC; `--caps=...` gates the bucket set | n/a (stdio) |
+| `vb serve` | FastAPI on `127.0.0.1:8000`; every verb at `POST /v1/<verb>`; WebSocket live-view at `/v1/stream/<session>` | bearer token (`~/.cache/vibatchium/rest-token`, mode 0600) |
 
-**REST capability gating**: `patchium serve --caps=core,nav,input,vision` restricts the HTTP surface the same way `mcp --caps` does. Without it, REST grants local-code-equivalent access (eval + secret_* + file-writing verbs all exposed) — safe for localhost dev, **not** for hosted/multi-tenant.
+**REST capability gating**: `vb serve --caps=core,nav,input,vision` restricts the HTTP surface the same way `mcp --caps` does. Without it, REST grants local-code-equivalent access (eval + secret_* + file-writing verbs all exposed) — safe for localhost dev, **not** for hosted/multi-tenant.
 
 ## Attach mode — the practical Cloudflare workaround
 
@@ -77,21 +77,21 @@ For DataDome / Kasada / hardened auth that walls cold-launch automation:
 ```
 google-chrome --remote-debugging-port=9222 --user-data-dir=/tmp/cdp-profile &
 # log into the walled site by hand
-patchium attach http://localhost:9222
-patchium go https://target.example.com        # now reads as your real browser
+vb attach http://localhost:9222
+vb go https://target.example.com        # now reads as your real browser
 ```
 
 Patchright's CDP-layer stealth still applies over `connect_over_cdp` — attach mode gets the same protocol-level patches as cold launch, plus your real-browser fingerprint and any cookies from the manual login.
 
 ## Security model
 
-Credentials never appear in logs, HAR captures, observe cache, or agent-visible response fields (grep-tested in CI). Vault uses XSalsa20-Poly1305 with key from OS keyring or `PATCHIUM_SECRETS_KEY`. All patchium-written files are 0600; directories 0700.
+Credentials never appear in logs, HAR captures, observe cache, or agent-visible response fields (grep-tested in CI). Vault uses XSalsa20-Poly1305 with key from OS keyring or `VIBATCHIUM_SECRETS_KEY`. All vibatchium-written files are 0600; directories 0700.
 
 For the REST shim: without `--caps`, the bearer token grants every verb including `eval`, `secret_*`, and file-writing verbs. Local-code-equivalent — always pass `--caps=...` for hosted-mode. Live-view binds 127.0.0.1 only by default (`--insecure-public` to override).
 
 ## Honest limits
 
-- **5+ concurrent sessions = 1-2GB RAM.** Each persistent-context Chrome is ~200-400MB. Bump cap with `PATCHIUM_MAX_SESSIONS=8`.
+- **5+ concurrent sessions = 1-2GB RAM.** Each persistent-context Chrome is ~200-400MB. Bump cap with `VIBATCHIUM_MAX_SESSIONS=8`.
 - **Vision spend cap is process-wide.** N fan-out agents share one daily/lifetime budget.
 - **Init scripts don't work on patchright backend.** `chrome.runtime` stays `undefined` — accepted trade for stealth wins ([details](docs/STEALTH.md)).
 - **Login walls (X, LinkedIn) require attach mode.** Cold-launch fan-out can't defeat sites requiring authenticated sessions.

@@ -50,11 +50,11 @@ def spawn_daemon(wait: float = 5.0) -> None:
 
     Uses subprocess.Popen with start_new_session=True instead of double-fork
     so we don't leak fds, signal handlers, or asyncio loop state from the
-    calling process into the daemon. Safer when patchium is invoked from
+    calling process into the daemon. Safer when vibatchium is invoked from
     long-lived hosts (Claude Code, an MCP shell, a notebook).
     """
     proc = subprocess.Popen(
-        [sys.executable, "-m", "patchium.daemon.server"],
+        [sys.executable, "-m", "vibatchium.daemon.server"],
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -91,11 +91,11 @@ def call(cmd: str, args: dict[str, Any] | None = None, *,
         spawn_daemon()
 
     payload_args = dict(args or {})
-    # Resolution: explicit kwarg → PATCHIUM_SESSION env → (omitted; daemon uses
+    # Resolution: explicit kwarg → VIBATCHIUM_SESSION env → (omitted; daemon uses
     # active-session file → 'default'). This mirrors `kubectl --context` /
     # KUBECONFIG semantics.
     if session is None:
-        session = os.environ.get("PATCHIUM_SESSION") or None
+        session = os.environ.get("VIBATCHIUM_SESSION") or None
     if session:
         payload_args["_session"] = session
 

@@ -14,7 +14,7 @@ import sys
 
 import pytest
 
-from patchium.client import call
+from vibatchium.client import call
 
 
 # ─── verify_url ──────────────────────────────────────────────────────────
@@ -96,7 +96,7 @@ def test_set_log_verbs_accepts_strings_and_bools(on_value, expected):
 def test_set_log_verbs_actually_logs_when_on(local_server):
     """When log_verbs is on, dispatching a verb should write a DEBUG line
     to the daemon log with redacted args."""
-    from patchium.daemon.paths import LOG_PATH
+    from vibatchium.daemon.paths import LOG_PATH
     # Read current log size as a baseline so we only diff what's new.
     baseline = LOG_PATH.stat().st_size if LOG_PATH.exists() else 0
     call("set_log_verbs", {"on": True})
@@ -110,7 +110,7 @@ def test_set_log_verbs_actually_logs_when_on(local_server):
     # If the daemon's log level is at INFO (default), DEBUG lines won't
     # appear in the file. Either way the flag should have been set + reset
     # cleanly without raising, which is the contract we're testing here.
-    # The file-level "DEBUG line appears" check needs PATCHIUM_LOG_LEVEL=DEBUG
+    # The file-level "DEBUG line appears" check needs VIBATCHIUM_LOG_LEVEL=DEBUG
     # at daemon startup, which conftest doesn't do.
     after = LOG_PATH.stat().st_size if LOG_PATH.exists() else 0
     # At minimum the log_verbs toggle itself produced two INFO lines:
@@ -123,7 +123,7 @@ def test_set_log_verbs_actually_logs_when_on(local_server):
 def test_research_cli_help_lists_options():
     """The new command is wired into the cli group and prints help."""
     out = subprocess.run(
-        [sys.executable, "-m", "patchium.cli", "research", "--help"],
+        [sys.executable, "-m", "vibatchium.cli", "research", "--help"],
         capture_output=True, text=True, timeout=10,
     )
     assert out.returncode == 0, out.stderr
@@ -139,7 +139,7 @@ def test_research_cli_two_threads_against_local_server(local_server, tmp_path):
     list both. Verifies the orchestration + the artifact contract."""
     out_dir = tmp_path / "research-out"
     result = subprocess.run(
-        [sys.executable, "-m", "patchium.cli", "--json",
+        [sys.executable, "-m", "vibatchium.cli", "--json",
          "research",
          "--target", local_server + "/simple.html",
          "--intent", "find the main heading",
@@ -180,7 +180,7 @@ def test_research_cli_aborts_on_bad_target_url(tmp_path):
     import time
     t0 = time.time()
     result = subprocess.run(
-        [sys.executable, "-m", "patchium.cli",
+        [sys.executable, "-m", "vibatchium.cli",
          "research",
          "--target", "https://does-not-exist-zzz123456.invalid/",
          "--intent", "fail fast",

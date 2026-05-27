@@ -1,6 +1,6 @@
 """Tests for Wave 3 P1 additions: route, wait_response, dismiss_banners."""
 
-from patchium.client import call
+from vibatchium.client import call
 
 
 def test_route_abort_blocks_request(local_server):

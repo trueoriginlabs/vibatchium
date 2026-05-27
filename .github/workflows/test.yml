@@ -28,7 +28,7 @@ jobs:
             libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 \
             libgbm1 libxss1 libasound2t64 || sudo apt-get install -yq libasound2
 
-      - name: Install patchium + extras
+      - name: Install vibatchium + extras
         run: |
           python -m pip install -U pip
           # [all] = annotate + llm + liveview + secrets + rest. Required so
@@ -57,7 +57,7 @@ jobs:
              echo "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}";
              sleep 0.2;
              echo "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}";
-             sleep 1) | timeout 10 patchium mcp | python -c "
+             sleep 1) | timeout 10 vb mcp | python -c "
             import json, sys
             for line in sys.stdin:
                 try:
@@ -78,4 +78,4 @@ jobs:
       - uses: actions/setup-python@v5
         with: { python-version: "3.13" }
       - run: pip install ruff
-      - run: ruff check patchium/ tests/
+      - run: ruff check vibatchium/ tests/

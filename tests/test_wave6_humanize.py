@@ -13,8 +13,8 @@ from __future__ import annotations
 import statistics
 
 
-from patchium.client import call
-from patchium.humanize import (
+from vibatchium.client import call
+from vibatchium.humanize import (
     humanized_path, path_curviness, sample_dwell_ms, sinusoidal_scroll,
 )
 

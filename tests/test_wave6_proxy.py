@@ -21,9 +21,9 @@ import tempfile
 
 import pytest
 
-from patchium.client import call, DaemonError
-from patchium.daemon.paths import PROFILES_DIR
-from patchium.proxy import (
+from vibatchium.client import call, DaemonError
+from vibatchium.daemon.paths import PROFILES_DIR
+from vibatchium.proxy import (
     ProxyParseError, parse, list_providers, load_proxy_file, save_session_proxy,
     load_session_proxy, webrtc_leak_guard_args,
 )
@@ -170,7 +170,7 @@ def test_webrtc_leak_guard_args_has_correct_flags():
 def test_proxy_set_clear_lifecycle():
     """Set a proxy on default session, verify persistence + clear."""
     # Use a fake session so we don't pollute the conftest default
-    name = "patchium_test_w6_proxy"
+    name = "vibatchium_test_w6_proxy"
     _ensure_clean(name)
     call("session_new", {"name": name})
     try:
@@ -196,7 +196,7 @@ def test_proxy_set_clear_lifecycle():
 
 
 def test_proxy_set_rejects_bad_url():
-    name = "patchium_test_w6_proxy_bad"
+    name = "vibatchium_test_w6_proxy_bad"
     _ensure_clean(name)
     call("session_new", {"name": name})
     try:
@@ -208,7 +208,7 @@ def test_proxy_set_rejects_bad_url():
 
 def test_proxy_set_from_path():
     """proxy_set --path reads from a 0600 file."""
-    name = "patchium_test_w6_proxy_file"
+    name = "vibatchium_test_w6_proxy_file"
     _ensure_clean(name)
     call("session_new", {"name": name})
     with tempfile.NamedTemporaryFile(mode="w", delete=False) as f:
@@ -226,7 +226,7 @@ def test_proxy_set_from_path():
 
 
 def test_proxy_info_when_not_configured():
-    name = "patchium_test_w6_proxy_empty"
+    name = "vibatchium_test_w6_proxy_empty"
     _ensure_clean(name)
     call("session_new", {"name": name})
     try:
@@ -239,7 +239,7 @@ def test_proxy_info_when_not_configured():
 
 def test_proxy_url_persists_across_close_open(local_server):
     """Set proxy → close session → reopen → proxy still set."""
-    name = "patchium_test_w6_proxy_persist"
+    name = "vibatchium_test_w6_proxy_persist"
     _ensure_clean(name)
     call("session_new", {"name": name})
     try:

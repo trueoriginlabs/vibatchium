@@ -1,4 +1,4 @@
-"""Patchium daemon — long-lived browser process exposing JSON-RPC over Unix socket."""
+"""Vibatchium daemon — long-lived browser process exposing JSON-RPC over Unix socket."""
 from .paths import (
     ACTIVE_PROFILE_PATH, ACTIVE_SESSION_PATH,
     CACHE_DIR, CONFIG_DIR,

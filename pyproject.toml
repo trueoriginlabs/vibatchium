@@ -3,8 +3,8 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "patchium"
-version = "0.4.0"
+name = "vibatchium"
+version = "0.5.0"
 description = "Patchwright stealth + Vibium-style LLM-friendly CLI for agentic browser automation."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -62,12 +62,12 @@ all = [
 dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "pytest-timeout>=2.3", "ruff>=0.6.0"]
 
 [project.scripts]
-patchium = "patchium.cli:main"
+vb = "vibatchium.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/trueoriginlabs/patchium"
-Issues = "https://github.com/trueoriginlabs/patchium/issues"
-Source = "https://github.com/trueoriginlabs/patchium"
+Homepage = "https://github.com/trueoriginlabs/vibatchium"
+Issues = "https://github.com/trueoriginlabs/vibatchium/issues"
+Source = "https://github.com/trueoriginlabs/vibatchium"
 
 [tool.hatch.metadata]
 # Required because the optional `stealth-mouse` extra references CDP-Patches
@@ -76,11 +76,11 @@ Source = "https://github.com/trueoriginlabs/patchium"
 allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
-packages = ["patchium"]
+packages = ["vibatchium"]
 
 [tool.hatch.build.targets.sdist]
 include = [
-    "/patchium",
+    "/vibatchium",
     "/README.md",
     "/LICENSE",
     "/pyproject.toml",

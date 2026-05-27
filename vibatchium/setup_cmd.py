@@ -1,11 +1,11 @@
-"""`patchium setup` — wire patchium into agent CLIs (Codex, Claude Code, Cursor).
+"""`vibatchium setup` — wire vibatchium into agent CLIs (Codex, Claude Code, Cursor).
 
-Detects which agent tools are installed and registers patchium as an MCP server
-+ writes a small global instructions block pointing at the patchium binary.
+Detects which agent tools are installed and registers vibatchium as an MCP server
++ writes a small global instructions block pointing at the vibatchium binary.
 Idempotent: re-running won't duplicate config.
 
 Prior art: agentic-qa skill distributes via cloning a repo into agent skills
-dirs. Patchium takes a CLI-driven approach so users run one command instead of
+dirs. Vibatchium takes a CLI-driven approach so users run one command instead of
 cloning per agent.
 """
 from __future__ import annotations
@@ -21,33 +21,33 @@ from pathlib import Path
 
 # Idempotent block written into ~/.codex/AGENTS.md and ~/.claude/CLAUDE.md.
 # Re-running setup replaces between markers without duplicating.
-_BLOCK_BEGIN = "<!-- patchium-setup-begin -->"
-_BLOCK_END = "<!-- patchium-setup-end -->"
+_BLOCK_BEGIN = "<!-- vibatchium-setup-begin -->"
+_BLOCK_END = "<!-- vibatchium-setup-end -->"
 
 _DOC_BLOCK_TEMPLATE = """{begin}
-## patchium — agentic browser on $PATH
+## vibatchium — agentic browser on $PATH
 
-`patchium` is installed at `{binary}` (also on $PATH as `patchium`). When the
+`vibatchium` is installed at `{binary}` (also on $PATH as `vibatchium`). When the
 user mentions browse / scrape / research / login on a website, shell out:
 
 ```bash
-patchium explore <url>        # one-call: text + screenshot, auto-closes
-patchium research \\
+vibatchium explore <url>        # one-call: text + screenshot, auto-closes
+vibatchium research \\
   --target <url> \\
   --intent "..." --intent "..."
                               # parallel fan-out, writes per-intent markdown
-patchium verify_url --url <url>
+vibatchium verify_url --url <url>
                               # ~50ms DNS pre-check (skip dead URLs)
 ```
 
-Use WebSearch / WebFetch for Google / news / plain HTML. Use patchium for
+Use WebSearch / WebFetch for Google / news / plain HTML. Use vibatchium for
 walled (Cloudflare, Datadome), SPAs, multi-step interactive flows, login.
 
-DO NOT `pip install patchium` (Debian/Ubuntu blocks it via PEP 668) — already
-installed. DO NOT call `python -m patchium.cli` — binary is on $PATH.
+DO NOT `pip install vibatchium` (Debian/Ubuntu blocks it via PEP 668) — already
+installed. DO NOT call `python -m vibatchium.cli` — binary is on $PATH.
 
-Deep docs in the patchium repo: `AGENTS.md`, `docs/OPERATIONS.md`,
-`docs/CAPABILITIES.md`. Run `patchium --help` for the full surface.
+Deep docs in the vibatchium repo: `AGENTS.md`, `docs/OPERATIONS.md`,
+`docs/CAPABILITIES.md`. Run `vibatchium --help` for the full surface.
 {end}
 """
 
@@ -96,22 +96,22 @@ def detect_cursor() -> AgentInfo:
 
 # ─── utilities ──────────────────────────────────────────────────────────
 
-def resolve_patchium_binary() -> str:
-    """Best-effort path to the patchium binary the user will run.
+def resolve_vibatchium_binary() -> str:
+    """Best-effort path to the vibatchium binary the user will run.
 
-    Prefers `which patchium` (PATH-installed), falls back to sys.executable
-    -based path so the setup still works when run via `python -m patchium.cli`.
+    Prefers `which vibatchium` (PATH-installed), falls back to sys.executable
+    -based path so the setup still works when run via `python -m vibatchium.cli`.
     """
-    p = shutil.which("patchium")
+    p = shutil.which("vibatchium")
     if p:
         return p
-    # Running as `python -m patchium.cli`: derive from sys.executable
+    # Running as `python -m vibatchium.cli`: derive from sys.executable
     parent = Path(sys.executable).parent
-    candidate = parent / "patchium"
+    candidate = parent / "vibatchium"
     if candidate.exists():
         return str(candidate)
     # Last resort: bare name (PATH lookup at exec time)
-    return "patchium"
+    return "vibatchium"
 
 
 def ensure_md_block(path: Path, block: str, dry_run: bool = False) -> str:
@@ -170,13 +170,13 @@ def setup_codex(binary: str, dry_run: bool = False,
     res = SetupResult("codex")
     cli = shutil.which("codex")
     if cli:
-        if _mcp_already_registered("codex", "patchium"):
+        if _mcp_already_registered("codex", "vibatchium"):
             res.mcp = "already"
         elif dry_run:
             res.mcp = "would-register"
         else:
             try:
-                subprocess.run([cli, "mcp", "add", "patchium", "--", binary, "mcp"],
+                subprocess.run([cli, "mcp", "add", "vibatchium", "--", binary, "mcp"],
                               capture_output=True, check=True, text=True, timeout=20)
                 res.mcp = "registered"
             except subprocess.CalledProcessError as e:
@@ -199,14 +199,14 @@ def setup_claude(binary: str, dry_run: bool = False,
     res = SetupResult("claude")
     cli = shutil.which("claude")
     if cli:
-        if _mcp_already_registered("claude", "patchium"):
+        if _mcp_already_registered("claude", "vibatchium"):
             res.mcp = "already"
         elif dry_run:
             res.mcp = "would-register"
         else:
             try:
                 subprocess.run([cli, "mcp", "add", "--scope", "user",
-                              "patchium", binary, "mcp"],
+                              "vibatchium", binary, "mcp"],
                               capture_output=True, check=True, text=True, timeout=20)
                 res.mcp = "registered"
             except subprocess.CalledProcessError as e:
@@ -238,13 +238,13 @@ def setup_cursor(binary: str, dry_run: bool = False,
             res.notes.append("~/.cursor/mcp.json is not valid JSON; refusing to overwrite")
             return res
     servers = existing.setdefault("mcpServers", {})
-    if servers.get("patchium", {}).get("command") == binary:
+    if servers.get("vibatchium", {}).get("command") == binary:
         res.mcp = "already"
     else:
         if dry_run:
             res.mcp = "would-register"
         else:
-            servers["patchium"] = {"command": binary, "args": ["mcp"]}
+            servers["vibatchium"] = {"command": binary, "args": ["mcp"]}
             cfg.parent.mkdir(parents=True, exist_ok=True)
             cfg.write_text(json.dumps(existing, indent=2))
             res.mcp = "registered"
@@ -263,7 +263,7 @@ _DETECTORS = {"codex": detect_codex, "claude": detect_claude, "cursor": detect_c
 def run_setup(agents: list[str] | None = None, dry_run: bool = False,
               write_docs: bool = True) -> dict:
     """Top-level entry. `agents=None` → auto-detect all."""
-    binary = resolve_patchium_binary()
+    binary = resolve_vibatchium_binary()
     detected = {n: _DETECTORS[n]() for n in _SETUPPERS}
     if agents is None:
         agents = [n for n, info in detected.items() if info.detected]

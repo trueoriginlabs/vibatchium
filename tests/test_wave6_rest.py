@@ -22,11 +22,11 @@ except ImportError:
 
 
 pytestmark = pytest.mark.skipif(
-    not _FASTAPI_OK, reason="fastapi not installed (patchium[rest] extra)"
+    not _FASTAPI_OK, reason="fastapi not installed (vibatchium[rest] extra)"
 )
 
 
-from patchium.rest import build_app
+from vibatchium.rest import build_app
 
 
 @pytest.fixture
@@ -298,7 +298,7 @@ def test_caps_unknown_bucket_raises():
 
 def test_caps_all_is_unrestricted():
     """REST caps match MCP semantics: `all` disables filtering."""
-    from patchium.rest import _allowed_verbs
+    from vibatchium.rest import _allowed_verbs
     assert _allowed_verbs("all") is None
     assert _allowed_verbs("all,core") is None
 

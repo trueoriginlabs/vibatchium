@@ -12,13 +12,13 @@ from __future__ import annotations
 
 import pytest
 
-from patchium.client import call, DaemonError
-from patchium.daemon.observe import (
+from vibatchium.client import call, DaemonError
+from vibatchium.daemon.observe import (
     build_durable_selector,
     cache_invalidate,
     cache_get,
 )
-from patchium.daemon.paths import PROFILES_DIR
+from vibatchium.daemon.paths import PROFILES_DIR
 
 
 def _ensure_clean(name: str) -> None:
@@ -125,7 +125,7 @@ def test_cache_invalidate_removes_single_entry():
     so it doesn't depend on the daemon's page state (which can be polluted by
     previous act tests).
     """
-    from patchium.daemon.observe import cache_put
+    from vibatchium.daemon.observe import cache_put
     url = "http://test.local/cache_invalidate_demo"
     intent_a = "click increment ZZZ"
     intent_b = "press submit ZZZ"

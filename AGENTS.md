@@ -1,62 +1,62 @@
-# AGENTS.md — patchium agent contract
+# AGENTS.md — vibatchium agent contract
 
-If you're a coding agent (Codex, Cursor, Claude Code) and a user said "use patchium," read this. Saves ~15 min of environment-discovery friction.
+If you're a coding agent (Codex, Cursor, Claude Code) and a user said "use vibatchium," read this. Saves ~15 min of environment-discovery friction.
 
 ## First-time setup (for users)
 
 ```bash
-pipx install git+https://github.com/monodev-eth/patchium
+pipx install git+https://github.com/trueoriginlabs/vibatchium
 patchright install chrome
-patchium setup            # wire patchium into Codex / Claude Code / Cursor (idempotent)
+vb setup            # wire vibatchium into Codex / Claude Code / Cursor (idempotent)
 ```
 
-After `setup`, any agent session in any cwd sees patchium as a registered MCP server. Restart agent sessions to pick up the registration.
+After `setup`, any agent session in any cwd sees vibatchium as a registered MCP server. Restart agent sessions to pick up the registration.
 
 ## TL;DR — the commands you actually need
 
 ```bash
-# In this repo the binary is .venv/bin/patchium. With pipx install it's on $PATH.
-PB=/home/mono/projects/patchium/.venv/bin/patchium    # or just `patchium`
+# In this repo the binary is .venv/bin/vb. With pipx install it's on $PATH.
+VB=/home/mono/projects/vibatchium/.venv/bin/vb    # or just `vibatchium`
 
-$PB explore https://example.com                       # one-call: text + screenshot, auto-closes
-$PB research --target https://example.com \           # parallel fan-out
+$VB explore https://example.com                       # one-call: text + screenshot, auto-closes
+$VB research --target https://example.com \           # parallel fan-out
   --intent "..." --intent "..." --output-dir ./out
-$PB verify_url --url https://maybe-dead.example       # ~50ms DNS pre-check
+$VB verify_url --url https://maybe-dead.example       # ~50ms DNS pre-check
 ```
 
 90% of agent use cases. Below is depth.
 
 ## DO NOT
 
-- ❌ `pip install patchium` — Debian/Ubuntu blocks system pip (PEP 668). The `.venv` is set up; use the binary.
-- ❌ `python -m patchium.cli` — `python` doesn't exist on Debian, only `python3`. Use the binary.
+- ❌ `pip install vibatchium` — Debian/Ubuntu blocks system pip (PEP 668). The `.venv` is set up; use the binary.
+- ❌ `python -m vibatchium.cli` — `python` doesn't exist on Debian, only `python3`. Use the binary.
 - ❌ `start && go && text` for a simple lookup. Use `explore` — one call, auto-headless, auto-closes.
-- ❌ Headed Chrome for background work. `explore`/`research` are headless; `start` invoked from an agent (no TTY) is headless too as of Wave 7.7.11. If you ever see a window pop up, you're either running from a real terminal or someone passed `--headed` — pass `--headless` explicitly or set `PATCHIUM_DEFAULT_HEADLESS=1` to force it.
+- ❌ Headed Chrome for background work. `explore`/`research` are headless; `start` invoked from an agent (no TTY) is headless too as of Wave 7.7.11. If you ever see a window pop up, you're either running from a real terminal or someone passed `--headed` — pass `--headless` explicitly or set `VIBATCHIUM_DEFAULT_HEADLESS=1` to force it.
 - ❌ Direct domain probes without `verify_url`. A bad URL guess burns 30s of nav timeout; `verify_url` is 50ms.
 
 ## Tool routing
 
 | Task | Use |
 |---|---|
-| "Look at this URL" | `$PB explore <url>` |
-| "Research N independent angles in parallel" | `$PB research --target <url> --intent ... --intent ...` |
-| "Does this domain exist?" | `$PB verify_url --url <url>` |
-| Walled site (Cloudflare/Datadome 403) | `$PB explore` — patchright stealth clears most cold |
-| Login-walled (X, LinkedIn) | Manual login + `$PB attach http://localhost:9222` |
-| Google / news / Reddit threads | **WebSearch**, not patchium |
-| Plain HTML, known URL, single fetch | **WebFetch**, not patchium |
+| "Look at this URL" | `$VB explore <url>` |
+| "Research N independent angles in parallel" | `$VB research --target <url> --intent ... --intent ...` |
+| "Does this domain exist?" | `$VB verify_url --url <url>` |
+| Walled site (Cloudflare/Datadome 403) | `$VB explore` — patchright stealth clears most cold |
+| Login-walled (X, LinkedIn) | Manual login + `$VB attach http://localhost:9222` |
+| Google / news / Reddit threads | **WebSearch**, not vibatchium |
+| Plain HTML, known URL, single fetch | **WebFetch**, not vibatchium |
 
 ## Multi-step interactive
 
 When `explore`/`research` aren't enough:
 
 ```bash
-$PB session new mywork
-$PB --session mywork start              # headless by default for agent / non-TTY use
-$PB --session mywork go https://example.com
-$PB --session mywork text
-$PB --session mywork click @e3
-$PB --session mywork session_close
+$VB session new mywork
+$VB --session mywork start              # headless by default for agent / non-TTY use
+$VB --session mywork go https://example.com
+$VB --session mywork text
+$VB --session mywork click @e3
+$VB --session mywork session_close
 ```
 
 A single daemon process holds all sessions. Auto-spawns on first call.
@@ -83,26 +83,26 @@ what you know about the element:
 
 ## Output
 
-- `explore` → JSON to stdout `{url, title, text, screenshot_path, status, elapsed_ms, closed}`. Screenshot written to `~/.cache/patchium/explores/` by default (no base64 in stdout). `-o <dir>` writes to a chosen dir + markdown summary. `--inline-screenshot` returns base64 inline (the old default).
+- `explore` → JSON to stdout `{url, title, text, screenshot_path, status, elapsed_ms, closed}`. Screenshot written to `~/.cache/vibatchium/explores/` by default (no base64 in stdout). `-o <dir>` writes to a chosen dir + markdown summary. `--inline-screenshot` returns base64 inline (the old default).
 - `research` → per-thread markdown + landing screenshots + `index.md` in `--output-dir`.
 - `screenshot` → PNG via `--path`. `text`/`html`/`content` → stdout.
 
 ## Debug
 
 ```bash
-$PB logs --tail 50                    # session/error history
-$PB logs --since 10m | grep walled    # Cloudflare/Datadome hits
-$PB logs --since 10m --errors-only    # handler errors
-$PB session prune --pattern <prefix>  # wipe stale sessions
+$VB logs --tail 50                    # session/error history
+$VB logs --since 10m | grep walled    # Cloudflare/Datadome hits
+$VB logs --since 10m --errors-only    # handler errors
+$VB session prune --pattern <prefix>  # wipe stale sessions
 ```
 
 ## Env overrides
 
 ```bash
-PATCHIUM_DEFAULT_HEADLESS=1   # headless `start` (no desktop clutter)
-PATCHIUM_MAX_SESSIONS=8       # raise 4-session default for big fan-outs
-PATCHIUM_LOG_VERBS=1          # per-verb DEBUG audit trail
-PATCHIUM_DEFAULT_SAFETY=wrap  # auto-flag prompt-injection in scraped content
+VIBATCHIUM_DEFAULT_HEADLESS=1   # headless `start` (no desktop clutter)
+VIBATCHIUM_MAX_SESSIONS=8       # raise 4-session default for big fan-outs
+VIBATCHIUM_LOG_VERBS=1          # per-verb DEBUG audit trail
+VIBATCHIUM_DEFAULT_SAFETY=wrap  # auto-flag prompt-injection in scraped content
 ```
 
 ## Going deeper
