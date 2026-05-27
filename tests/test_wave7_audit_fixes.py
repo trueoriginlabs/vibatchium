@@ -27,7 +27,21 @@ from vibatchium.cli import _find_verb_index, _rewrite_mcp_aliases
 
 
 def _vibatchium_bin() -> str:
-    return str(Path(__file__).parent.parent / ".venv" / "bin" / "vb")
+    """Locate the `vb` executable. Tries (in order):
+      1. The local venv at <repo>/.venv/bin/vb (dev machine)
+      2. shutil.which("vb") (PATH-installed via pip/pipx)
+      3. `python -m vibatchium.cli` as the last-resort fallback.
+    """
+    import shutil
+    venv_path = Path(__file__).parent.parent / ".venv" / "bin" / "vb"
+    if venv_path.exists():
+        return str(venv_path)
+    which = shutil.which("vb")
+    if which:
+        return which
+    # Last resort — pytest CI installs via `pip install -e ".[all]"` which
+    # creates the `vb` entry point in sys.executable's scripts dir.
+    return shutil.which("vb") or str(venv_path)
 
 
 # ─── C2: argv rewrite handles --session NAME verb_form ────────────────

@@ -690,15 +690,21 @@ _CAP_BUCKETS: dict[str, set[str]] = {
                  "profile_list", "profile_new", "profile_use", "profile_delete"},
     "nav":      {"go", "back", "forward", "reload", "url", "title",
                  "wait_url", "wait_load", "wait_fn",
+                 # v0.5.1: wait verbs belong with nav (parity with wait_url etc.)
+                 "wait_selector", "wait_ref",
                  # Wave 7.6: URL pre-check belongs with navigation
                  "verify_url"},
     "content":  {"text", "html", "eval", "attr", "value", "content", "count", "find"},
     "input":    {"click", "fill", "type", "hover", "press", "keys",
                  "check", "uncheck", "scroll", "is_state", "mouse", "upload",
+                 # v0.5.1: dblclick/focus/select are input verbs too
+                 "dblclick", "focus", "select",
                  # Wave 6.2b: humanize toggle belongs with input
                  "humanize_on", "humanize_off", "humanize_status"},
     "element":  {"map", "map_compact", "diff_map", "highlight"},
-    "pages":    {"pages", "page_new", "page_switch", "frames", "frame"},
+    "pages":    {"pages", "page_new", "page_switch", "frames", "frame",
+                 # v0.5.1: tab close
+                 "page_close"},
     "storage":  {"storage_export", "storage_restore", "cookies",
                  # Wave 6.1c: checkpoint = persisted multi-tab storage snapshot
                  "checkpoint_save", "checkpoint_load", "checkpoint_list",

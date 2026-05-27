@@ -27,7 +27,7 @@ def test_walled_page_detection_writes_info_log(local_server):
     # Fixture with a title the detector recognises (must match a substring
     # in CLOUDFLARE_TITLES — "just a moment" / "checking your browser").
     import pathlib
-    fixtures_dir = pathlib.Path("/home/mono/projects/vibatchium/tests/fixtures")
+    fixtures_dir = pathlib.Path(__file__).parent / "fixtures"
     walled_html = fixtures_dir / "_walled_probe.html"
     walled_html.write_text(
         "<!DOCTYPE html>"
@@ -137,7 +137,7 @@ def test_vibatchium_logs_can_find_walled_detections(local_server):
     import pathlib
     import subprocess
     import sys
-    fixtures_dir = pathlib.Path("/home/mono/projects/vibatchium/tests/fixtures")
+    fixtures_dir = pathlib.Path(__file__).parent / "fixtures"
     walled_html = fixtures_dir / "_walled_logs_probe.html"
     # Title must match a substring in DATADOME_TITLES: "blocked - datadome"
     # or "you've been blocked".
