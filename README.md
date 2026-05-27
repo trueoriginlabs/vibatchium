@@ -4,10 +4,12 @@
 Patched Playwright + multi-session daemon + credential vault + vision clicking + prompt-injection safety. One MCP server, N parallel Chromes, persistent per-session profiles.
 
 ```
-pipx install git+https://github.com/trueoriginlabs/vibatchium
+pipx install vibatchium     # or: pip install vibatchium
 patchright install chrome
-vb setup        # auto-register with Codex / Claude Code / Cursor (idempotent)
+vb setup                    # auto-register with Codex / Claude Code / Cursor (idempotent)
 ```
+
+> Bleeding edge from `master`: `pipx install git+https://github.com/trueoriginlabs/vibatchium`
 
 > **Coding agents (Codex / Cursor / Claude Code):** read [`AGENTS.md`](AGENTS.md) first — it has the one-call recipes (`explore`, `research`) and the env-discovery traps to skip.
 
