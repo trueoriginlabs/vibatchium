@@ -59,8 +59,16 @@ def test_verify_url_command_registered_with_hyphen():
 
 
 def _vibatchium_bin() -> str:
-    """Path to the venv binary so tests don't depend on PATH state."""
-    return str(Path(__file__).parent.parent / ".venv" / "bin" / "vb")
+    """Path to the `vb` binary, tolerant of both local-dev (.venv) and
+    CI (PATH-installed via `pip install -e`) layouts."""
+    import shutil
+    venv_path = Path(__file__).parent.parent / ".venv" / "bin" / "vb"
+    if venv_path.exists():
+        return str(venv_path)
+    which = shutil.which("vb")
+    if which:
+        return which
+    return str(venv_path)  # fallback (will error at subprocess.run with a clear path)
 
 
 def test_verify_url_positional_form_works():
