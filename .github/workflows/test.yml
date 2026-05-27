@@ -57,19 +57,12 @@ jobs:
              echo "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}";
              sleep 0.2;
              echo "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}";
-             sleep 1) | timeout 10 vb mcp | python -c "
-            import json, sys
-            for line in sys.stdin:
-                try:
-                    d = json.loads(line)
-                    if d.get(\"id\") == 2:
-                        tools = d.get(\"result\", {}).get(\"tools\", [])
-                        print(f\"MCP tool count: {len(tools)}\")
-                        assert len(tools) >= 60, f\"too few tools: {len(tools)}\"
-                except Exception:
-                    pass
-            "
+             sleep 1) | timeout 10 vb mcp > /tmp/mcp-out.txt
           '
+          # Indented Python inside `bash -c` inside YAML loses its leading
+          # whitespace; parse the response in a separate one-line script so
+          # IndentationError can't bite. Tool floor is 60; v0.5.1 ships 124.
+          python -c "import json,re; lines=open('/tmp/mcp-out.txt').read().splitlines(); ds=[json.loads(l) for l in lines if l.startswith('{')]; tools=next((d.get('result',{}).get('tools',[]) for d in ds if d.get('id')==2), []); print(f'MCP tool count: {len(tools)}'); assert len(tools)>=60, f'too few tools: {len(tools)}'"
 
   lint:
     runs-on: ubuntu-latest
