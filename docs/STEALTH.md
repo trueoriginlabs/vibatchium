@@ -70,7 +70,7 @@ We keep the flag. In headless mode (the default for agent runs), it's a non-issu
 ## Layers we can add (opt-in)
 
 - **`humanize on`** — Bezier mouse / gaussian dwell / sinusoidal scroll (already shipped, default OFF; only enable when targets actually fingerprint mouse behavior — DataDome, PerimeterX, HUMAN)
-- **CDP-Patches** mouse heuristics — `pip install vibatchium[stealth-mouse]` (GPL-3.0, opt-in)
+- **CDP-Patches** mouse heuristics — `pip install git+https://github.com/Kaliiiiiiiiii-Vinyzu/CDP-Patches.git@main` (GPL-3.0, opt-in; not on PyPI so installed separately from `vibatchium`)
 - **nodriver** backend — `pip install vibatchium[nodriver]` (AGPL-3.0, opt-in). Doesn't filter init scripts, so `chrome.runtime` shim is possible. Different stealth profile — best for sites where chrome.runtime is checked.
 - **BrowserForge** for canvas/WebGL/audio diversity (future, gated)
 

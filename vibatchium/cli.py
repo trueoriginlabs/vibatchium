@@ -69,7 +69,8 @@ def cli(ctx: click.Context, json_mode: bool, session_name: str | None) -> None:
                    "from a terminal. `VIBATCHIUM_DEFAULT_HEADLESS=1` forces headless "
                    "everywhere; explicit --headless / --headed always wins.")
 @click.option("--stealth-mouse", is_flag=True,
-              help="Layer humanized mouse via CDP-Patches (needs vibatchium[stealth-mouse]).")
+              help="Layer humanized mouse via CDP-Patches. Install separately: "
+                   "`pip install git+https://github.com/Kaliiiiiiiiii-Vinyzu/CDP-Patches.git@main`")
 @click.option("--backend", default="patchright",
               type=click.Choice(["patchright", "nodriver", "auto"]),
               help="Stealth backend. patchright (default) = current Patchright stack. "
