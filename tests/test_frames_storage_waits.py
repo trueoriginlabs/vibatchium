@@ -63,6 +63,40 @@ def test_network_capture(local_server):
     call("network_stop")
 
 
+def test_network_capture_with_url_filter(local_server):
+    """url_filter discards events whose URL does not match the substring."""
+    call("network_start", {"max": 100, "url_filter": "no-such-url-segment-xyz"})
+    call("go", {"url": f"{local_server}/simple.html"})
+    call("sleep", {"ms": 200})
+    res = call("network_dump")
+    assert res["events"] == [], "filter should have rejected every event"
+    call("network_stop")
+
+
+def test_network_capture_with_response_headers(local_server):
+    """capture_response_headers=True populates events[].headers (response only)."""
+    call(
+        "network_start",
+        {
+            "max": 100,
+            "url_filter": "/simple.html",
+            "capture_response_headers": True,
+        },
+    )
+    call("go", {"url": f"{local_server}/simple.html"})
+    call("sleep", {"ms": 200})
+    res = call("network_dump")
+    responses = [
+        ev for ev in res["events"]
+        if ev.get("phase") == "response" and ev.get("url", "").endswith("/simple.html")
+    ]
+    assert responses, "expected at least one filtered response event"
+    # headers field present + dict-shaped
+    assert "headers" in responses[0]
+    assert isinstance(responses[0]["headers"], dict)
+    call("network_stop")
+
+
 def test_pages_lifecycle():
     res = call("pages")
     initial = len(res["pages"])

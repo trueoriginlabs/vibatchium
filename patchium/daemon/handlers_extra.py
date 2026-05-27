@@ -581,13 +581,29 @@ def register_extra(daemon) -> None:
 
     @daemon.handler("network_start")
     async def _network_start(d, args):
+        """Start an in-memory ring buffer of network events.
+
+        Args:
+          max: ring buffer size (default 500)
+          url_filter: optional substring; only capture events whose URL
+            contains this substring. Cheap server-side filter to avoid
+            burning ring-buffer slots on irrelevant asset requests.
+          capture_response_headers: when True, response events include a
+            `headers` dict. Use sparingly — headers can be 5-30 KB per
+            request on modern sites. Required for downstream code that
+            needs rate-limit-* or set-cookie inspection.
+        """
         s = _session(d)
         if s.network.get("capturing"):
             return {"capturing": True, "already_on": True}
         s.network["events"].clear()
         s.network["max"] = int(args.get("max", 500))
+        url_filter = args.get("url_filter")
+        capture_headers = bool(args.get("capture_response_headers", False))
 
         def on_request(req):
+            if url_filter and url_filter not in req.url:
+                return
             if len(s.network["events"]) >= s.network["max"]:
                 s.network["events"].pop(0)
             s.network["events"].append({
@@ -599,20 +615,37 @@ def register_extra(daemon) -> None:
             })
 
         def on_response(resp):
+            if url_filter and url_filter not in resp.url:
+                return
             if len(s.network["events"]) >= s.network["max"]:
                 s.network["events"].pop(0)
-            s.network["events"].append({
+            ev = {
                 "phase": "response",
                 "url": resp.url,
                 "status": resp.status,
                 "ts": time.time(),
-            })
+            }
+            if capture_headers:
+                try:
+                    ev["headers"] = dict(resp.headers)
+                except Exception:  # noqa: BLE001
+                    # Some pseudo-responses (preflights, redirects) may not
+                    # have a stable headers dict; record an empty marker so
+                    # downstream code can distinguish "no headers" from
+                    # "header capture off".
+                    ev["headers"] = {}
+            s.network["events"].append(ev)
 
         s.page.on("request", on_request)
         s.page.on("response", on_response)
         s.network["_handlers"] = (on_request, on_response)
         s.network["capturing"] = True
-        return {"capturing": True, "max": s.network["max"]}
+        return {
+            "capturing": True,
+            "max": s.network["max"],
+            "url_filter": url_filter,
+            "capture_response_headers": capture_headers,
+        }
 
     @daemon.handler("network_stop")
     async def _network_stop(d, args):
