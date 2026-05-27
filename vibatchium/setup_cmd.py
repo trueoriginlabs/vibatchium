@@ -27,16 +27,16 @@ _BLOCK_END = "<!-- vibatchium-setup-end -->"
 _DOC_BLOCK_TEMPLATE = """{begin}
 ## vibatchium — agentic browser on $PATH
 
-`vibatchium` is installed at `{binary}` (also on $PATH as `vibatchium`). When the
-user mentions browse / scrape / research / login on a website, shell out:
+`vb` is installed at `{binary}` (also on $PATH as `vb`). When the user
+mentions browse / scrape / research / login on a website, shell out:
 
 ```bash
-vibatchium explore <url>        # one-call: text + screenshot, auto-closes
-vibatchium research \\
+vb explore <url>        # one-call: text + screenshot, auto-closes
+vb research \\
   --target <url> \\
   --intent "..." --intent "..."
                               # parallel fan-out, writes per-intent markdown
-vibatchium verify_url --url <url>
+vb verify_url --url <url>
                               # ~50ms DNS pre-check (skip dead URLs)
 ```
 
@@ -47,7 +47,7 @@ DO NOT `pip install vibatchium` (Debian/Ubuntu blocks it via PEP 668) — alread
 installed. DO NOT call `python -m vibatchium.cli` — binary is on $PATH.
 
 Deep docs in the vibatchium repo: `AGENTS.md`, `docs/OPERATIONS.md`,
-`docs/CAPABILITIES.md`. Run `vibatchium --help` for the full surface.
+`docs/CAPABILITIES.md`. Run `vb --help` for the full surface.
 {end}
 """
 
@@ -97,21 +97,21 @@ def detect_cursor() -> AgentInfo:
 # ─── utilities ──────────────────────────────────────────────────────────
 
 def resolve_vibatchium_binary() -> str:
-    """Best-effort path to the vibatchium binary the user will run.
+    """Best-effort path to the `vb` binary the user will run.
 
-    Prefers `which vibatchium` (PATH-installed), falls back to sys.executable
-    -based path so the setup still works when run via `python -m vibatchium.cli`.
+    Prefers `which vb` (PATH-installed), falls back to sys.executable-based
+    path so the setup still works when run via `python -m vibatchium.cli`.
     """
-    p = shutil.which("vibatchium")
+    p = shutil.which("vb")
     if p:
         return p
     # Running as `python -m vibatchium.cli`: derive from sys.executable
     parent = Path(sys.executable).parent
-    candidate = parent / "vibatchium"
+    candidate = parent / "vb"
     if candidate.exists():
         return str(candidate)
     # Last resort: bare name (PATH lookup at exec time)
-    return "vibatchium"
+    return "vb"
 
 
 def ensure_md_block(path: Path, block: str, dry_run: bool = False) -> str:

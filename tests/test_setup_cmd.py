@@ -195,15 +195,15 @@ def test_run_setup_unknown_agent_reports_clearly(monkeypatch, tmp_path):
 
 
 def test_doc_block_contains_canonical_commands():
-    block = setup_cmd._doc_block("/x/vibatchium")
-    assert "vibatchium explore" in block
-    assert "vibatchium research" in block
-    assert "vibatchium verify_url" in block
+    block = setup_cmd._doc_block("/x/vb")
+    assert "vb explore" in block
+    assert "vb research" in block
+    assert "vb verify_url" in block
     assert "PEP 668" in block
-    assert "/x/vibatchium" in block
+    assert "/x/vb" in block
 
 
 def test_resolve_vibatchium_binary_prefers_path(monkeypatch):
     monkeypatch.setattr(shutil, "which",
-                        lambda n: "/usr/local/bin/vibatchium" if n == "vibatchium" else None)
-    assert setup_cmd.resolve_vibatchium_binary() == "/usr/local/bin/vibatchium"
+                        lambda n: "/usr/local/bin/vb" if n == "vb" else None)
+    assert setup_cmd.resolve_vibatchium_binary() == "/usr/local/bin/vb"
