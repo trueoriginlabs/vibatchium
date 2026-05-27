@@ -60,7 +60,7 @@ def test_verify_url_command_registered_with_hyphen():
 
 def _vibatchium_bin() -> str:
     """Path to the venv binary so tests don't depend on PATH state."""
-    return str(Path(__file__).parent.parent / ".venv" / "bin" / "vibatchium")
+    return str(Path(__file__).parent.parent / ".venv" / "bin" / "vb")
 
 
 def test_verify_url_positional_form_works():

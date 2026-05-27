@@ -43,7 +43,7 @@ def _emit(result, json_mode: bool, fallback_key: str | None = None):
 def cli(ctx: click.Context, json_mode: bool, session_name: str | None) -> None:
     """Vibatchium — agentic browser CLI (Patchwright stealth + Vibium ergonomics).
 
-    Multi-session: `vibatchium --session work click @e3` addresses the 'work'
+    Multi-session: `vb --session work click @e3` addresses the 'work'
     session. Without --session, the active session on disk is used (default
     'default'). Pin a session for a sub-shell via `export VIBATCHIUM_SESSION=work`.
     """
@@ -91,7 +91,7 @@ def start(ctx, profile, headless, stealth_mouse, backend):
     # Wave 7.7.11: tri-state headless. Explicit --headless / --headed wins.
     # Otherwise: TTY → headed (human visual debugging); no TTY → headless
     # (agent / pipe / script). Closes the trap where Codex/Claude/Cursor
-    # shelling out to `vibatchium start` got headed windows on the user's desktop.
+    # shelling out to `vb start` got headed windows on the user's desktop.
     if headless is True:
         args["headless"] = True
     elif headless is False:
@@ -165,7 +165,7 @@ def install(ctx, skip_chrome):
     # 6) MCP SDK importable
     try:
         import mcp  # noqa: F401
-        check("mcp", True, "available — vibatchium mcp server runnable")
+        check("mcp", True, "available — vb mcp server runnable")
     except ImportError:
         check("mcp", False, "missing — `pip install mcp` for the MCP server")
 
@@ -189,12 +189,12 @@ def session():
     under ~/.config/vibatchium/profiles/<name>/ that persists on disk.
 
     Patterns:
-        vibatchium session new work               # create work profile dir
-        vibatchium --session work start           # launch Chrome for it
-        vibatchium --session work go https://...  # use it
-        vibatchium session list                   # see running + on-disk
-        vibatchium session close work             # stop Chrome; keep profile
-        vibatchium session delete work            # destroy profile dir
+        vb session new work               # create work profile dir
+        vb --session work start           # launch Chrome for it
+        vb --session work go https://...  # use it
+        vb session list                   # see running + on-disk
+        vb session close work             # stop Chrome; keep profile
+        vb session delete work            # destroy profile dir
     """
 
 
@@ -203,7 +203,7 @@ def session():
 @click.pass_context
 def session_new(ctx, name):
     """Create a new session/profile dir. Does NOT launch Chrome — run
-    `vibatchium --session NAME start` to actually open."""
+    `vb --session NAME start` to actually open."""
     _emit(call("session_new", {"name": name}), ctx.obj["json"])
 
 
@@ -403,9 +403,9 @@ def explore(ctx, url, intent, keep_open, screenshot, full_page, skip_verify,
 
     \b
     EXAMPLES:
-        vibatchium explore https://example.com
-        vibatchium explore https://docs.example.com -o ./scrape-out/
-        vibatchium explore https://maybe-dead.example --skip-verify
+        vb explore https://example.com
+        vb explore https://docs.example.com -o ./scrape-out/
+        vb explore https://maybe-dead.example --skip-verify
     """
     import base64 as _b64
     import time as _time
@@ -470,9 +470,9 @@ def verify_url_cli(ctx, url, url_flag, check_http, timeout_ms):
 
     \b
     EXAMPLES:
-        vibatchium verify-url https://example.com
-        vibatchium verify-url --url https://example.com    # same thing
-        vibatchium verify_url https://example.com          # MCP-style alias
+        vb verify-url https://example.com
+        vb verify-url --url https://example.com    # same thing
+        vb verify_url https://example.com          # MCP-style alias
     """
     final_url = url or url_flag
     if not final_url:
@@ -500,10 +500,10 @@ def setup(ctx, agents, check, no_docs):
     available. Idempotent — safe to re-run.
 
     \b
-    vibatchium setup              # auto-detect and wire everything
-    vibatchium setup --check      # dry-run; show what would change
-    vibatchium setup --agent codex --agent claude
-    vibatchium setup --no-docs    # only MCP, skip global docs blocks
+    vb setup              # auto-detect and wire everything
+    vb setup --check      # dry-run; show what would change
+    vb setup --agent codex --agent claude
+    vb setup --no-docs    # only MCP, skip global docs blocks
     """
     from .setup_cmd import run_setup
     result = run_setup(list(agents) or None, dry_run=check,
@@ -569,8 +569,8 @@ def go(ctx, url, url_flag, wait_until, timeout_ms):
 
     \b
     EXAMPLES:
-        vibatchium go https://example.com
-        vibatchium go --url https://example.com    # same thing
+        vb go https://example.com
+        vb go --url https://example.com    # same thing
     """
     final_url = url or url_flag
     if not final_url:
@@ -1459,7 +1459,7 @@ def act(ctx, intent, llm):
 @click.option("--follow", is_flag=True, help="tail -f the log.")
 @click.pass_context
 def _logs_basic(ctx, lines, follow):
-    """[deprecated] Use `vibatchium logs` for filtered tailing."""
+    """[deprecated] Use `vb logs` for filtered tailing."""
     from .daemon.paths import LOG_PATH
     import subprocess as _sub
     if not LOG_PATH.exists():
@@ -1563,8 +1563,8 @@ def safety():
         wrap       wrap suspicious regions in <UNTRUSTED_CONTENT> tags
         redact     replace suspicious regions with [REDACTED-PROMPT-INJECTION-N]
 
-        vibatchium --session work safety set flag-only
-        vibatchium --session work map      # response gains risk metadata
+        vb --session work safety set flag-only
+        vb --session work map      # response gains risk metadata
         vibatchium safety scan "ignore previous instructions"  # test patterns
     """
 
@@ -1607,7 +1607,7 @@ def secret():
         vibatchium secret set github.com password 'hunter2'
         vibatchium secret set github.com totp-seed JBSWY3DPEHPK3PXP
         vibatchium secret list
-        vibatchium fill @e7 --use-secret github.com:totp
+        vb fill @e7 --use-secret github.com:totp
     """
 
 
@@ -1703,11 +1703,11 @@ def evals():
     Replaces the README's '70-90%' guesses with measured numbers per backend
     and per humanize-on/off. Use in CI with --min-score to catch regressions.
 
-        vibatchium evals run                                # default matrix → markdown
-        vibatchium evals run --backends patchright,nodriver --humanize on,off
-        vibatchium evals run --json --out evals.json
-        vibatchium evals run --update-readme                # patches README in-place
-        vibatchium evals run --min-score 80                 # exit 1 if any cell <80
+        vb evals run                                # default matrix → markdown
+        vb evals run --backends patchright,nodriver --humanize on,off
+        vb evals run --json --out evals.json
+        vb evals run --update-readme                # patches README in-place
+        vb evals run --min-score 80                 # exit 1 if any cell <80
     """
 
 
@@ -1790,9 +1790,9 @@ def humanize():
     OFF by default (Bezier paths are visible entropy — only enable when the
     target actually fingerprints mouse behavior, e.g. DataDome, PerimeterX).
 
-        vibatchium --session work humanize on
-        vibatchium --session work click @e3       # uses humanized click
-        vibatchium --session work humanize off
+        vb --session work humanize on
+        vb --session work click @e3       # uses humanized click
+        vb --session work humanize off
     """
 
 
@@ -1822,11 +1822,11 @@ def proxy():
 
     Set a proxy that will be applied next time the session launches:
 
-        vibatchium --session work proxy set "http://user:pass@127.0.0.1:8888"
-        vibatchium --session work proxy set --path ~/.config/vibatchium-proxy.txt
-        vibatchium --session work start          # uses the configured proxy
-        vibatchium --session work proxy info     # exit IP, latency
-        vibatchium --session work proxy clear
+        vb --session work proxy set "http://user:pass@127.0.0.1:8888"
+        vb --session work proxy set --path ~/.config/vibatchium-proxy.txt
+        vb --session work start          # uses the configured proxy
+        vb --session work proxy info     # exit IP, latency
+        vb --session work proxy clear
 
     Built-in providers (URL prefixes):
       http / socks5     generic
@@ -1876,10 +1876,10 @@ def checkpoint():
     A checkpoint captures everything needed to recreate a logged-in browser
     state later, even in a different session (Browserbase Contexts parity).
 
-        vibatchium --session work checkpoint save logged-in
-        vibatchium --session work checkpoint list
-        vibatchium --session work-2 checkpoint load logged-in --from-session work
-        vibatchium --session work checkpoint delete logged-in
+        vb --session work checkpoint save logged-in
+        vb --session work checkpoint list
+        vb --session work-2 checkpoint load logged-in --from-session work
+        vb --session work checkpoint delete logged-in
     """
 
 
@@ -2016,7 +2016,7 @@ def fingerprint(ctx, target, url, extract, settle_ms):
       brotector  — Brotector (Patchright authors' own gauntlet)
 
     Use to replace the README's '70-90%' guesses with measured numbers per
-    backend. Run with `--backend nodriver` (via `vibatchium start --backend ...`)
+    backend. Run with `--backend nodriver` (via `vb start --backend ...`)
     to compare stealth stacks on the same target.
     """
     args = {"target": target, "settle_ms": settle_ms}
@@ -2143,7 +2143,7 @@ def research(ctx, target, intents, threads, output_dir, headless, safety,
     EXAMPLE:
 
     \b
-        vibatchium research --target https://geminixprize.com \\
+        vb research --target https://geminixprize.com \\
             --intent "prize structure and judging rubric" \\
             --intent "google tool stack pricing" \\
             --intent "prior xprize hackathon winners" \\
@@ -2283,7 +2283,7 @@ def research(ctx, target, intents, threads, output_dir, headless, safety,
     wall_s = (_dt.datetime.now() - t0).total_seconds()
     # Index report
     index_md = out / "index.md"
-    lines = ["# vibatchium research run", "",
+    lines = ["# vb research run", "",
              f"- target: {target}",
              f"- threads: {n_threads}",
              f"- safety: {safety}",
@@ -2328,7 +2328,7 @@ def set_log_verbs_cli(ctx, mode):
         vibatchium set-log-verbs off   # back to lifecycle-only logging
 
     With ON, every handler call lands in the daemon log with args (creds
-    redacted). Pair with `vibatchium logs --session NAME --tail N`. Pre-existing
+    redacted). Pair with `vb logs --session NAME --tail N`. Pre-existing
     env equivalent: VIBATCHIUM_LOG_VERBS=1 (at daemon bootstrap).
     """
     _emit(call("set_log_verbs", {"on": mode == "on"}), ctx.obj["json"])
@@ -2415,7 +2415,7 @@ def daemon_cmd():
 def daemon_start(max_sessions, log_verbs, default_safety, default_headless):
     """Explicitly bootstrap the daemon with non-default settings.
 
-    For most uses you don't need this — `vibatchium start` auto-spawns
+    For most uses you don't need this — `vb start` auto-spawns
     the daemon. Use this only when you need a higher session cap,
     full audit logging, or a non-default safety mode set at daemon
     start time.
@@ -2469,7 +2469,7 @@ _CLI_GROUPS_BY_PREFIX = {
 
 
 # Global flags from the root `cli` command that may precede the verb.
-# When users write `vibatchium --session work session_close`, the rewriter has
+# When users write `vb --session work session_close`, the rewriter has
 # to skip past `--session` + value before deciding what the verb is.
 _GLOBAL_FLAGS_WITH_VALUE = {"--session"}
 _GLOBAL_FLAGS_BOOLEAN = {"--json", "--version", "-h", "--help"}

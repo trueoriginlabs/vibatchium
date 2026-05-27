@@ -27,7 +27,7 @@ from vibatchium.cli import _find_verb_index, _rewrite_mcp_aliases
 
 
 def _vibatchium_bin() -> str:
-    return str(Path(__file__).parent.parent / ".venv" / "bin" / "vibatchium")
+    return str(Path(__file__).parent.parent / ".venv" / "bin" / "vb")
 
 
 # ─── C2: argv rewrite handles --session NAME verb_form ────────────────
