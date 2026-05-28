@@ -890,6 +890,9 @@ def register_all(daemon) -> None:
         if go_res.get("walled"):
             out["walled"] = go_res["walled"]
             out["advice"] = go_res.get("advice")
+        # Skills surfaced during the inner `go` (opt-in via VIBATCHIUM_SKILLS).
+        if go_res.get("skills"):
+            out["skills"] = go_res["skills"]
         # Screenshot
         if want_screenshot:
             try:
@@ -990,6 +993,15 @@ def register_all(daemon) -> None:
                     f"`vb session close {name} && "
                     f"vb --session {name} start --backend nodriver`"
                 )
+        # Skills: surface per-host field-notes (opt-in via VIBATCHIUM_SKILLS).
+        # Best-effort — a skills-store hiccup must never break navigation.
+        try:
+            from ..skills.handlers import surface_for_url
+            sk = surface_for_url(out["url"])
+            if sk:
+                out["skills"] = sk
+        except Exception:  # noqa: BLE001
+            log.debug("skill surfacing failed", exc_info=True)
         return out
 
     @daemon.handler("back")

@@ -33,7 +33,126 @@ def _emit(result, json_mode: bool, fallback_key: str | None = None):
     click.echo(result)
 
 
-@click.group(context_settings={"help_option_names": ["-h", "--help"]})
+def _coerce(value, typ: str | None):
+    """Coerce a passthrough token to the declared input type. Unknown type →
+    leave as string (don't guess: a guessed int would mangle e.g. a zip code)."""
+    if isinstance(value, bool):
+        return value
+    if typ == "integer":
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return value
+    if typ == "number":
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return value
+    if typ == "boolean":
+        return str(value).strip().lower() in ("1", "true", "yes", "on")
+    if typ == "array":
+        try:
+            parsed = json.loads(value)
+            return parsed if isinstance(parsed, list) else [parsed]
+        except (TypeError, ValueError):
+            return [v for v in str(value).split(",") if v]
+    return value
+
+
+def _plugin_verb_schema(verb: str) -> dict:
+    """Fetch a plugin verb's flat inputs_schema (``{name: type}``) from the
+    daemon. Best-effort — returns ``{}`` if the daemon/verb is unavailable."""
+    try:
+        res = call("list_verbs")
+    except Exception:  # noqa: BLE001
+        return {}
+    for spec in (res or {}).get("verbs", []):
+        if spec.get("name") == verb:
+            sch = spec.get("inputs_schema") or {}
+            return sch if isinstance(sch, dict) else {}
+    return {}
+
+
+def _parse_passthrough_tokens(verb: str, tokens: list[str]) -> dict:
+    """Parse ``--key value`` / ``--flag`` / ``key=value`` / positional tokens
+    into a daemon args dict for a dotted plugin verb. Positionals map, in
+    order, onto the verb's declared inputs (so ``vb x.search "$BTC"`` works)."""
+    schema = _plugin_verb_schema(verb)
+    kwargs: dict = {}
+    positionals: list = []
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok.startswith("--"):
+            body = tok[2:]
+            if "=" in body:
+                k, v = body.split("=", 1)
+                kwargs[k.replace("-", "_")] = v
+                i += 1
+            else:
+                k = body.replace("-", "_")
+                if i + 1 < len(tokens) and not tokens[i + 1].startswith("--"):
+                    kwargs[k] = tokens[i + 1]
+                    i += 2
+                else:
+                    kwargs[k] = True  # bare flag
+                    i += 1
+        elif "=" in tok and not tok.startswith("-"):
+            k, v = tok.split("=", 1)
+            kwargs[k.replace("-", "_")] = v
+            i += 1
+        else:
+            positionals.append(tok)
+            i += 1
+    # Map positionals onto declared input keys not already given by name.
+    if positionals:
+        free_keys = [k for k in schema.keys() if k not in kwargs]
+        for key, val in zip(free_keys, positionals, strict=False):
+            kwargs[key] = val
+        leftover = positionals[len(free_keys):]
+        if leftover:
+            kwargs.setdefault("args", []).extend(leftover)
+    # Coerce by declared type.
+    for k in list(kwargs.keys()):
+        if k in schema:
+            kwargs[k] = _coerce(kwargs[k], schema.get(k))
+    return kwargs
+
+
+def _build_plugin_passthrough(verb: str) -> click.Command:
+    """Synthesize a Click command that forwards a dotted plugin verb's args to
+    the daemon. Used by VibatchiumGroup.get_command for names like ``x.search``."""
+    @click.command(name=verb, add_help_option=False,
+                   context_settings={"ignore_unknown_options": True,
+                                     "allow_extra_args": True})
+    @click.argument("tokens", nargs=-1, type=click.UNPROCESSED)
+    @click.pass_context
+    def _passthrough(ctx, tokens):
+        json_mode = (ctx.obj or {}).get("json", False)
+        args = _parse_passthrough_tokens(verb, list(tokens))
+        _emit(call(verb, args), json_mode)
+    return _passthrough
+
+
+class VibatchiumGroup(click.Group):
+    """Top-level group that also dispatches dotted plugin verbs.
+
+    Built-in commands resolve normally. A name containing a dot (``x.search``)
+    is a plugin verb: a synthetic passthrough command forwards its args to the
+    daemon. This is how ``vb x.search "$BTC"`` works after a plugin registers
+    the ``x.search`` verb.
+    """
+    def get_command(self, ctx, name):
+        cmd = super().get_command(ctx, name)
+        if cmd is not None:
+            return cmd
+        if "." in name and not name.startswith("-"):
+            return _build_plugin_passthrough(name)
+        return None
+
+
+@click.group(cls=VibatchiumGroup,
+             context_settings={"help_option_names": ["-h", "--help"]})
 @click.option("--json", "json_mode", is_flag=True, help="Emit responses as JSON.")
 @click.option("--session", "session_name", default=None,
               help="Target session name (also via VIBATCHIUM_SESSION env). "
@@ -2490,9 +2609,504 @@ def daemon_start(max_sessions, log_verbs, default_safety, default_headless):
 # When an agent / user copies a brief written in MCP form into a shell,
 # the call fails. Rewrite the argv before click sees it: if the first
 # arg matches a known MCP verb, split on `_` and forward.
+@cli.group()
+def plugin():
+    """Manage daemon plugins (modules that add namespaced verbs).
+
+    A plugin registers verbs like `x.search` that become addressable as
+    `vb x.search "$BTC"`. Plugins are pip packages (entry point
+    `vibatchium.plugins`) or local dirs under ~/.config/vibatchium/plugins/.
+    Trust posture is pip-package trust: plugin code runs as your user.
+    """
+
+
+@plugin.command("list")
+@click.pass_context
+def plugin_list(ctx):
+    """List installed plugins and the verbs each registers."""
+    res = call("plugin_list")
+    if ctx.obj["json"]:
+        _emit(res, True)
+        return
+    plugins = res.get("plugins", [])
+    if not plugins:
+        click.echo("no plugins loaded")
+        return
+    for p in plugins:
+        verbs = ", ".join(p.get("verbs") or []) or "(none)"
+        ver = f" v{p['version']}" if p.get("version") else ""
+        line = f"{p['name']}{ver}  [{p['source']}]  → {verbs}"
+        if p.get("error"):
+            line += f"  !! {p['error']}"
+        click.echo(line)
+
+
+@plugin.command("show")
+@click.argument("name")
+@click.pass_context
+def plugin_show(ctx, name):
+    """Show one plugin's metadata + full verb specs."""
+    _emit(call("plugin_show", {"name": name}), ctx.obj["json"])
+
+
+@plugin.command("reload")
+@click.pass_context
+def plugin_reload(ctx):
+    """Rescan entry points + local dirs and re-register, without a restart."""
+    res = call("plugin_reload")
+    if ctx.obj["json"]:
+        _emit(res, True)
+        return
+    n = len(res.get("plugins", []))
+    click.echo(f"reloaded — {n} plugin(s)")
+
+
+# ─── plugin (un)install under PEP 668 ────────────────────────────────────
+#
+# The user's likely environment is Debian/Ubuntu, where the system Python is
+# PEP-668 "externally managed" and a naive `pip install` aborts with
+# `externally-managed-environment`. We handle three install shapes:
+#   1. vibatchium installed via pipx  → `pipx inject vibatchium <pkg>`
+#   2. plain pip succeeds             → done
+#   3. plain pip hits PEP 668         → retry with --break-system-packages and
+#                                       print the exact command that ran.
+
+_PEP668_MARKER = "externally-managed-environment"
+
+
+def _is_pipx_install() -> bool:
+    """True when vibatchium is running from a pipx-managed venv (its prefix is
+    under ``.../pipx/venvs/<app>``)."""
+    try:
+        parts = Path(sys.prefix).resolve().parts
+    except Exception:  # noqa: BLE001
+        return False
+    return "pipx" in parts and "venvs" in parts
+
+
+def _run(cmd, *, capture: bool):
+    """Indirection point so tests can monkeypatch ``subprocess.run``."""
+    import subprocess
+    return subprocess.run(cmd, capture_output=capture, text=True)
+
+
+def _pip_with_pep668_fallback(pip_args: list[str]) -> tuple[int, list[str], str]:
+    """Run ``python -m pip <pip_args>``; on a PEP-668 error retry with
+    ``--break-system-packages``. Returns ``(returncode, final_cmd, note)``.
+
+    ``note`` is empty unless the fallback fired, in which case it names the
+    exact retry command (so the user can copy/paste or audit it).
+    """
+    base = [sys.executable, "-m", "pip", *pip_args]
+    cp = _run(base, capture=True)
+    out = (cp.stdout or "") + (cp.stderr or "")
+    sys.stdout.write(cp.stdout or "")
+    sys.stderr.write(cp.stderr or "")
+    if cp.returncode == 0 or _PEP668_MARKER not in out:
+        return cp.returncode, base, ""
+    # PEP 668 — insert the escape hatch right after the pip subcommand.
+    retry = [sys.executable, "-m", "pip", pip_args[0],
+             "--break-system-packages", *pip_args[1:]]
+    note = ("PEP 668 externally-managed environment — retrying with "
+            "--break-system-packages:\n  " + " ".join(retry))
+    cp2 = _run(retry, capture=True)
+    sys.stdout.write(cp2.stdout or "")
+    sys.stderr.write(cp2.stderr or "")
+    return cp2.returncode, retry, note
+
+
+def _install_plugin_dist(target: str) -> tuple[int, str]:
+    """Install a plugin distribution. Returns ``(returncode, message)``."""
+    if _is_pipx_install():
+        cmd = ["pipx", "inject", "vibatchium", target]
+        rc = _run(cmd, capture=False).returncode
+        return rc, "pipx detected — " + " ".join(cmd)
+    rc, _, note = _pip_with_pep668_fallback(["install", target])
+    return rc, note
+
+
+def _remove_plugin_dist(dist: str) -> tuple[int, str]:
+    """Uninstall a plugin distribution. Returns ``(returncode, message)``."""
+    if _is_pipx_install():
+        cmd = ["pipx", "uninject", "vibatchium", dist]
+        rc = _run(cmd, capture=False).returncode
+        return rc, "pipx detected — " + " ".join(cmd)
+    rc, _, note = _pip_with_pep668_fallback(["uninstall", "-y", dist])
+    return rc, note
+
+
+@plugin.command("install")
+@click.argument("target")
+@click.pass_context
+def plugin_install(ctx, target):
+    """Install a plugin (PyPI name or git+https URL) into vibatchium's env,
+    then reload. Uses `pipx inject` under pipx, else `pip install` with a
+    PEP-668 `--break-system-packages` fallback."""
+    click.echo(f"installing {target} …", err=True)
+    rc, note = _install_plugin_dist(target)
+    if note:
+        click.echo(note, err=True)
+    if rc != 0:
+        click.echo(f"install failed (rc={rc})", err=True)
+        sys.exit(rc)
+    res = call("plugin_reload")
+    click.echo(f"installed + reloaded — {len(res.get('plugins', []))} plugin(s)")
+
+
+@plugin.command("remove")
+@click.argument("name")
+@click.option("--pip-name", default=None,
+              help="Distribution name to uninstall (defaults to the plugin name).")
+@click.pass_context
+def plugin_remove(ctx, name, pip_name):
+    """Uninstall a plugin distribution, then reload."""
+    dist = pip_name or name
+    rc, note = _remove_plugin_dist(dist)
+    if note:
+        click.echo(note, err=True)
+    if rc != 0:
+        click.echo(f"uninstall failed (rc={rc})", err=True)
+        sys.exit(rc)
+    res = call("plugin_reload")
+    click.echo(f"removed + reloaded — {len(res.get('plugins', []))} plugin(s)")
+
+
+@cli.group()
+def skill():
+    """Per-host Markdown field-notes the agent reads before driving a site.
+
+    Surfacing on `go`/`explore` is opt-in: set `VIBATCHIUM_SKILLS=1`. Notes
+    are injection-scanned on read and secret-scanned on write/import.
+    """
+
+
+@skill.command("list")
+@click.argument("host", required=False)
+@click.pass_context
+def skill_list(ctx, host):
+    """List note hosts, or notes for one HOST."""
+    args = {"host": host} if host else {}
+    res = call("skill_list", args)
+    if ctx.obj["json"]:
+        _emit(res, True)
+        return
+    if host:
+        notes = res.get("notes", [])
+        click.echo("\n".join(notes) if notes else f"no notes for {host}")
+        return
+    hosts = res.get("hosts", [])
+    if not hosts:
+        click.echo("no skill notes on disk")
+        return
+    for h in hosts:
+        click.echo(f"{h['host']}  ({len(h['notes'])})  {', '.join(h['notes'])}")
+
+
+@skill.command("show")
+@click.argument("host")
+@click.argument("file")
+@click.pass_context
+def skill_show(ctx, host, file):
+    """Print one note (HOST FILE), with its injection scan."""
+    res = call("skill_show", {"host": host, "file": file})
+    if ctx.obj["json"]:
+        _emit(res, True)
+        return
+    inj = res.get("injection", {})
+    if inj.get("risk") and inj["risk"] != "none":
+        click.echo(f"[safety risk={inj['risk']} signals={inj.get('signals')}]",
+                   err=True)
+    click.echo(res.get("content", ""))
+
+
+@skill.command("write")
+@click.argument("host")
+@click.option("--title", default=None, help="Note title (derives the filename).")
+@click.option("--file", "file", default=None, help="Explicit filename (foo.md).")
+@click.option("--body", default=None, help="Note body text.")
+@click.option("--body-file", "body_file", default=None,
+              help="Read the body from a file ('-' for stdin).")
+@click.option("--allow-secrets", "allow_secrets", is_flag=True,
+              help="Persist even if the note looks like it contains a secret "
+                   "(logs a warning). Use only for a confirmed false positive.")
+@click.pass_context
+def skill_write(ctx, host, title, file, body, body_file, allow_secrets):
+    """Write/overwrite a note for HOST. Refused if it contains secrets
+    (override with --allow-secrets)."""
+    if body_file == "-":
+        body = sys.stdin.read()
+    elif body_file:
+        body = Path(body_file).read_text()
+    if body is None:
+        raise click.UsageError("provide --body, --body-file, or --body-file -")
+    args = {"host": host, "body": body}
+    if title:
+        args["title"] = title
+    if file:
+        args["file"] = file
+    if allow_secrets:
+        args["allow_secrets"] = True
+    _emit(call("skill_write", args), ctx.obj["json"])
+
+
+@skill.command("rm")
+@click.argument("host")
+@click.argument("file")
+@click.pass_context
+def skill_rm(ctx, host, file):
+    """Delete a note (HOST FILE)."""
+    _emit(call("skill_rm", {"host": host, "file": file}), ctx.obj["json"])
+
+
+@skill.command("import")
+@click.argument("source")
+@click.pass_context
+def skill_import(ctx, source):
+    """Import notes from a git+URL[#subpath] or a local directory.
+
+    Format-compatible with browser-use's domain-skills:
+      vb skill import git+https://github.com/browser-use/browser-harness#agent-workspace/domain-skills
+    Secret-bearing notes are skipped, not imported.
+    """
+    res = call("skill_import", {"source": source})
+    if ctx.obj["json"]:
+        _emit(res, True)
+        return
+    click.echo(f"imported {len(res.get('imported', []))}, "
+               f"skipped {len(res.get('skipped', []))}")
+    for s in res.get("skipped", []):
+        click.echo(f"  skip {s.get('host')}/{s.get('file','')}: {s.get('reason')}",
+                   err=True)
+
+
+@cli.group()
+def goal():
+    """Durable, resumable, budget-enforced long-running operations.
+
+    External-driver model: the daemon persists goal state + events; an agent
+    (you) calls `goal next` → drives the browser → `goal step` in a loop. Goals
+    survive daemon restarts (running→paused) and double-submits (--client-token).
+    """
+
+
+@goal.command("new")
+@click.option("--description", "-d", required=True, help="What the goal is.")
+@click.option("--session", "session_name", default=None,
+              help="Session the goal drives (default: active session).")
+@click.option("--notifier", default=None,
+              help="stdout:// (default) | webhook://URL | mcp_push://")
+@click.option("--budget", default=None,
+              help="Shorthand, e.g. steps=30,minutes=20,spend_usd=2")
+@click.option("--driver", default="external",
+              type=click.Choice(["external", "builtin"]))
+@click.option("--caps", default=None, help="Restrict caps for this goal (CSV).")
+@click.option("--allow-domains", "allow_domains", default=None,
+              help="CSV of allowed origins.")
+@click.pass_context
+def goal_new(ctx, description, session_name, notifier, budget, driver, caps,
+             allow_domains):
+    """Create a goal (status: pending)."""
+    args = {"description": description, "driver": driver}
+    if session_name:
+        args["session"] = session_name
+    if notifier:
+        args["notifier"] = notifier
+    if budget:
+        args["budget"] = budget
+    if caps:
+        args["caps"] = caps
+    if allow_domains:
+        args["allow_domains"] = allow_domains
+    res = call("goal_new", args)
+    if ctx.obj["json"]:
+        _emit(res, True)
+        return
+    click.echo(f"{res['id']}  [{res['status']}]  {res['description']}")
+
+
+@goal.command("list")
+@click.option("--status", default=None, help="Filter by state.")
+@click.pass_context
+def goal_list(ctx, status):
+    """List goals (optionally by status)."""
+    res = call("goal_list", {"status": status} if status else {})
+    if ctx.obj["json"]:
+        _emit(res, True)
+        return
+    goals = res.get("goals", [])
+    if not goals:
+        click.echo("no goals")
+        return
+    for g in goals:
+        c = g.get("consumed", {})
+        click.echo(f"{g['id']}  {g['status']:<11}  steps={c.get('steps',0)}  "
+                   f"{g['description'][:60]}")
+
+
+@goal.command("show")
+@click.argument("goal_id")
+@click.option("--after-seq", default=0, type=int, help="Only events after seq.")
+@click.pass_context
+def goal_show(ctx, goal_id, after_seq):
+    """Show a goal + its event stream."""
+    _emit(call("goal_show", {"goal_id": goal_id, "after_seq": after_seq}),
+          ctx.obj["json"])
+
+
+@goal.command("next")
+@click.pass_context
+def goal_next(ctx):
+    """Pick the next runnable goal, lock its session, return driver context."""
+    _emit(call("goal_next"), ctx.obj["json"])
+
+
+@goal.command("step")
+@click.argument("goal_id")
+@click.option("--action", default=None, help="JSON of the action taken.")
+@click.option("--observation", default=None, help="JSON of the observation.")
+@click.option("--model-call", "model_call", default=None,
+              help="JSON: {model, input_tokens, output_tokens} or {cost_usd}.")
+@click.option("--client-token", "client_token", default=None,
+              help="Idempotency token — replays are no-ops.")
+@click.pass_context
+def goal_step(ctx, goal_id, action, observation, model_call, client_token):
+    """Record one step (charges budget, may hard-stop on exceed)."""
+    def _j(s):
+        if s is None:
+            return None
+        try:
+            return json.loads(s)
+        except json.JSONDecodeError:
+            raise click.UsageError(f"not valid JSON: {s!r}") from None
+    args = {"goal_id": goal_id}
+    if action is not None:
+        args["action"] = _j(action)
+    if observation is not None:
+        args["observation"] = _j(observation)
+    if model_call is not None:
+        args["model_call"] = _j(model_call)
+    if client_token:
+        args["client_token"] = client_token
+    _emit(call("goal_step", args), ctx.obj["json"])
+
+
+@goal.command("ask")
+@click.argument("goal_id")
+@click.argument("question")
+@click.pass_context
+def goal_ask(ctx, goal_id, question):
+    """Pause the goal awaiting a human answer (status: needs_input)."""
+    _emit(call("goal_ask", {"goal_id": goal_id, "question": question}),
+          ctx.obj["json"])
+
+
+@goal.command("answer")
+@click.argument("goal_id")
+@click.argument("text")
+@click.pass_context
+def goal_answer(ctx, goal_id, text):
+    """Supply the awaited answer; goal becomes runnable again."""
+    _emit(call("goal_answer", {"goal_id": goal_id, "text": text}),
+          ctx.obj["json"])
+
+
+@goal.command("done")
+@click.argument("goal_id")
+@click.option("--outputs", default=None, help="JSON outputs.")
+@click.pass_context
+def goal_done(ctx, goal_id, outputs):
+    """Mark the goal complete."""
+    args = {"goal_id": goal_id}
+    if outputs:
+        try:
+            args["outputs"] = json.loads(outputs)
+        except json.JSONDecodeError:
+            raise click.UsageError(f"--outputs not valid JSON: {outputs!r}") from None
+    _emit(call("goal_done", args), ctx.obj["json"])
+
+
+@goal.command("pause")
+@click.argument("goal_id")
+@click.pass_context
+def goal_pause(ctx, goal_id):
+    """Pause a running goal (releases its session, snapshots state)."""
+    _emit(call("goal_pause", {"goal_id": goal_id}), ctx.obj["json"])
+
+
+@goal.command("resume")
+@click.argument("goal_id")
+@click.pass_context
+def goal_resume(ctx, goal_id):
+    """Resume a paused goal and start it immediately."""
+    _emit(call("goal_resume", {"goal_id": goal_id}), ctx.obj["json"])
+
+
+@goal.command("cancel")
+@click.argument("goal_id")
+@click.pass_context
+def goal_cancel(ctx, goal_id):
+    """Cancel a goal (terminal)."""
+    _emit(call("goal_cancel", {"goal_id": goal_id}), ctx.obj["json"])
+
+
+@goal.command("fail")
+@click.argument("goal_id")
+@click.option("--reason", default="agent_failed", help="Failure reason.")
+@click.pass_context
+def goal_fail(ctx, goal_id, reason):
+    """Mark a goal failed (terminal)."""
+    _emit(call("goal_fail", {"goal_id": goal_id, "reason": reason}), ctx.obj["json"])
+
+
+@goal.command("spawn")
+@click.argument("description")
+@click.option("--parent", "parent_id", required=True, help="Parent goal id.")
+@click.option("--session", "session_name", default=None,
+              help="Session for the child (defaults to the parent's).")
+@click.option("--budget", default=None,
+              help="Child budget, e.g. steps=20,spend_usd=1 (defaults to parent's).")
+@click.option("--caps", default=None, help="Caps for the child (defaults to parent's).")
+@click.pass_context
+def goal_spawn(ctx, description, parent_id, session_name, budget, caps):
+    """Create a child goal under PARENT (inherits session/budget/caps)."""
+    args = {"parent_id": parent_id, "description": description}
+    if session_name:
+        args["session"] = session_name
+    if budget:
+        args["budget"] = budget
+    if caps:
+        args["caps"] = caps
+    _emit(call("goal_spawn", args), ctx.obj["json"])
+
+
+@goal.command("tree")
+@click.argument("goal_id")
+@click.pass_context
+def goal_tree(ctx, goal_id):
+    """Show the goal hierarchy rooted at GOAL_ID."""
+    _emit(call("goal_tree", {"goal_id": goal_id}), ctx.obj["json"])
+
+
+@goal.command("artifacts")
+@click.argument("goal_id")
+@click.option("--name", default=None, help="Artifact name (with --path, records it).")
+@click.option("--path", default=None, help="Artifact path (with --name, records it).")
+@click.option("--mime", default="application/octet-stream", help="Artifact MIME type.")
+@click.pass_context
+def goal_artifacts(ctx, goal_id, name, path, mime):
+    """List a goal's artifacts, or record one with --name/--path."""
+    args = {"goal_id": goal_id}
+    if name and path:
+        args.update({"name": name, "path": path, "mime": mime})
+    _emit(call("goal_artifacts", args), ctx.obj["json"])
+
+
 _CLI_GROUPS_BY_PREFIX = {
     "session_": "session",
     "profile_": "profile",
+    "plugin_": "plugin",
+    "skill_": "skill",
+    "goal_": "goal",
     "page_": "page",
     "checkpoint_": "checkpoint",
     "proxy_": "proxy",

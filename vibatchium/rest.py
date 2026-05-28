@@ -18,6 +18,7 @@ Bearer-token by default. Token is generated on first launch + persisted at
   GET  /v1/tools                  — list available verbs (post-caps filter)
   POST /v1/<verb>                 — invoke verb; body is the args dict
   POST /v1/<verb>?session=<name>  — invoke verb on a specific session
+  GET  /v1/goals/<id>/events?after=N — SSE tail of a goal's event stream
   WS   /v1/stream/<session>       — live JPEG frames (token via ?token=...)
 
 ### Long-running verbs
@@ -60,6 +61,42 @@ def get_or_create_token() -> str:
     TOKEN_PATH.write_text(token)
     os.chmod(TOKEN_PATH, 0o600)
     return token
+
+
+_TERMINAL_EVENT_KINDS = frozenset({"done", "failed", "cancelled"})
+
+
+async def iter_goal_events_sse(call_fn, goal_id: str, after_seq: int = 0, *,
+                               poll_interval: float = 0.5,
+                               idle_timeout: float = 30.0):
+    """Yield Server-Sent-Event frames for a goal's event stream.
+
+    Polls the daemon (``call_fn('goal_events', {goal_id, after_seq})``) for
+    events newer than the last seen sequence, formatting each as a
+    ``data: <json>\\n\\n`` SSE frame in order. Terminates when a terminal event
+    (done/failed/cancelled) is seen, or after ``idle_timeout`` seconds with no
+    new events. FastAPI-free so it's unit-testable with a stub ``call_fn``.
+    """
+    import asyncio
+    import json as _json
+    import time as _time
+
+    last = after_seq
+    idle_start = _time.monotonic()
+    while True:
+        res = await asyncio.to_thread(
+            call_fn, "goal_events", {"goal_id": goal_id, "after_seq": last})
+        events = (res or {}).get("events", [])
+        if events:
+            idle_start = _time.monotonic()
+            for ev in events:
+                last = ev["seq"]
+                yield f"data: {_json.dumps(ev)}\n\n"
+                if ev.get("kind") in _TERMINAL_EVENT_KINDS:
+                    return
+        elif _time.monotonic() - idle_start > idle_timeout:
+            return
+        await asyncio.sleep(poll_interval)
 
 
 def _allowed_verbs(caps: str | None) -> set[str] | None:
@@ -297,6 +334,20 @@ def build_app(*, require_auth: bool = True, token: str | None = None,
                 await websocket.close()
             except Exception:  # noqa: BLE001
                 pass
+
+    @app.get("/v1/goals/{goal_id}/events")
+    async def goal_events_stream(goal_id: str, request: Request):
+        """SSE tail of a goal's event stream (`goal tail`). Emits each event as
+        a `data: <json>` frame in order; closes on a terminal event or idle."""
+        from fastapi.responses import StreamingResponse
+        _check_auth(request)
+        _check_cap("goal_events")
+        after = int(request.query_params.get("after", "0"))
+        if not daemon_is_running():
+            spawn_daemon()
+        return StreamingResponse(
+            iter_goal_events_sse(daemon_call, goal_id, after),
+            media_type="text/event-stream")
 
     @app.post("/v1/{verb}")
     async def invoke(verb: str, request: Request):

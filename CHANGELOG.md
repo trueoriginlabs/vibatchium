@@ -4,6 +4,56 @@ All notable changes to vibatchium are documented here. Versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Until 1.0,
 minor bumps may include breaking changes; we'll always call them out here.
 
+## [0.6.0] — 2026-05-28
+
+### Added — Plugins, Skills, Goals
+
+- **Plugins** — extend the daemon's verb surface from third-party packages or
+  local dirs. A plugin's `register(daemon)` calls `daemon.add_verb(name="ns.verb",
+  handler, lock=…)`; dotted names dispatch identically over CLI, MCP, and REST
+  and can never shadow a built-in. Discovery via pip entry points
+  (`[project.entry-points."vibatchium.plugins"]`), local dirs
+  (`~/.config/vibatchium/plugins/<name>/__init__.py`), and `git+` installs.
+  New verbs: `plugin_list`, `plugin_show`, `plugin_reload`, `list_verbs`; CLI:
+  `vb plugin list/show/install/remove/reload` and dotted passthrough
+  (`vb x.search …`). Broken plugins are isolated (logged, never fatal). Disable
+  discovery with `VIBATCHIUM_PLUGINS=0`.
+  **Trust caveat:** plugin code runs in-process as your user, so
+  `caps_required`/`secrets_required` on a `VerbSpec` are descriptive only — the
+  daemon cannot enforce them against plugin code.
+  `vb plugin install` is PEP-668 aware: it uses `pipx inject` under a pipx
+  install, else `pip install` with a `--break-system-packages` retry (and prints
+  the exact command) on `externally-managed-environment`.
+
+- **Skills** — per-host Markdown field-notes under
+  `~/.config/vibatchium/skills/<host>/` (browser-use `domain-skills` layout
+  compatible). New verbs: `skill_list`, `skill_show`, `skill_write`, `skill_rm`,
+  `skill_import` (CLI + MCP). Surfacing on `go`/`explore` is **opt-in** via
+  `VIBATCHIUM_SKILLS=1` — when set, the navigation response carries a `skills`
+  key with matching notes. Notes are **injection-scanned on read** (high-risk
+  content withheld but still flagged) and **secret-scanned on write/import**
+  (refused unless `skill write --allow-secrets`).
+
+- **Goals** — durable, budget-capped, externally-driven tasks backed by SQLite
+  (ULID ids, append-only event stream, crash-resume: `running`→`paused` on
+  daemon restart). The daemon is the budget cop (steps / spend / wall-clock,
+  hard-stop on exceed); the LLM is **not** run in the daemon — an external driver
+  loops `goal next` → drive the browser → `goal step`. New verbs: `goal_new`,
+  `goal_list`, `goal_show`, `goal_events`, `goal_next`, `goal_step`, `goal_ask`,
+  `goal_answer`, `goal_done`, `goal_fail`, `goal_cancel`, `goal_pause`,
+  `goal_resume`, `goal_spawn`, `goal_tree`, `goal_artifacts` (CLI + MCP).
+  Notifiers: `stdout://`, `webhook://<full-url>` (non-blocking — POSTs run off the
+  event loop), `mcp_push://` (no-op sink; read events back via `goal_events`).
+  Pause/resume round-trips browser state via `checkpoint_save`/`checkpoint_load`.
+
+### Changed
+
+- Goal engine now routes all SQLite I/O through a thread executor so the daemon's
+  single event loop never blocks on disk; webhook notifier POSTs run on their own
+  thread (a slow endpoint can no longer stall every session).
+- `goal step` idempotency now returns the **identical recorded result** for a
+  replayed `client_token`, not just the step number.
+
 ## [0.5.1] — 2026-05-28
 
 ### Fixed (BLOCKERs surfaced post-rename audit)
