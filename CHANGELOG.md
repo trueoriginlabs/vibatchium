@@ -4,6 +4,17 @@ All notable changes to vibatchium are documented here. Versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Until 1.0,
 minor bumps may include breaking changes; we'll always call them out here.
 
+## [0.6.2] — 2026-05-28
+
+### Added
+- **`vb update`** — one-command self-upgrade + daemon restart. Detects a pipx
+  install (`pipx upgrade` / `pipx install --force`) else `pip install -U` with a
+  PEP-668 `--break-system-packages` fallback, then stops the running daemon so
+  the next command loads the new version (the long-running daemon serves old code
+  until it's bounced). `--version` pins a release; `--no-restart` skips the bounce.
+- README **Updating** section documenting `vb update` and the manual
+  upgrade + `vb shutdown` flow.
+
 ## [0.6.1] — 2026-05-28
 
 ### Fixed

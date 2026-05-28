@@ -668,6 +668,47 @@ def setup(ctx, agents, check, no_docs):
 
 
 @cli.command()
+@click.option("--version", "version", default=None,
+              help="Install a specific version (e.g. 0.6.2). Default: latest.")
+@click.option("--no-restart", is_flag=True,
+              help="Upgrade only; don't stop the running daemon.")
+@click.pass_context
+def update(ctx, version, no_restart):
+    """Upgrade vibatchium, then restart the daemon.
+
+    Detects a pipx install (`pipx upgrade` / `pipx install --force`) else
+    `pip install -U` with a PEP-668 `--break-system-packages` fallback, then
+    stops the running daemon so the next command loads the new version (the
+    long-running daemon keeps serving old code until it's bounced).
+
+    \b
+    vb update                  # latest from PyPI
+    vb update --version 0.6.2  # pin a version
+    vb update --no-restart     # upgrade only; bounce the daemon yourself
+    """
+    target = f"vibatchium=={version}" if version else "vibatchium (latest)"
+    click.echo(f"updating {target} …", err=True)
+    rc, note = _update_dist(version)
+    if note:
+        click.echo(note, err=True)
+    if rc != 0:
+        click.echo(f"update failed (rc={rc})", err=True)
+        sys.exit(rc)
+    if not no_restart:
+        try:
+            if daemon_is_running():
+                call("shutdown", auto_spawn=False)
+                click.echo("daemon stopped — the next `vb` command starts the "
+                           "new version.", err=True)
+            else:
+                click.echo("daemon not running — nothing to restart.", err=True)
+        except Exception as exc:  # noqa: BLE001
+            click.echo(f"(could not stop daemon: {exc}; run `vb shutdown` "
+                       f"manually)", err=True)
+    click.echo("updated — confirm with `vb --version`.")
+
+
+@cli.command()
 @click.pass_context
 def shutdown(ctx):
     """Stop the browser AND tell the daemon to exit."""
@@ -2732,6 +2773,23 @@ def _remove_plugin_dist(dist: str) -> tuple[int, str]:
         rc = _run(cmd, capture=False).returncode
         return rc, "pipx detected — " + " ".join(cmd)
     rc, _, note = _pip_with_pep668_fallback(["uninstall", "-y", dist])
+    return rc, note
+
+
+def _update_dist(version: str | None) -> tuple[int, str]:
+    """Upgrade the vibatchium distribution itself. Returns ``(returncode, message)``.
+
+    Mirrors ``_install_plugin_dist``: pipx-aware, with a PEP-668
+    ``--break-system-packages`` fallback for plain pip.
+    """
+    target = f"vibatchium=={version}" if version else "vibatchium"
+    if _is_pipx_install():
+        cmd = (["pipx", "install", "--force", target] if version
+               else ["pipx", "upgrade", "vibatchium"])
+        rc = _run(cmd, capture=False).returncode
+        return rc, "pipx detected — " + " ".join(cmd)
+    pip_args = ["install", target] if version else ["install", "-U", "vibatchium"]
+    rc, _, note = _pip_with_pep668_fallback(pip_args)
     return rc, note
 
 
