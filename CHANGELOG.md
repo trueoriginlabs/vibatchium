@@ -4,6 +4,15 @@ All notable changes to vibatchium are documented here. Versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Until 1.0,
 minor bumps may include breaking changes; we'll always call them out here.
 
+## [0.6.1] — 2026-05-28
+
+### Fixed
+- **Added the missing `vb goal events <id>` CLI subcommand.** The `goal_events`
+  daemon verb already existed (and was exposed over MCP, REST, and the SSE tail),
+  and `goal show` embedded the stream, but there was no CLI wrapper — so the
+  `vb goal events … --after-seq N` invocation documented in `AGENTS.md` errored.
+  The CLI now has parity with the daemon verb. (Caught by the 0.6.0 live smoke test.)
+
 ## [0.6.0] — 2026-05-28
 
 ### Added — Plugins, Skills, Goals
