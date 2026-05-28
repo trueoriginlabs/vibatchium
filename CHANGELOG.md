@@ -4,6 +4,22 @@ All notable changes to vibatchium are documented here. Versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Until 1.0,
 minor bumps may include breaking changes; we'll always call them out here.
 
+## [0.6.3] — 2026-05-28
+
+### Added
+- **Daemon version + staleness warning.** `ping`/`status` now report the daemon's
+  version; `vb status` surfaces `daemon_version` vs `client_version` and warns
+  (`⚠ daemon is running X but the CLI is Y — run vb update`) on a mismatch — so
+  the "forgot to restart the daemon after upgrading" footgun is now visible.
+- **`vb goal events --follow` (`-f`)** — live-tail a goal's event stream in the
+  terminal, stopping on a terminal event (done/failed/cancelled) or Ctrl-C.
+
+### Changed
+- **`vb goal new` accepts a positional description** (`vb goal new "do X"`),
+  matching `skill write` / `go` / `plugin show`; `-d/--description` still works.
+- `checkpoint_saved` is no longer emitted with a null id when a goal has no live
+  session to snapshot (removes a noisy event; an existing checkpoint id is kept).
+
 ## [0.6.2] — 2026-05-28
 
 ### Added

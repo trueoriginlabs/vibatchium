@@ -734,10 +734,23 @@ def status(ctx):
             "mode": None,
             "pid": None,
             "running_sessions": [],
+            "client_version": __version__,
+            "daemon_version": None,
+            "version_mismatch": False,
         }
     else:
         result = call("status")
         result["daemon"] = True
+        result["daemon_version"] = result.pop("version", None)
+        result["client_version"] = __version__
+        result["version_mismatch"] = bool(
+            result["daemon_version"]
+            and result["daemon_version"] != __version__)
+        if result["version_mismatch"] and not ctx.obj["json"]:
+            click.echo(
+                f"⚠ daemon is running {result['daemon_version']} but the CLI is "
+                f"{__version__} — run `vb update` (or `vb shutdown`) so the next "
+                f"command loads the new version.", err=True)
     _emit(result, ctx.obj["json"])
 
 
@@ -2948,7 +2961,9 @@ def goal():
 
 
 @goal.command("new")
-@click.option("--description", "-d", required=True, help="What the goal is.")
+@click.argument("description_arg", required=False)
+@click.option("--description", "-d", "description_opt", default=None,
+              help="What the goal is (alias for the positional DESCRIPTION).")
 @click.option("--session", "session_name", default=None,
               help="Session the goal drives (default: active session).")
 @click.option("--notifier", default=None,
@@ -2961,9 +2976,18 @@ def goal():
 @click.option("--allow-domains", "allow_domains", default=None,
               help="CSV of allowed origins.")
 @click.pass_context
-def goal_new(ctx, description, session_name, notifier, budget, driver, caps,
-             allow_domains):
-    """Create a goal (status: pending)."""
+def goal_new(ctx, description_arg, description_opt, session_name, notifier,
+             budget, driver, caps, allow_domains):
+    """Create a goal (status: pending).
+
+    \b
+    vb goal new "buy the cheapest flight" --budget steps=40
+    vb goal new -d "buy the cheapest flight"   # -d alias also works
+    """
+    description = description_arg or description_opt
+    if not description:
+        raise click.UsageError(
+            "provide a goal description (positional, or -d/--description)")
     args = {"description": description, "driver": driver}
     if session_name:
         args["session"] = session_name
@@ -3011,27 +3035,59 @@ def goal_show(ctx, goal_id, after_seq):
           ctx.obj["json"])
 
 
-@goal.command("events")
-@click.argument("goal_id")
-@click.option("--after-seq", "after_seq", default=0, type=int,
-              help="Only events after this sequence number (poll to tail).")
-@click.pass_context
-def goal_events(ctx, goal_id, after_seq):
-    """Print a goal's event stream (use --after-seq to page/tail)."""
-    res = call("goal_events", {"goal_id": goal_id, "after_seq": after_seq})
-    if ctx.obj["json"]:
-        _emit(res, True)
-        return
-    events = res.get("events", [])
-    if not events:
-        click.echo("no events" if after_seq == 0
-                   else f"no events after seq {after_seq}")
-        return
+_GOAL_TERMINAL_KINDS = {"done", "failed", "cancelled"}
+
+
+def _print_goal_events(events):
     for e in events:
         payload = json.dumps(e.get("payload", {}))
         if len(payload) > 200:
             payload = payload[:197] + "..."
         click.echo(f"#{e['seq']} {e['kind']}  {payload}")
+
+
+@goal.command("events")
+@click.argument("goal_id")
+@click.option("--after-seq", "after_seq", default=0, type=int,
+              help="Only events after this sequence number (poll to tail).")
+@click.option("--follow", "-f", is_flag=True,
+              help="Poll and print new events live until the goal ends "
+                   "(Ctrl-C to stop).")
+@click.pass_context
+def goal_events(ctx, goal_id, after_seq, follow):
+    """Print a goal's event stream (use --after-seq to page, -f to tail live)."""
+    res = call("goal_events", {"goal_id": goal_id, "after_seq": after_seq})
+    if ctx.obj["json"] and not follow:
+        _emit(res, True)
+        return
+    events = res.get("events", [])
+    if not follow:
+        if not events:
+            click.echo("no events" if after_seq == 0
+                       else f"no events after seq {after_seq}")
+            return
+        _print_goal_events(events)
+        return
+    # follow mode: human stream, poll until a terminal event or Ctrl-C
+    import time as _t
+    last = after_seq
+    if events:
+        _print_goal_events(events)
+        last = events[-1]["seq"]
+        if any(e["kind"] in _GOAL_TERMINAL_KINDS for e in events):
+            return
+    try:
+        while True:
+            _t.sleep(1.0)
+            res = call("goal_events", {"goal_id": goal_id, "after_seq": last})
+            evs = res.get("events", [])
+            if evs:
+                _print_goal_events(evs)
+                last = evs[-1]["seq"]
+                if any(e["kind"] in _GOAL_TERMINAL_KINDS for e in evs):
+                    break
+    except KeyboardInterrupt:
+        click.echo("(stopped)", err=True)
 
 
 @goal.command("next")

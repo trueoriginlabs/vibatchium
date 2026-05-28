@@ -133,7 +133,9 @@ def _resolve_target(daemon, target: str):
 def register_all(daemon) -> None:
     @daemon.handler("ping")
     async def _ping(d, args):
-        return {"pong": True, "session": d.session is not None}
+        from .. import __version__
+        return {"pong": True, "session": d.session is not None,
+                "version": __version__}
 
     # ─── Wave 7.6: utilities (no session required) ───────────────────────
 
@@ -818,6 +820,7 @@ def register_all(daemon) -> None:
     @daemon.handler("status")
     async def _status(d, args):
         """Report on the active session + the registry's running set."""
+        from .. import __version__
         name = current_session_ctx.get()
         entry = d.registry.get(name)
         return {
@@ -825,6 +828,7 @@ def register_all(daemon) -> None:
             "session": name,
             "mode": entry.session.mode if entry else None,
             "pid": os.getpid(),
+            "version": __version__,
             "running_sessions": d.registry.list_running(),
         }
 

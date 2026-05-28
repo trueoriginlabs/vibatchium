@@ -346,6 +346,49 @@ async def test_goal_spawn_tree_via_dispatch(tmp_path, monkeypatch):
     assert any(a["name"] == "a" for a in arts["artifacts"])
 
 
+# ─── 0.6.3 #4: checkpoint_saved only emitted when a real id is produced ─────
+
+async def test_checkpoint_saved_only_when_cb_returns_id(tmp_path):
+    async def cb_none(sess, name):
+        return None
+
+    s1 = GoalStore(tmp_path / "a.db")
+    e1 = GoalEngine(s1, checkpoint_cb=cb_none)
+    g = await e1.create(description="t", session="w", budget={"max_steps": 9})
+    await e1.next()
+    await e1.step(g["id"])
+    kinds = [ev["kind"] for ev in await e1.events(g["id"])]
+    assert "checkpoint_saved" not in kinds        # no noisy null-id event
+    assert (await e1.get(g["id"]))["checkpoint_id"] is None
+    s1.close()
+
+    async def cb_id(sess, name):
+        return "cp-xyz"
+
+    s2 = GoalStore(tmp_path / "b.db")
+    e2 = GoalEngine(s2, checkpoint_cb=cb_id)
+    g2 = await e2.create(description="t", session="w", budget={"max_steps": 9})
+    await e2.next()
+    await e2.step(g2["id"])
+    kinds2 = [ev["kind"] for ev in await e2.events(g2["id"])]
+    assert "checkpoint_saved" in kinds2
+    assert (await e2.get(g2["id"]))["checkpoint_id"] == "cp-xyz"
+    s2.close()
+
+
+# ─── 0.6.3 #1: daemon reports its version (ping + status) ───────────────────
+
+async def test_status_and_ping_report_version(tmp_path, monkeypatch):
+    monkeypatch.setattr(gstore, "GOALS_DB", tmp_path / "goals.db")
+    from vibatchium import __version__
+    from vibatchium.daemon.server import Daemon
+    d = Daemon()
+    r = await d.dispatch({"id": "1", "cmd": "status", "args": {}})
+    assert r["ok"] and r["result"]["version"] == __version__
+    p = await d.dispatch({"id": "2", "cmd": "ping", "args": {}})
+    assert p["ok"] and p["result"]["version"] == __version__
+
+
 # ─── 5.1 per-goal caps enforcement on the owned session ────────────────────
 
 async def test_goal_caps_block_out_of_bucket_verbs(tmp_path, monkeypatch):
