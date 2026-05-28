@@ -2953,6 +2953,29 @@ def goal_show(ctx, goal_id, after_seq):
           ctx.obj["json"])
 
 
+@goal.command("events")
+@click.argument("goal_id")
+@click.option("--after-seq", "after_seq", default=0, type=int,
+              help="Only events after this sequence number (poll to tail).")
+@click.pass_context
+def goal_events(ctx, goal_id, after_seq):
+    """Print a goal's event stream (use --after-seq to page/tail)."""
+    res = call("goal_events", {"goal_id": goal_id, "after_seq": after_seq})
+    if ctx.obj["json"]:
+        _emit(res, True)
+        return
+    events = res.get("events", [])
+    if not events:
+        click.echo("no events" if after_seq == 0
+                   else f"no events after seq {after_seq}")
+        return
+    for e in events:
+        payload = json.dumps(e.get("payload", {}))
+        if len(payload) > 200:
+            payload = payload[:197] + "..."
+        click.echo(f"#{e['seq']} {e['kind']}  {payload}")
+
+
 @goal.command("next")
 @click.pass_context
 def goal_next(ctx):
