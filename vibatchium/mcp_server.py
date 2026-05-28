@@ -662,6 +662,151 @@ TOOLS: list[tuple[str, str, dict, str, Any]] = [
      "handle_dispose", None),
     ("handle_dispose_all", "Release all active handles.",
      {"type": "object", "properties": {}}, "handle_dispose_all", None),
+    # ─── Skills: per-host markdown field-notes ───────────────────────────
+    ("skill_list",
+     "List skill-note hosts, or the notes for one host. Skills are per-host "
+     "markdown field-notes surfaced on `go`/`explore` when VIBATCHIUM_SKILLS=1.",
+     {"type": "object", "properties": {"host": _str("Filter to one host.")}},
+     "skill_list", None),
+    ("skill_show",
+     "Show one skill note's content + its prompt-injection scan.",
+     {"type": "object", "properties": {
+         "host": _str("Host, e.g. github.com."),
+         "file": _str("Note filename, e.g. scraping.md.")},
+      "required": ["host", "file"]},
+     "skill_show", None),
+    ("skill_write",
+     "Write/overwrite a skill note for a host. Call this when you learn "
+     "something non-obvious about a site (a working selector, 'use the API "
+     "here', a login quirk) so future runs benefit. Refused if the body "
+     "contains secret-like material (tokens/passwords/keys) — notes are "
+     "shareable and must never carry secrets.",
+     {"type": "object", "properties": {
+         "host": _str("Host, e.g. github.com."),
+         "title": _str("Note title (derives the filename if `file` omitted)."),
+         "file": _str("Explicit filename (foo.md)."),
+         "body": _str("Markdown note body."),
+         "allow_secrets": _bool(
+             "Persist even if the body looks like it contains a secret "
+             "(only for a confirmed false positive).")},
+      "required": ["host", "body"]},
+     "skill_write", None),
+    ("skill_rm", "Delete a skill note (host + file).",
+     {"type": "object", "properties": {
+         "host": _str("Host."), "file": _str("Note filename.")},
+      "required": ["host", "file"]},
+     "skill_rm", None),
+    ("skill_import",
+     "Import skill notes from a git+URL[#subpath] or local dir "
+     "(browser-use domain-skills format-compatible). Secret-bearing notes "
+     "are skipped.",
+     {"type": "object", "properties": {
+         "source": _str("git+https://...#subpath or a local directory path.")},
+      "required": ["source"]},
+     "skill_import", None),
+    # ─── Goals: durable long-running operations (external-driver flow) ───
+    ("goal_new",
+     "Create a durable goal. The daemon persists its state + event stream; you "
+     "drive it via goal_next → (browser verbs) → goal_step in a loop. Goals "
+     "survive daemon restarts and enforce a budget.",
+     {"type": "object", "properties": {
+         "description": _str("What the goal is."),
+         "session": _str("Session the goal drives (default: active)."),
+         "notifier": _str("stdout:// | webhook://URL | mcp_push://"),
+         "budget": _str("Shorthand e.g. 'steps=30,minutes=20,spend_usd=2'."),
+         "caps": _str("Restrict caps for this goal (CSV)."),
+         "allow_domains": _str("CSV of allowed origins.")},
+      "required": ["description"]},
+     "goal_new", None),
+    ("goal_list", "List goals, optionally filtered by status.",
+     {"type": "object", "properties": {"status": _str("Filter by state.")}},
+     "goal_list", None),
+    ("goal_show", "Show a goal + its event stream (use after_seq to page).",
+     {"type": "object", "properties": {
+         "goal_id": _str("Goal id."),
+         "after_seq": _int("Only events after this seq.", 0)},
+      "required": ["goal_id"]},
+     "goal_show", None),
+    ("goal_events", "Fetch a goal's events after a sequence number (for tailing).",
+     {"type": "object", "properties": {
+         "goal_id": _str("Goal id."), "after_seq": _int("After seq.", 0)},
+      "required": ["goal_id"]},
+     "goal_events", None),
+    ("goal_next",
+     "Pick the next runnable goal, lock its session, and return driver context "
+     "(the goal, recent events, caps). Returns goal=null if none runnable.",
+     {"type": "object", "properties": {}}, "goal_next", None),
+    ("goal_step",
+     "Record one step of work on a goal: the action you took + the observation "
+     "you got. Charges the budget and hard-stops on exceed. Pass client_token "
+     "to make a retried step idempotent (no double-charge).",
+     {"type": "object", "properties": {
+         "goal_id": _str("Goal id."),
+         "action": {"type": "object", "description": "The action taken."},
+         "observation": {"type": "object", "description": "What you observed."},
+         "model_call": {"type": "object",
+                        "description": "{model,input_tokens,output_tokens} or {cost_usd}."},
+         "client_token": _str("Idempotency token.")},
+      "required": ["goal_id"]},
+     "goal_step", None),
+    ("goal_ask",
+     "Pause the goal awaiting a human answer (status → needs_input).",
+     {"type": "object", "properties": {
+         "goal_id": _str("Goal id."), "question": _str("The question.")},
+      "required": ["goal_id", "question"]},
+     "goal_ask", None),
+    ("goal_answer", "Supply the awaited answer; goal becomes runnable again.",
+     {"type": "object", "properties": {
+         "goal_id": _str("Goal id."), "text": _str("The answer.")},
+      "required": ["goal_id", "text"]},
+     "goal_answer", None),
+    ("goal_done", "Mark the goal complete with optional outputs.",
+     {"type": "object", "properties": {
+         "goal_id": _str("Goal id."),
+         "outputs": {"type": "object", "description": "Result payload."}},
+      "required": ["goal_id"]},
+     "goal_done", None),
+    ("goal_pause", "Pause a running goal (releases its session).",
+     {"type": "object", "properties": {"goal_id": _str("Goal id.")},
+      "required": ["goal_id"]},
+     "goal_pause", None),
+    ("goal_resume", "Resume a paused goal and start it immediately.",
+     {"type": "object", "properties": {"goal_id": _str("Goal id.")},
+      "required": ["goal_id"]},
+     "goal_resume", None),
+    ("goal_cancel", "Cancel a goal (terminal).",
+     {"type": "object", "properties": {"goal_id": _str("Goal id.")},
+      "required": ["goal_id"]},
+     "goal_cancel", None),
+    ("goal_fail", "Mark a goal failed (terminal).",
+     {"type": "object", "properties": {
+         "goal_id": _str("Goal id."), "reason": _str("Failure reason.")},
+      "required": ["goal_id"]},
+     "goal_fail", None),
+    ("goal_spawn",
+     "Create a child goal under a parent (inherits the parent's "
+     "session/budget/caps unless overridden).",
+     {"type": "object", "properties": {
+         "parent_id": _str("Parent goal id."),
+         "description": _str("What the child goal is."),
+         "session": _str("Session for the child (default: parent's)."),
+         "budget": _str("Child budget (default: parent's)."),
+         "caps": _str("Caps for the child (default: parent's).")},
+      "required": ["parent_id", "description"]},
+     "goal_spawn", None),
+    ("goal_tree", "Return the goal hierarchy rooted at a goal id.",
+     {"type": "object", "properties": {"goal_id": _str("Root goal id.")},
+      "required": ["goal_id"]},
+     "goal_tree", None),
+    ("goal_artifacts",
+     "List a goal's artifacts, or record one with name + path.",
+     {"type": "object", "properties": {
+         "goal_id": _str("Goal id."),
+         "name": _str("Artifact name (with `path`, records it)."),
+         "path": _str("Artifact path (with `name`, records it)."),
+         "mime": _str("Artifact MIME type.")},
+      "required": ["goal_id"]},
+     "goal_artifacts", None),
 ]
 
 
@@ -678,87 +823,15 @@ _TOOL_BY_NAME = {t[0]: t for t in TOOLS}
 # those buckets. Omit --caps (or pass `--caps=all`) for the full 80+ surface.
 #
 # A tool can belong to MULTIPLE caps; it's exposed if any of its caps is selected.
-
-_CAP_BUCKETS: dict[str, set[str]] = {
-    "core":     {"start", "attach", "stop", "status", "set_log_verbs",
-                 # Wave 7.7.5: explore is the canonical "just look at a URL"
-                 # entry point; belongs in core so it's exposed in every
-                 # cap-gated MCP surface
-                 "explore"},
-    "session":  {"session_new", "session_list", "session_use", "session_switch",
-                 "session_close", "session_close_all", "session_delete",
-                 "profile_list", "profile_new", "profile_use", "profile_delete"},
-    "nav":      {"go", "back", "forward", "reload", "url", "title",
-                 "wait_url", "wait_load", "wait_fn",
-                 # v0.5.1: wait verbs belong with nav (parity with wait_url etc.)
-                 "wait_selector", "wait_ref",
-                 # Wave 7.6: URL pre-check belongs with navigation
-                 "verify_url"},
-    "content":  {"text", "html", "eval", "attr", "value", "content", "count", "find"},
-    "input":    {"click", "fill", "type", "hover", "press", "keys",
-                 "check", "uncheck", "scroll", "is_state", "mouse", "upload",
-                 # v0.5.1: dblclick/focus/select are input verbs too
-                 "dblclick", "focus", "select",
-                 # Wave 6.2b: humanize toggle belongs with input
-                 "humanize_on", "humanize_off", "humanize_status"},
-    "element":  {"map", "map_compact", "diff_map", "highlight"},
-    "pages":    {"pages", "page_new", "page_switch", "frames", "frame",
-                 # v0.5.1: tab close
-                 "page_close"},
-    "storage":  {"storage_export", "storage_restore", "cookies",
-                 # Wave 6.1c: checkpoint = persisted multi-tab storage snapshot
-                 "checkpoint_save", "checkpoint_load", "checkpoint_list",
-                 "checkpoint_delete"},
-    "network":  {"network_start", "network_stop", "network_dump",
-                 "route_add", "route_list", "route_clear", "wait_response",
-                 "har_start", "har_stop",
-                 # Wave 6.2a: per-session proxy belongs in 'network'
-                 "proxy_set", "proxy_clear", "proxy_info"},
-    "dialogs":  {"dialog_policy", "download_arm", "download_list", "download_save"},
-    "overrides":{"geolocation", "media", "viewport"},
-    "vision":   {"screenshot", "screenshot_annotate", "pdf",
-                 # Wave 6.3d: vision-first primitives belong in 'vision' too
-                 "vision_click", "vision_find", "vision_type",
-                 "vision_stats", "vision_clear_cache",
-                 # Wave 7.2: budget reporting
-                 "vision_budget"},
-    "devtools": {"record_start", "record_stop",
-                 "eval_handle", "handle_eval", "handle_list",
-                 "handle_dispose", "handle_dispose_all"},
-    "agent":    {"observe", "act", "dismiss_banners"},
-    # Wave 5.4b: backend / stealth tooling. Separate bucket so headless agents
-    # don't get tempted to run stealth scorers as part of regular browsing.
-    "stealth":  {"fingerprint"},
-    # Wave 6.1a: live-view server. Separate bucket — agents shouldn't typically
-    # be the ones starting/stopping the viewer; it's a developer/operator tool.
-    "liveview": {"liveview_start", "liveview_stop", "liveview_url"},
-    # Wave 6.3a: credential vault. Separate bucket — agents that don't need
-    # 2FA shouldn't be tempted to enumerate secrets.
-    "secrets":  {"secret_init", "secret_set", "secret_list", "secret_delete",
-                 "secret_totp", "wait_email_code"},
-    # Wave 6.3c: safety toggle
-    "safety":   {"safety_set", "safety_status", "safety_scan", "safety_scan_html"},
-}
-
-# Tools every cap-filtered surface always retains — necessities for LLMs that
-# need to know what to do when nothing else matches.
-_ALWAYS_EXPOSED: set[str] = {"status"}
-
-
-def _resolve_caps(caps_spec: str | None) -> set[str] | None:
-    """Parse a `--caps=a,b,c` string into a bucket set; None means 'expose all'."""
-    if not caps_spec:
-        return None
-    parts = {p.strip().lower() for p in caps_spec.split(",") if p.strip()}
-    if "all" in parts:
-        return None  # all == no filter
-    bad = parts - set(_CAP_BUCKETS.keys())
-    if bad:
-        raise ValueError(
-            f"unknown capability bucket(s): {sorted(bad)}. "
-            f"Available: {sorted(_CAP_BUCKETS.keys())}"
-        )
-    return parts
+#
+# The bucket data + cap resolution live in `vibatchium/caps.py` (dependency-free)
+# so the dispatcher and the REST shim share one source of truth. Re-exported
+# under the historical private names for in-module + rest.py use.
+from .caps import (  # noqa: E402
+    ALWAYS_EXPOSED as _ALWAYS_EXPOSED,
+    CAP_BUCKETS as _CAP_BUCKETS,
+    resolve_caps as _resolve_caps,
+)
 
 
 def _filter_tools(caps: set[str] | None) -> list[tuple]:
@@ -792,14 +865,76 @@ def _augment_schema_with_session(schema: dict) -> dict:
     return new
 
 
+_TYPE_MAP = {
+    "string": "string", "str": "string",
+    "integer": "integer", "int": "integer",
+    "number": "number", "float": "number",
+    "boolean": "boolean", "bool": "boolean",
+    "array": "array", "list": "array",
+    "object": "object", "dict": "object",
+}
+
+
+def _flat_schema_to_jsonschema(inputs_schema: dict) -> dict:
+    """Convert a plugin's flat ``{name: type}`` inputs_schema into a JSON-schema
+    object. A value that is already a dict (full JSON-schema fragment) is kept
+    as-is, so plugins can opt into richer schemas."""
+    props: dict = {}
+    for key, typ in (inputs_schema or {}).items():
+        if isinstance(typ, dict):
+            props[key] = typ
+        else:
+            props[key] = {"type": _TYPE_MAP.get(str(typ).lower(), "string")}
+    return {"type": "object", "properties": props}
+
+
+def _plugins_allowed(caps: set[str] | None) -> bool:
+    return caps is None or "plugins" in caps
+
+
+def _plugin_tools() -> list[types.Tool]:
+    """Fetch plugin verb specs from the daemon and render them as MCP tools.
+
+    Best-effort: if the daemon isn't running we return nothing rather than
+    spawning it just to list (a bare `list_tools` shouldn't cold-start Chrome
+    infra). Plugin verbs appear once the daemon is up.
+    """
+    if not _plugins_allowed(_ACTIVE_CAPS):
+        return []
+    if not daemon_is_running():
+        return []
+    try:
+        res = daemon_call("list_verbs")
+    except Exception:  # noqa: BLE001
+        return []
+    out: list[types.Tool] = []
+    for spec in (res or {}).get("verbs", []):
+        name = spec.get("name")
+        if not name:
+            continue
+        desc = spec.get("description") or f"Plugin verb {name}."
+        plugin = spec.get("plugin")
+        if plugin:
+            desc = f"[plugin: {plugin}] {desc}"
+        schema = _flat_schema_to_jsonschema(spec.get("inputs_schema") or {})
+        out.append(types.Tool(
+            name=name, description=desc,
+            inputSchema=_augment_schema_with_session(schema)))
+    return out
+
+
 @server.list_tools()
 async def list_tools() -> list[types.Tool]:
     tools = _filter_tools(_ACTIVE_CAPS)
-    return [
+    static = [
         types.Tool(name=name, description=desc,
                    inputSchema=_augment_schema_with_session(schema))
         for (name, desc, schema, _cmd, _mapper) in tools
     ]
+    # Dynamically discovered plugin verbs (dotted names — never collide with
+    # the static built-ins). Fetched from the live daemon at list time.
+    plugin_tools = await asyncio.to_thread(_plugin_tools)
+    return static + plugin_tools
 
 
 def _err(msg: str) -> types.CallToolResult:
@@ -814,19 +949,31 @@ def _err(msg: str) -> types.CallToolResult:
 
 @server.call_tool()
 async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.Content] | types.CallToolResult:
+    entry = _TOOL_BY_NAME.get(name)
+    is_plugin_verb = entry is None and "." in name
     # If caps are active, refuse calls to tools outside the filter — protects
     # against an LLM hallucinating a tool name that wasn't in list_tools.
     if _ACTIVE_CAPS is not None:
-        allowed = {t[0] for t in _filter_tools(_ACTIVE_CAPS)}
-        if name not in allowed:
-            return _err(
-                f"tool {name!r} is not in the enabled capabilities "
-                f"({sorted(_ACTIVE_CAPS)})"
-            )
-    entry = _TOOL_BY_NAME.get(name)
-    if entry is None:
+        if is_plugin_verb:
+            if not _plugins_allowed(_ACTIVE_CAPS):
+                return _err(
+                    f"plugin verb {name!r} is not enabled — add `plugins` to "
+                    f"--caps (have {sorted(_ACTIVE_CAPS)})"
+                )
+        else:
+            allowed = {t[0] for t in _filter_tools(_ACTIVE_CAPS)}
+            if name not in allowed:
+                return _err(
+                    f"tool {name!r} is not in the enabled capabilities "
+                    f"({sorted(_ACTIVE_CAPS)})"
+                )
+    if entry is None and not is_plugin_verb:
         return _err(f"unknown tool: {name}")
-    _name, _desc, _schema, cmd, mapper = entry
+    if is_plugin_verb:
+        # Dotted plugin verb — daemon cmd == tool name, no arg remapping.
+        cmd, mapper = name, None
+    else:
+        _name, _desc, _schema, cmd, mapper = entry
     args = mapper(arguments) if mapper else dict(arguments or {})
 
     # Wave 7.7.5: MCP-specific default overrides. CLI users get the

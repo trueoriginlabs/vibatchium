@@ -31,6 +31,7 @@ from typing import Any
 from collections.abc import Awaitable, Callable
 
 from . import handlers, handlers_extra
+from ..caps import resolve_caps as _resolve_caps, verb_in_caps
 from .paths import DEFAULT_SESSION_NAME, LOG_PATH, PID_PATH, SOCK_PATH, get_active_session_name
 from .registry import SessionEntry, SessionRegistry, current_session_ctx
 
@@ -124,6 +125,21 @@ class Daemon:
         self.registry = SessionRegistry()
         self._handlers: dict[str, Callable[[Daemon, dict], Awaitable[Any]]] = {}
         self._stopping = asyncio.Event()
+        # ─── plugin state (see vibatchium/plugins/) ──────────────────────
+        # _verb_meta: name → VerbSpec for every add_verb-registered verb.
+        # _verb_lock_class: name → "session"|"registry"|"unlocked" override
+        #   consulted by dispatch() before the built-in *_VERBS frozensets.
+        # _plugin_verbs: the subset of verbs that came from plugins (so
+        #   plugin_reload can drop them without touching built-ins).
+        # _plugins: name → metadata dict (source, version, verbs, error).
+        # _loading_plugin: the plugin name currently being register()ed, so
+        #   add_verb can attribute verbs to their source plugin.
+        from ..plugins.api import VerbSpec as _VerbSpec  # noqa: F401  (typing/ref)
+        self._verb_meta: dict[str, Any] = {}
+        self._verb_lock_class: dict[str, str] = {}
+        self._plugin_verbs: set[str] = set()
+        self._plugins: dict[str, dict] = {}
+        self._loading_plugin: str | None = None
         # Wave 7.6: daemon-level flags (runtime-mutable). `log_verbs` controls
         # per-verb DEBUG logging; initial value from env so existing scripts
         # that set VIBATCHIUM_LOG_VERBS=1 keep working without a daemon restart
@@ -133,6 +149,23 @@ class Daemon:
         }
         handlers.register_all(self)
         handlers_extra.register_extra(self)
+        # Built-in plugin-admin verbs (plugin_list/show/reload, list_verbs).
+        from ..plugins.handlers import register_admin_verbs
+        register_admin_verbs(self)
+        # Built-in Skills verbs (skill_list/show/write/rm/import).
+        from ..skills.handlers import register_skill_verbs
+        register_skill_verbs(self)
+        # Built-in Goals verbs (goal_new/list/show/next/step/...).
+        from ..goals.handlers import register_goal_verbs
+        register_goal_verbs(self)
+        # Discover + load plugins. Opt out with VIBATCHIUM_PLUGINS=0. Isolated
+        # per plugin — a broken plugin is logged and skipped, never fatal.
+        if os.environ.get("VIBATCHIUM_PLUGINS", "1").lower() not in ("0", "false", "no", "off"):
+            try:
+                from ..plugins import registry as _plugin_registry
+                _plugin_registry.load_into(self)
+            except Exception:  # noqa: BLE001
+                log.exception("plugin loading failed (continuing without plugins)")
 
     # ─── handler registration ────────────────────────────────────────────
 
@@ -141,6 +174,62 @@ class Daemon:
             self._handlers[name] = fn
             return fn
         return deco
+
+    # ─── plugin verb registration (the add_verb contract) ─────────────────
+
+    def add_verb(
+        self,
+        name: str,
+        handler,
+        *,
+        inputs_schema: dict | None = None,
+        outputs_schema: dict | None = None,
+        caps_required: list[str] | None = None,
+        secrets_required: list[str] | None = None,
+        description: str = "",
+        lock: str = "session",
+    ) -> None:
+        """Register a plugin verb. Called from a plugin's ``register(daemon)``.
+
+        ``handler`` is ``async def(daemon, args: dict) -> JSON-serializable`` —
+        the same signature as built-in handlers, so the plugin can drive the
+        live session via ``daemon.session`` in-process.
+
+        ``caps_required`` / ``secrets_required`` are *descriptive only*; the
+        daemon cannot enforce them against in-process plugin code (which runs
+        as your user). See ``vibatchium/plugins/__init__.py``.
+
+        ``lock`` picks the dispatch lock class: ``"session"`` (default — needs
+        a running session + per-session lock), ``"registry"`` (serialized by
+        the registry mutate lock, no session), or ``"unlocked"`` (cheap/no
+        session). Raises ``PluginError`` on a bad name / collision.
+        """
+        from ..plugins.api import VerbSpec, PluginError
+        spec = VerbSpec(
+            name=name,
+            handler=handler,
+            inputs_schema=inputs_schema or {},
+            outputs_schema=outputs_schema or {},
+            caps_required=list(caps_required or []),
+            secrets_required=list(secrets_required or []),
+            description=description,
+            lock=lock,
+            plugin=self._loading_plugin,
+        )
+        if name in self._handlers and name not in self._plugin_verbs:
+            raise PluginError(
+                f"verb {name!r} would shadow a built-in verb — refused"
+            )
+        if name in self._plugin_verbs:
+            raise PluginError(
+                f"verb {name!r} already registered by another plugin — refused"
+            )
+        self._handlers[name] = handler
+        self._verb_meta[name] = spec
+        self._verb_lock_class[name] = lock
+        self._plugin_verbs.add(name)
+        if self._loading_plugin and self._loading_plugin in self._plugins:
+            self._plugins[self._loading_plugin]["verbs"].append(name)
 
     # ─── session-routed properties (drop-in replacements for the old single-
     #     session attributes that handlers still write to)
@@ -238,16 +327,29 @@ class Daemon:
             log.debug("verb session=%s cmd=%s args=%s",
                       session_name, cmd, _redact_for_log(cmd, args))
 
+        # Resolve the dispatch lock class. Plugin verbs (and the plugin-admin
+        # built-ins) carry an explicit class in _verb_lock_class; everything
+        # else falls back to the built-in *_VERBS frozensets, defaulting to
+        # session-scoped.
+        lock_class = self._verb_lock_class.get(cmd)
+        if lock_class is None:
+            if cmd in self.REGISTRY_VERBS:
+                lock_class = "registry"
+            elif cmd in self.UNLOCKED_VERBS:
+                lock_class = "unlocked"
+            else:
+                lock_class = "session"
+
         # Push the selected session into the contextvar so handlers (via the
         # session-routed properties above) operate on the right SessionEntry.
         tok = current_session_ctx.set(session_name)
         try:
-            if cmd in self.REGISTRY_VERBS:
+            if lock_class == "registry":
                 # Registry mutation — serialized by the registry's mutate_lock
                 # so concurrent session_new / start can't race on the dict.
                 async with self.registry.mutate_lock:
                     result = await self._handlers[cmd](self, args)
-            elif cmd in self.UNLOCKED_VERBS:
+            elif lock_class == "unlocked":
                 # Cheap reads + waits — no lock.
                 result = await self._handlers[cmd](self, args)
             else:
@@ -271,6 +373,23 @@ class Daemon:
                                      f"{' --session ' + session_name if session_name != DEFAULT_SESSION_NAME else ''}` first",
                         }
                 else:
+                    # Per-goal caps enforcement (D5): while a goal owns this
+                    # session it pins it to a cap set via entry.flags. Reject
+                    # out-of-bucket verbs at the socket boundary. (Plugin
+                    # in-process code remains the documented trust boundary.)
+                    goal_caps = entry.flags.get("goal_caps")
+                    if goal_caps:
+                        try:
+                            allowed = verb_in_caps(cmd, _resolve_caps(goal_caps))
+                        except Exception:  # noqa: BLE001
+                            allowed = True  # bad caps string → don't lock out
+                        if not allowed:
+                            return {
+                                "id": req_id, "ok": False,
+                                "error": f"verb {cmd!r} blocked by goal caps "
+                                         f"({goal_caps}) on session "
+                                         f"{session_name!r}",
+                            }
                     async with entry.lock:
                         result = await self._handlers[cmd](self, args)
             # Wave 6.3c: prompt-injection middleware. Off by default; per-session

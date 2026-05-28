@@ -103,7 +103,71 @@ VIBATCHIUM_DEFAULT_HEADLESS=1   # headless `start` (no desktop clutter)
 VIBATCHIUM_MAX_SESSIONS=8       # raise 4-session default for big fan-outs
 VIBATCHIUM_LOG_VERBS=1          # per-verb DEBUG audit trail
 VIBATCHIUM_DEFAULT_SAFETY=wrap  # auto-flag prompt-injection in scraped content
+VIBATCHIUM_SKILLS=1             # surface per-host skill notes on go/explore (opt-in)
+VIBATCHIUM_PLUGINS=0            # disable plugin discovery at daemon startup
 ```
+
+## Plugins — extend the verb surface
+
+Third-party packages and local dirs can register new dotted verbs (`x.search`,
+`stripe.charges`, …) that dispatch exactly like built-ins (over the socket, REST,
+and MCP). Dotted names can never shadow a built-in.
+
+```bash
+vb plugin list                  # installed plugins + their verbs
+vb plugin show xscraper         # one plugin's metadata + verb specs
+vb plugin install <pypi|git+url># pipx inject / pip (+PEP-668 fallback), then reload
+vb plugin reload                # rescan after editing a local-dir plugin
+vb x.search "$BTC" --count 20   # call a plugin verb (dotted passthrough)
+```
+
+Local-dir plugins live in `~/.config/vibatchium/plugins/<name>/__init__.py` with
+a top-level `register(daemon)` that calls `daemon.add_verb(name="ns.verb", …)`.
+**Trust boundary:** plugin code runs in-process as your user — `caps_required`
+is descriptive only, never enforced against plugin code.
+
+## Skills — per-host field notes the agent writes for itself
+
+Skills are per-host Markdown notes under `~/.config/vibatchium/skills/<host>/`.
+When you learn something non-obvious about driving a site (the real search box,
+a rate-limit quirk, a login gotcha), **write it down** so the next run starts
+ahead:
+
+```bash
+vb skill write github.com --title "scraping" --body "Use /api/v3 — faster than UI."
+vb skill list                   # hosts with notes
+vb skill show github.com scraping.md
+vb skill import git+https://… # browser-use domain-skills format compatible
+```
+
+Surfacing is opt-in: with `VIBATCHIUM_SKILLS=1`, `go`/`explore` attach a `skills`
+key listing matching notes for the host. Notes are **injection-scanned on read**
+(high-risk content withheld) and **secret-scanned on write** (refused if they
+look like they contain a token/key — use `--allow-secrets` only when you're sure
+it's a false positive).
+
+## Goals — durable, budget-capped, externally-driven tasks
+
+A *goal* is a persisted task with a budget (steps / spend / wall-clock), an event
+stream, crash-resume, and per-goal session ownership. The daemon is the budget
+cop; **you are the driver** — there's no LLM inside the daemon. Drive the loop:
+
+```bash
+vb goal new "buy cheapest BTC" --session work --budget steps=40,spend_usd=2
+# then loop:
+vb goal next                    # pick a runnable goal, lock its session, get context
+#   … drive the browser with normal verbs (click/fill/go/…) …
+vb goal step <id> --observation '{"price": 64000}'   # record one step (charges budget)
+vb goal ask <id> "which card?" # pause for a human answer (→ needs_input)
+vb goal done <id> --outputs '{"ok": true}'           # finish
+```
+
+`goal next` returns `{goal, recent_events, caps, domain_allowlist}`; `goal step`
+hard-stops at the budget (`failed:budget_exceeded`). A goal left `running` when
+the daemon dies is flipped to `paused` on restart and `goal next` can pick it
+back up. Events persist in SQLite — poll `vb goal events <id> --after-seq N` (the
+`mcp_push://` notifier is a no-op; the store is the source of truth). Sub-goals:
+`goal spawn --parent <id>`; `goal tree <id>`; artifacts: `goal artifacts <id>`.
 
 ## Going deeper
 

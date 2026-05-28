@@ -1,6 +1,6 @@
 # vibatchium capability reference
 
-Complete list of the 127 daemon verbs an agent can invoke. Every verb is exposed identically over CLI, MCP, and REST. Verbs that need a target take an `@eN` ref (from the most recent `map`) or any Playwright selector (`text=...`, `role=...`, `css=...`).
+Complete list of the daemon verbs an agent can invoke (150+, including Plugins / Skills / Goals — see the dedicated sections below). Every verb is exposed identically over CLI, MCP, and REST. Verbs that need a target take an `@eN` ref (from the most recent `map`) or any Playwright selector (`text=...`, `role=...`, `css=...`).
 
 ## Lifecycle (6)
 - `ping` — daemon health check
@@ -200,6 +200,46 @@ stealth    fingerprint
 liveview   liveview_start/stop/url
 secrets    secret_init/set/list/delete/totp, wait_email_code
 safety     safety_set/status/scan
+plugins    (switch) when caps are active, dotted plugin verbs are exposed only
+           if `plugins` is in --caps; bucket holds no static names
 ```
 
 `status` is always exposed regardless of the cap filter.
+
+## Plugins (4)
+Extend the verb surface from packages / local dirs. Dotted plugin verbs (`x.search`) dispatch like built-ins; they can never shadow a built-in name.
+- `plugin_list` — installed plugins, each with source, version, and registered verb names
+- `plugin_show <name>` — one plugin's metadata plus the full `VerbSpec` of each verb it registered
+- `plugin_reload` — rescan entry points + local dirs and re-register, no daemon restart
+- `list_verbs` — all plugin-registered verb specs (consumed by the MCP server to expose plugin verbs as tools)
+
+CLI-only management: `vb plugin install <pypi|git+url>` (pipx inject under pipx, else `pip install` with a PEP-668 `--break-system-packages` fallback) and `vb plugin remove <name>`.
+
+## Skills (5)
+Per-host Markdown field-notes under `~/.config/vibatchium/skills/<host>/`. Surfacing on `go`/`explore` is opt-in (`VIBATCHIUM_SKILLS=1`); notes are injection-scanned on read and secret-scanned on write/import.
+- `skill_list [host]` — note hosts, or the notes for one host
+- `skill_show <host> <file>` — one note's content + its prompt-injection scan
+- `skill_write <host> (--title|--file) --body [--allow-secrets]` — write/overwrite a note; refuses secret-like material unless `--allow-secrets`
+- `skill_rm <host> <file>` — delete a note
+- `skill_import <git+url|dir>` — import notes (browser-use `domain-skills` format compatible); secret-bearing notes are skipped
+
+## Goals (16)
+Durable, budget-capped, externally-driven tasks. The daemon persists state + an event stream and is the budget cop; an external driver runs the loop. All goal verbs are session-independent (`lock=unlocked`).
+- `goal_new <description> [--session] [--budget steps=,spend_usd=,minutes=] [--notifier] [--caps] [--allow-domains]` — create a goal (status `pending`)
+- `goal_list [--status]` — list goals, optionally filtered by status
+- `goal_show <id> [--after-seq N]` — goal record + events + artifacts
+- `goal_events <id> [--after-seq N]` — events after a sequence number (poll to tail)
+- `goal_next` — pick the next runnable goal, lock its session, return `{goal, recent_events, caps, domain_allowlist}`
+- `goal_step <id> [--action] [--observation] [--model-call] [--client-token]` — record one step; charges budget and hard-stops on exceed; idempotent on a repeated `client_token`
+- `goal_ask <id> <question>` — pause awaiting a human answer (→ `needs_input`)
+- `goal_answer <id> <text>` — supply the answer; goal becomes runnable again
+- `goal_done <id> [--outputs]` — mark complete
+- `goal_fail <id> [--reason]` — mark failed
+- `goal_cancel <id>` — cancel (terminal)
+- `goal_pause <id>` — release the session, snapshot a checkpoint
+- `goal_resume <id>` — un-pause and immediately re-start (restores the checkpoint)
+- `goal_spawn --parent <id> <description>` — create a child goal (inherits session/budget/caps unless overridden)
+- `goal_tree <id>` — the goal hierarchy rooted at `<id>`
+- `goal_artifacts <id> [--name --path]` — list artifacts, or record one
+
+Notifiers: `stdout://` (default, daemon log), `webhook://<full-url>` (non-blocking POST per event), `mcp_push://` (no-op sink — read events back via `goal_events`).
