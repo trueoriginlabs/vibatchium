@@ -19,7 +19,29 @@ vb research --target https://example.com \          # parallel fan-out, N intent
   --intent "pricing model" --intent "customers" --intent "tech stack"
 ```
 
-**Status:** active development, alpha. PyPI version lags — install from source / git URL. 384 tests green. 31/31 on bot.sannysoft.com. Cleared HackerOne Cloudflare cold-launch. Apache-2.0 (GPL/AGPL only via opt-in extras).
+**Status:** active development, alpha. 526 tests green. 31/31 on bot.sannysoft.com. Cleared HackerOne Cloudflare cold-launch. Apache-2.0 (GPL/AGPL only via opt-in extras).
+
+## Updating
+
+```bash
+vb update                  # upgrade to the latest PyPI release + restart the daemon
+vb update --version 0.6.2  # or pin a specific version
+```
+
+`vb update` detects how vibatchium was installed (pipx or pip, with a PEP-668
+`--break-system-packages` fallback) and then **stops the running daemon** so the
+next command loads the new code. Manual equivalent:
+
+```bash
+pipx upgrade vibatchium    # or: pip install -U vibatchium
+vb shutdown                # bounce the daemon — it serves old code until you do
+vb --version               # confirm
+```
+
+> The daemon-restart step is the one people miss: the long-running daemon keeps
+> serving the **old** version until it's bounced. `vb update` does it for you;
+> if you upgrade by hand, run `vb shutdown` (the next `vb` call auto-respawns the
+> new version). Optional features upgrade via `pipx install 'vibatchium[all]' --force`.
 
 ## Why vibatchium
 

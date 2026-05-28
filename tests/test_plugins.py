@@ -320,3 +320,64 @@ def test_remove_pep668_fallback_uninstall(monkeypatch):
     assert calls[1][:4] == [cli.sys.executable, "-m", "pip", "uninstall"]
     assert "--break-system-packages" in calls[1]
     assert "-y" in calls[1] and "somepkg" in calls[1]
+
+
+# ─── vb update (self-upgrade) ────────────────────────────────────────────
+
+def test_update_pip_latest(monkeypatch):
+    from vibatchium import cli
+    monkeypatch.setattr(cli, "_is_pipx_install", lambda: False)
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, *, capture):
+        calls.append(list(cmd))
+        return _FakeCompleted(returncode=0, stdout="Successfully installed")
+
+    monkeypatch.setattr(cli, "_run", fake_run)
+    rc, note = cli._update_dist(None)
+    assert rc == 0
+    assert calls[0] == [cli.sys.executable, "-m", "pip", "install", "-U", "vibatchium"]
+
+
+def test_update_pipx_latest(monkeypatch):
+    from vibatchium import cli
+    monkeypatch.setattr(cli, "_is_pipx_install", lambda: True)
+    calls: list[list[str]] = []
+    monkeypatch.setattr(cli, "_run",
+                        lambda cmd, *, capture: calls.append(list(cmd)) or _FakeCompleted(0))
+    rc, note = cli._update_dist(None)
+    assert rc == 0
+    assert calls == [["pipx", "upgrade", "vibatchium"]]
+    assert "pipx" in note
+
+
+def test_update_pipx_pinned_version(monkeypatch):
+    from vibatchium import cli
+    monkeypatch.setattr(cli, "_is_pipx_install", lambda: True)
+    calls: list[list[str]] = []
+    monkeypatch.setattr(cli, "_run",
+                        lambda cmd, *, capture: calls.append(list(cmd)) or _FakeCompleted(0))
+    rc, note = cli._update_dist("0.6.2")
+    assert rc == 0
+    assert calls == [["pipx", "install", "--force", "vibatchium==0.6.2"]]
+
+
+def test_update_pip_pinned_pep668_fallback(monkeypatch):
+    from vibatchium import cli
+    monkeypatch.setattr(cli, "_is_pipx_install", lambda: False)
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, *, capture):
+        calls.append(list(cmd))
+        if "--break-system-packages" in cmd:
+            return _FakeCompleted(returncode=0)
+        return _FakeCompleted(returncode=1,
+                              stderr="error: externally-managed-environment")
+
+    monkeypatch.setattr(cli, "_run", fake_run)
+    rc, note = cli._update_dist("0.6.2")
+    assert rc == 0
+    assert len(calls) == 2
+    assert calls[1] == [cli.sys.executable, "-m", "pip", "install",
+                        "--break-system-packages", "vibatchium==0.6.2"]
+    assert "--break-system-packages" in note
