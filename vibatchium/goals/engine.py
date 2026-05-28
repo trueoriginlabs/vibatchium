@@ -244,14 +244,17 @@ class GoalEngine:
                                               "limit": exceeded})
             return result
 
-        # Checkpoint at the step boundary (best-effort).
+        # Checkpoint at the step boundary (best-effort). The cb returns a real
+        # id only when there's a live session to snapshot; on None we keep the
+        # prior checkpoint_id and emit no (noisy, null-id) checkpoint_saved.
         checkpoint_id = goal["checkpoint_id"]
         if self._checkpoint_cb is not None:
             try:
-                checkpoint_id = await self._checkpoint_cb(
-                    goal["session"], f"goal-{gid}")
-                await self._emit(goal, "checkpoint_saved",
-                                {"checkpoint_id": checkpoint_id})
+                new_cp = await self._checkpoint_cb(goal["session"], f"goal-{gid}")
+                if new_cp:
+                    checkpoint_id = new_cp
+                    await self._emit(goal, "checkpoint_saved",
+                                    {"checkpoint_id": checkpoint_id})
             except Exception as exc:  # noqa: BLE001
                 log.debug("checkpoint at step failed for goal %s: %s", gid, exc)
 
