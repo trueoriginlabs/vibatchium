@@ -179,14 +179,34 @@ def cli(ctx: click.Context, json_mode: bool, session_name: str | None) -> None:
 
 # ─── lifecycle ─────────────────────────────────────────────────────────────
 
+def _cli_resolve_headless(explicit, *, isatty: bool) -> bool:
+    """Client-side headless decision for `vb start`.
+
+    ``explicit`` is True/False from --headless/--headed, or None. Precedence:
+    explicit flag → VIBATCHIUM_DEFAULT_HEADLESS → VIBATCHIUM_DEFAULT_HEADED →
+    TTY inference (interactive human terminal gets a visible window; anything
+    else is headless).
+    """
+    if explicit is True:
+        return True
+    if explicit is False:
+        return False
+    if os.environ.get("VIBATCHIUM_DEFAULT_HEADLESS", "").lower() in ("1", "true", "yes", "on"):
+        return True
+    if os.environ.get("VIBATCHIUM_DEFAULT_HEADED", "").lower() in ("1", "true", "yes", "on"):
+        return False
+    return not isatty
+
+
 @cli.command()
 @click.option("--profile", default=None,
               help="Profile name or absolute path (defaults to active session/profile).")
 @click.option("--headless/--headed", "headless", default=None,
-              help="Force headless or headed. Default: headless when stdin is not a TTY "
-                   "(agent / piped / scripted use), headed when invoked interactively "
-                   "from a terminal. `VIBATCHIUM_DEFAULT_HEADLESS=1` forces headless "
-                   "everywhere; explicit --headless / --headed always wins.")
+              help="Force headless or headed. Default: headless everywhere except an "
+                   "interactive human terminal (TTY), which gets a visible window. "
+                   "`VIBATCHIUM_DEFAULT_HEADED=1` forces headed; "
+                   "`VIBATCHIUM_DEFAULT_HEADLESS=1` forces headless; "
+                   "explicit --headless / --headed always wins.")
 @click.option("--stealth-mouse", is_flag=True,
               help="Layer humanized mouse via CDP-Patches. Install separately: "
                    "`pip install git+https://github.com/Kaliiiiiiiiii-Vinyzu/CDP-Patches.git@main`")
@@ -208,17 +228,11 @@ def start(ctx, profile, headless, stealth_mouse, backend):
     args = {}
     if profile:
         args["profile"] = profile
-    # Wave 7.7.11: tri-state headless. Explicit --headless / --headed wins.
-    # Otherwise: TTY → headed (human visual debugging); no TTY → headless
-    # (agent / pipe / script). Closes the trap where Codex/Claude/Cursor
-    # shelling out to `vb start` got headed windows on the user's desktop.
-    if headless is True:
-        args["headless"] = True
-    elif headless is False:
-        args["headless"] = False
-    elif not sys.stdin.isatty():
-        args["headless"] = True
-    # else: TTY → leave unset, daemon falls through to VIBATCHIUM_DEFAULT_HEADLESS / headed
+    # 0.6.4: headless by default everywhere; an interactive human terminal is
+    # the only thing that gets a visible window. The daemon defaults headless
+    # too, so programmatic callers (plugins, research, the xscraper reader)
+    # never pop a window unless they explicitly ask.
+    args["headless"] = _cli_resolve_headless(headless, isatty=sys.stdin.isatty())
     if stealth_mouse:
         args["stealth_mouse"] = True
     if backend != "patchright":

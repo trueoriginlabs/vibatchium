@@ -31,7 +31,7 @@ $VB verify_url --url https://maybe-dead.example       # ~50ms DNS pre-check
 - ❌ `pip install vibatchium` — Debian/Ubuntu blocks system pip (PEP 668). The `.venv` is set up; use the binary.
 - ❌ `python -m vibatchium.cli` — `python` doesn't exist on Debian, only `python3`. Use the binary.
 - ❌ `start && go && text` for a simple lookup. Use `explore` — one call, auto-headless, auto-closes.
-- ❌ Headed Chrome for background work. `explore`/`research` are headless; `start` invoked from an agent (no TTY) is headless too as of Wave 7.7.11. If you ever see a window pop up, you're either running from a real terminal or someone passed `--headed` — pass `--headless` explicitly or set `VIBATCHIUM_DEFAULT_HEADLESS=1` to force it.
+- ❌ Headed Chrome for background work. As of 0.6.4 **everything is headless by default** — `explore`/`research`, the `x.*` plugin, the daemon's `start`, all programmatic callers. Only an interactive human terminal (`vb start` at a TTY) pops a visible window. If a window appears during agent work, someone passed `--headed` or set `VIBATCHIUM_DEFAULT_HEADED=1`. To force headless even at a TTY: `VIBATCHIUM_DEFAULT_HEADLESS=1`.
 - ❌ Direct domain probes without `verify_url`. A bad URL guess burns 30s of nav timeout; `verify_url` is 50ms.
 
 ## Tool routing
@@ -99,7 +99,8 @@ $VB session prune --pattern <prefix>  # wipe stale sessions
 ## Env overrides
 
 ```bash
-VIBATCHIUM_DEFAULT_HEADLESS=1   # headless `start` (no desktop clutter)
+VIBATCHIUM_DEFAULT_HEADLESS=1   # force headless even at an interactive TTY
+VIBATCHIUM_DEFAULT_HEADED=1     # opt a whole daemon back into headed windows
 VIBATCHIUM_MAX_SESSIONS=8       # raise 4-session default for big fan-outs
 VIBATCHIUM_LOG_VERBS=1          # per-verb DEBUG audit trail
 VIBATCHIUM_DEFAULT_SAFETY=wrap  # auto-flag prompt-injection in scraped content
