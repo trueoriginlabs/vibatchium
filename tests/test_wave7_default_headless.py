@@ -33,19 +33,14 @@ def test_default_headless_resolution_logic(monkeypatch):
     """Unit-test the resolution logic without touching the daemon:
     - explicit args wins over env
     - env default flips when set
-    - missing both → headed (preserves existing default)
+    - missing both → headless (0.6.4 default: a background daemon owns no display)
     """
-    # Simulate what the handler does
-    def _resolve(args: dict) -> bool:
-        import os
-        if "headless" in args:
-            return bool(args["headless"])
-        env = os.environ.get("VIBATCHIUM_DEFAULT_HEADLESS", "0").lower()
-        return env in ("1", "true", "yes", "on")
+    from vibatchium.daemon.handlers import resolve_headless as _resolve
+    monkeypatch.delenv("VIBATCHIUM_DEFAULT_HEADED", raising=False)
 
-    # No env, no arg → headed (preserves existing default)
+    # No env, no arg → headless (0.6.4 default; was headed pre-0.6.4)
     monkeypatch.delenv("VIBATCHIUM_DEFAULT_HEADLESS", raising=False)
-    assert _resolve({}) is False
+    assert _resolve({}) is True
 
     # Env set, no arg → headless
     monkeypatch.setenv("VIBATCHIUM_DEFAULT_HEADLESS", "1")
@@ -58,28 +53,27 @@ def test_default_headless_resolution_logic(monkeypatch):
     monkeypatch.delenv("VIBATCHIUM_DEFAULT_HEADLESS", raising=False)
     assert _resolve({"headless": True}) is True
 
-    # Env value variants
+    # VIBATCHIUM_DEFAULT_HEADED opts a whole daemon back into headed
+    monkeypatch.setenv("VIBATCHIUM_DEFAULT_HEADED", "1")
+    assert _resolve({}) is False
+    monkeypatch.delenv("VIBATCHIUM_DEFAULT_HEADED", raising=False)
+
+    # HEADLESS env truthy variants → headless
     for truthy in ("1", "true", "yes", "on", "TRUE", "Yes"):
         monkeypatch.setenv("VIBATCHIUM_DEFAULT_HEADLESS", truthy)
         assert _resolve({}) is True, f"{truthy!r} should be truthy"
+    # falsy/unset HEADLESS env, no HEADED env → still headless (the new default)
     for falsy in ("0", "false", "no", "off", "", "garbage"):
         monkeypatch.setenv("VIBATCHIUM_DEFAULT_HEADLESS", falsy)
-        assert _resolve({}) is False, f"{falsy!r} should be falsy"
+        assert _resolve({}) is True, f"{falsy!r} HEADLESS → default headless"
 
 
 def test_explicit_args_always_win_over_env_default(monkeypatch):
     """Even with VIBATCHIUM_DEFAULT_HEADLESS=1 set globally, a script
     that explicitly passes headless=false (e.g. wants a headed window
     for visual debugging) gets headed."""
+    from vibatchium.daemon.handlers import resolve_headless as _resolve
     monkeypatch.setenv("VIBATCHIUM_DEFAULT_HEADLESS", "1")
-    # The resolution logic from the handler
-    def _resolve(args):
-        import os
-        if "headless" in args:
-            return bool(args["headless"])
-        return os.environ.get("VIBATCHIUM_DEFAULT_HEADLESS", "0").lower() in (
-            "1", "true", "yes", "on"
-        )
     assert _resolve({"headless": False}) is False
     assert _resolve({"headless": True}) is True
     assert _resolve({}) is True  # env default takes over only when no arg

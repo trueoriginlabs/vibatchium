@@ -4,6 +4,23 @@ All notable changes to vibatchium are documented here. Versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Until 1.0,
 minor bumps may include breaking changes; we'll always call them out here.
 
+## [0.6.4] — 2026-05-29
+
+### Changed (behavior) — headless by default
+- **The daemon now defaults to headless.** A background daemon owns no display,
+  so popping visible Chrome windows for programmatic callers was the wrong
+  default. Previously only the `vb start` *CLI* inferred headless from a missing
+  TTY; callers that bypass the CLI — the `x.*` plugin, the xscraper reader,
+  `research` fan-out, any direct `start` — fell through to a **headed** daemon
+  default and opened windows on the operator's desktop.
+- Now: **headless everywhere except an interactive human terminal.** `vb start`
+  at a TTY still opens a visible window (visual debugging); everything else is
+  headless. Precedence: explicit `--headless`/`--headed` → `VIBATCHIUM_DEFAULT_HEADLESS`
+  → `VIBATCHIUM_DEFAULT_HEADED` → TTY inference → headless.
+- New `VIBATCHIUM_DEFAULT_HEADED=1` to opt a whole daemon back into headed.
+- Login/challenge flows that genuinely need a human (e.g. `xscraper login`) still
+  request headed explicitly, so "headed only when essential" holds.
+
 ## [0.6.3] — 2026-05-28
 
 ### Added

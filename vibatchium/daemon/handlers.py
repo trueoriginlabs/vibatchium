@@ -21,6 +21,30 @@ from .registry import current_session_ctx
 log = logging.getLogger("vibatchium.handlers")
 
 
+def _env_truthy(name: str) -> bool:
+    return os.environ.get(name, "").lower() in ("1", "true", "yes", "on")
+
+
+def resolve_headless(args: dict) -> bool:
+    """Decide headless vs headed for a `start`/prewarm, daemon-side.
+
+    Precedence (0.6.4): an explicit ``headless`` arg wins; then
+    ``VIBATCHIUM_DEFAULT_HEADLESS`` forces headless; then
+    ``VIBATCHIUM_DEFAULT_HEADED`` forces headed; otherwise **headless** — a
+    background daemon has no display to own, so popping visible windows for
+    programmatic callers (plugins, research fan-out, the xscraper reader) is the
+    wrong default. Interactive `vb start` from a human TTY asks for headed
+    explicitly (see cli.py), so humans still get a window.
+    """
+    if "headless" in args:
+        return bool(args["headless"])
+    if _env_truthy("VIBATCHIUM_DEFAULT_HEADLESS"):
+        return True
+    if _env_truthy("VIBATCHIUM_DEFAULT_HEADED"):
+        return False
+    return True
+
+
 import re as _re
 
 _REF_TARGET_RE = _re.compile(r"^@?(e\d+)$|^\[ref=e\d+\]$")
@@ -270,17 +294,11 @@ def register_all(daemon) -> None:
             return {"already_started": True, "mode": entry.session.mode,
                     "session": name, "profile": str(entry.profile_dir)}
 
-        # Wave 7.7.4: VIBATCHIUM_DEFAULT_HEADLESS env flips the start default
-        # from headed → headless. Use case: fan-out background scraping
-        # workflows (research / parallel sessions) where headed Chrome
-        # windows pollute the operator's desktop. Set once at daemon init,
-        # never think about it again. Explicit `headless=true|false` in
-        # args still wins (per-call override).
-        if "headless" in args:
-            headless = bool(args["headless"])
-        else:
-            env_default = os.environ.get("VIBATCHIUM_DEFAULT_HEADLESS", "0").lower()
-            headless = env_default in ("1", "true", "yes", "on")
+        # 0.6.4: headless by default (a background daemon owns no display).
+        # Explicit headless=true|false wins; VIBATCHIUM_DEFAULT_HEADED=1 opts a
+        # whole daemon back into headed. Interactive `vb start` sends headed
+        # explicitly so humans at a terminal still get a window.
+        headless = resolve_headless(args)
         stealth_mouse = bool(args.get("stealth_mouse"))
         backend = args.get("backend") or "patchright"
         try:
@@ -333,17 +351,9 @@ def register_all(daemon) -> None:
         p.mkdir(parents=True, exist_ok=True)
         prewarm_requested = args.get("prewarm", True)
         if prewarm_requested and not d.registry.has(name):
-            # Wave 7.7.4: respect VIBATCHIUM_DEFAULT_HEADLESS for prewarm too,
-            # so the pre-spawned Chrome matches what `start` will eventually
-            # use. Otherwise a default-headless setup would get a headed
-            # prewarm that doesn't claim cleanly.
-            if "headless" in args:
-                _prewarm_headless = bool(args["headless"])
-            else:
-                _prewarm_headless = os.environ.get(
-                    "VIBATCHIUM_DEFAULT_HEADLESS", "0"
-                ).lower() in ("1", "true", "yes", "on")
-            d.registry.schedule_prewarm(name, p, headless=_prewarm_headless)
+            # Prewarm matches what `start` will resolve to (0.6.4: headless
+            # default), so the pre-spawned Chrome claims cleanly.
+            d.registry.schedule_prewarm(name, p, headless=resolve_headless(args))
         return {
             "created": not existed, "exists": existed, "name": name,
             "path": str(p), "profile_dir": str(p),
