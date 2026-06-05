@@ -115,6 +115,8 @@ class Daemon:
         "session_new", "session_list", "session_use", "session_switch",
         "session_close", "session_close_all", "session_delete",
         "profile_list", "profile_new", "profile_use", "profile_delete",
+        # Wave 7.8: housekeeping — prunes profile dirs / caches, no session.
+        "clean",
         "proxy_set", "proxy_clear", "proxy_info",
         "checkpoint_list", "checkpoint_delete",
         # Wave 6.3a: secrets are not session-scoped

@@ -216,8 +216,12 @@ def _cli_resolve_headless(explicit, *, isatty: bool) -> bool:
                    "nodriver = hardened launch via nodriver lib (needs vibatchium[nodriver]); "
                    "better on Cloudflare Turnstile interactive challenges per 2026 benchmark. "
                    "auto = start with patchright, advisory on first wall.")
+@click.option("--ephemeral", is_flag=True,
+              help="Delete this session's profile dir when it closes. For one-shot "
+                   "work that shouldn't leave cookies/login state on disk — prevents "
+                   "profile-dir bloat from per-run session names. Never affects 'default'.")
 @click.pass_context
-def start(ctx, profile, headless, stealth_mouse, backend):
+def start(ctx, profile, headless, stealth_mouse, backend, ephemeral):
     """Start a browser session (cold launch real Chrome + persistent context).
 
     Default headed/headless is inferred from the calling context: a TTY means a
@@ -237,6 +241,8 @@ def start(ctx, profile, headless, stealth_mouse, backend):
         args["stealth_mouse"] = True
     if backend != "patchright":
         args["backend"] = backend
+    if ephemeral:
+        args["ephemeral"] = True
     _emit(call("start", args), ctx.obj["json"])
 
 
@@ -397,9 +403,34 @@ def session_delete(ctx, name):
     _emit(call("session_delete", {"name": name}), ctx.obj["json"])
 
 
+def _parse_age_seconds(text: str) -> float:
+    """Parse a human duration into seconds for `--older-than`.
+
+    Accepts an optional unit suffix s/m/h/d/w (seconds/minutes/hours/days/
+    weeks) or a bare number meaning seconds: '7d', '12h', '90m', '3600'.
+    Raises click.BadParameter on anything else.
+    """
+    import re as _re
+    s = str(text).strip().lower()
+    m = _re.fullmatch(r"(\d+)\s*([smhdw]?)", s)
+    if not m:
+        raise click.BadParameter(
+            f"bad --older-than {text!r}: use e.g. '7d', '12h', '30m', '90s', "
+            f"'2w', or a plain number of seconds"
+        )
+    n = int(m.group(1))
+    unit = m.group(2) or "s"
+    factor = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}[unit]
+    return float(n * factor)
+
+
 @session.command("prune")
 @click.option("--pattern", default=None,
               help="Only prune sessions whose name matches this substring.")
+@click.option("--older-than", "older_than", default=None,
+              help="Only prune profiles idle at least this long (by on-disk "
+                   "mtime): e.g. '7d', '12h', '30m', '2w'. Safest way to reclaim "
+                   "space without touching profiles you used recently.")
 @click.option("--keep", "keep_list", multiple=True,
               help="Don't prune these names (repeatable; 'default' is always kept).")
 @click.option("--dry-run", is_flag=True,
@@ -407,18 +438,26 @@ def session_delete(ctx, name):
 @click.option("--yes", "-y", "assume_yes", is_flag=True,
               help="Skip the y/N confirmation prompt. Required for non-interactive use.")
 @click.pass_context
-def session_prune(ctx, pattern, keep_list, dry_run, assume_yes):
+def session_prune(ctx, pattern, older_than, keep_list, dry_run, assume_yes):
     """Delete on-disk profile dirs for stopped sessions. Useful after a
     dogfood run leaves probe/test/ad-hoc sessions cluttering `session list`.
 
     Destructive: profile dirs (cookies, localStorage, login state) are removed.
     Confirmation is required unless --yes is passed or --dry-run is set.
+
+    Use --older-than to prune only profiles you haven't touched in a while,
+    e.g. `vb session prune --older-than 7d` reclaims stale per-run profiles
+    while leaving anything used in the last week alone.
     """
+    import time as _time
+    cutoff_age = _parse_age_seconds(older_than) if older_than else None
+    now = _time.time()
     res = call("session_list")
     keep = {"default", *keep_list}
     active = res.get("active") or "default"
     keep.add(active)
     to_prune = []
+    skipped_fresh = 0
     for entry in res.get("sessions", []):
         name = entry.get("name")
         if not name or name in keep:
@@ -427,7 +466,17 @@ def session_prune(ctx, pattern, keep_list, dry_run, assume_yes):
             continue  # never prune running sessions
         if pattern and pattern not in name:
             continue
+        if cutoff_age is not None:
+            last_active = entry.get("last_active")
+            # Unknown age (older daemon / unreadable dir) → don't risk deleting
+            # something whose idle time we can't establish.
+            if last_active is None or (now - last_active) < cutoff_age:
+                skipped_fresh += 1
+                continue
         to_prune.append(name)
+    if skipped_fresh:
+        click.echo(f"skipped {skipped_fresh} profile(s) newer than "
+                   f"--older-than {older_than}", err=True)
     if not to_prune:
         click.echo("nothing to prune", err=True)
         _emit({"pruned": [], "dry_run": dry_run}, ctx.obj["json"])
@@ -502,6 +551,112 @@ def profile_use(ctx, name):
 def profile_delete(ctx, name):
     """Delete a profile directory (cannot delete active or 'default')."""
     _emit(call("profile_delete", {"name": name}), ctx.obj["json"])
+
+
+def _human_bytes(n) -> str:
+    n = float(n or 0)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if n < 1024 or unit == "TB":
+            return f"{int(n)} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+        n /= 1024
+
+
+def _clean_item_count(report: dict) -> int:
+    cats = report.get("categories", {})
+    n = sum(cats.get(k, {}).get("count", 0) for k in ("profiles", "locks", "cache"))
+    if cats.get("logs", {}).get("reclaimed", 0) > 0:
+        n += 1
+    return n
+
+
+def _print_clean_report(report: dict, *, applied: bool) -> None:
+    cats = report.get("categories", {})
+    click.echo("cleaned:" if applied else "would clean (dry-run — pass --apply):",
+               err=True)
+    p = cats.get("profiles")
+    if p is not None:
+        click.echo(f"  profiles : {p['count']:>4} dirs    {_human_bytes(p['bytes'])}",
+                   err=True)
+    lk = cats.get("locks")
+    if lk is not None:
+        click.echo(f"  locks    : {lk['count']:>4} files   {_human_bytes(lk['bytes'])}",
+                   err=True)
+    c = cats.get("cache")
+    if c is not None:
+        extra = f"  ({', '.join(c['items'])})" if c.get("items") else ""
+        click.echo(f"  cache    : {c['count']:>4} items   {_human_bytes(c['bytes'])}{extra}",
+                   err=True)
+    lg = cats.get("logs")
+    if lg is not None:
+        click.echo(f"  log      :          {_human_bytes(lg['reclaimed'])}"
+                   f" (of {_human_bytes(lg['bytes_before'])})", err=True)
+    verb = "reclaimed" if applied else "reclaimable"
+    click.echo(f"  ── total {verb}: {_human_bytes(report.get('total_bytes', 0))}",
+               err=True)
+
+
+@cli.command()
+@click.option("--apply", is_flag=True,
+              help="Actually delete. Without it, clean only REPORTS what it would "
+                   "reclaim (safe dry-run).")
+@click.option("--older-than", "older_than", default="14d", show_default=True,
+              help="Profile idle cutoff: only profiles untouched at least this long "
+                   "are pruned (e.g. 7d, 30d, 12h).")
+@click.option("--keep", "keep_list", multiple=True,
+              help="Extra session names to protect (repeatable). 'default', the "
+                   "active session, and any running session are always protected.")
+@click.option("--no-profiles", is_flag=True, help="Skip stale-profile pruning.")
+@click.option("--no-locks", is_flag=True, help="Skip stale Chrome lock-file removal.")
+@click.option("--no-cache", is_flag=True,
+              help="Skip cache cleanup (clearing the vision cache means paid "
+                   "re-lookups later).")
+@click.option("--no-logs", is_flag=True, help="Skip daemon-log truncation.")
+@click.option("--yes", "-y", "assume_yes", is_flag=True,
+              help="Skip the confirmation prompt when --apply is set.")
+@click.pass_context
+def clean(ctx, apply, older_than, keep_list, no_profiles, no_locks, no_cache,
+          no_logs, assume_yes):
+    """Reclaim disk: stale profiles, Chrome lock files, caches, and the daemon log.
+
+    Safe by default — with no --apply it prints a dry-run report of what it
+    WOULD reclaim. Never touches the 'default' profile, the active session, or
+    any running session. Ideal after upgrading from a pre-0.6.x build that left
+    a pile of per-run profile dirs behind.
+
+        vb clean                          # report only
+        vb clean --apply                  # reclaim everything (asks to confirm)
+        vb clean --older-than 30d --apply --no-cache -y
+    """
+    older_seconds = _parse_age_seconds(older_than)
+    base = {"older_than": older_seconds, "keep": list(keep_list),
+            "profiles": not no_profiles, "locks": not no_locks,
+            "cache": not no_cache, "logs": not no_logs}
+    json_mode = ctx.obj["json"]
+
+    # Always compute the dry-run report first — cheap, and it's what we confirm on.
+    report = call("clean", {**base, "apply": False})
+
+    if not apply:
+        _emit(report, True) if json_mode else _print_clean_report(report, applied=False)
+        return
+
+    # --apply path
+    if _clean_item_count(report) == 0:
+        _emit(report, True) if json_mode else click.echo("nothing to reclaim ✓", err=True)
+        return
+    if not json_mode:
+        _print_clean_report(report, applied=False)
+    if not assume_yes:
+        if json_mode:
+            raise click.UsageError("refusing to --apply in --json mode without --yes")
+        total = _human_bytes(report.get("total_bytes", 0))
+        if not click.confirm(f"Reclaim ~{total} across "
+                             f"{_clean_item_count(report)} item(s)?",
+                             default=False, err=True):
+            click.echo("aborted", err=True)
+            return
+    applied = call("clean", {**base, "apply": True})
+    _emit(applied, True) if json_mode else _print_clean_report(applied, applied=True)
 
 
 @cli.command()

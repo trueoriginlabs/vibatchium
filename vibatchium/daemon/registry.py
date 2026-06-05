@@ -64,6 +64,50 @@ def get_max_sessions() -> int:
         return 4
 
 
+def _profile_last_active(path: Path) -> float | None:
+    """Best-effort 'last touched' epoch for a profile dir — the newest mtime
+    among the dir itself and its immediate children.
+
+    Used by `vb session prune --older-than` to skip recently-used profiles.
+    A single-level scan (not a deep walk) keeps it cheap: Chrome rewrites
+    lock files (SingletonLock/SingletonSocket) and top-level state on every
+    launch/exit, so the newest top-level mtime tracks real use closely.
+    Returns None if the path is gone or unreadable.
+    """
+    try:
+        newest = path.stat().st_mtime
+    except OSError:
+        return None
+    try:
+        for child in path.iterdir():
+            try:
+                m = child.stat().st_mtime
+                if m > newest:
+                    newest = m
+            except OSError:
+                continue
+    except OSError:
+        pass
+    return newest
+
+
+def _within_profiles_dir(path: Path) -> bool:
+    """True iff `path` is strictly contained in PROFILES_DIR.
+
+    The deletion guard for ephemeral sessions: an absolute `--profile` path
+    (which `session_dir` accepts as-is) must NEVER be rmtree'd just because the
+    session is flagged ephemeral — otherwise `start --session x --profile
+    /home/me/Documents --ephemeral` would delete an arbitrary directory on
+    close. Only profile dirs that actually live under PROFILES_DIR are eligible.
+    """
+    try:
+        rp = path.resolve()
+        base = PROFILES_DIR.resolve()
+    except OSError:
+        return False
+    return rp != base and base in rp.parents
+
+
 def _default_safety_mode() -> str:
     """Wave 7.7.1: default safety mode for new sessions. Reads VIBATCHIUM_DEFAULT_SAFETY
     (off | flag-only | wrap | redact). Defaults to `flag-only` — every scraped
@@ -125,6 +169,12 @@ class SessionEntry:
     # Bookkeeping
     created_at: float = field(default_factory=time.time)
     last_used_at: float = field(default_factory=time.time)
+    # Wave 7.8: ephemeral session — when True, close() removes the profile
+    # dir after Chrome teardown so one-shot work leaves no cookies/login
+    # state on disk. Prevents profile-dir bloat from callers that mint a
+    # fresh session name per run. The 'default' session is NEVER deleted,
+    # regardless of this flag (guarded in close()).
+    ephemeral: bool = False
 
     def touch(self) -> None:
         self.last_used_at = time.time()
@@ -268,6 +318,15 @@ class SessionRegistry:
     def list_running(self) -> list[str]:
         return sorted(self._entries.keys())
 
+    def warming_names(self) -> set[str]:
+        """Names with a parked or in-flight pre-warm Chrome. These are NOT in
+        `_entries` yet hold a live OS lock on their profile dir, so housekeeping
+        (lock removal / profile pruning) must treat them as 'in use' alongside
+        `list_running()`."""
+        names = set(self._warm_sessions.keys())
+        names |= {n for n, t in self._warm_tasks.items() if not t.done()}
+        return names
+
     def list_all(self) -> list[dict]:
         """List every on-disk session plus its running state.
 
@@ -285,6 +344,10 @@ class SessionRegistry:
                 "running": entry is not None,
                 "profile_dir": str(session_dir(name)) if name in on_disk else None,
             }
+            if name in on_disk:
+                # Epoch of last on-disk activity — lets `session prune
+                # --older-than` skip recently-used profiles. None if unreadable.
+                row["last_active"] = _profile_last_active(PROFILES_DIR / name)
             if entry is not None:
                 row["mode"] = entry.session.mode
                 try:
@@ -308,6 +371,7 @@ class SessionRegistry:
         headless: bool = False,
         stealth_mouse: bool = False,
         backend: str = "patchright",
+        ephemeral: bool = False,
     ) -> SessionEntry:
         """Launch Chrome for a new session.
 
@@ -320,6 +384,9 @@ class SessionRegistry:
           backend: 'patchright' (default), 'nodriver', or 'auto'.
                    nodriver requires `pip install vibatchium[nodriver]` and
                    uses its hardened launch flags + Patchright connect_over_cdp.
+          ephemeral: delete the profile dir when this session closes (one-shot
+                   work that should leave no state on disk). Never deletes the
+                   'default' profile.
 
         Raises:
           SessionLimitError if VIBATCHIUM_MAX_SESSIONS would be exceeded.
@@ -397,7 +464,8 @@ class SessionRegistry:
                 except Exception:  # noqa: BLE001
                     pass
                 raise
-        entry = SessionEntry(name=name, profile_dir=pdir, session=sess)
+        entry = SessionEntry(name=name, profile_dir=pdir, session=sess,
+                             ephemeral=ephemeral)
         # Stash backend choice on the entry so observability tools and the
         # status handler can report which stealth stack is in use per session.
         entry.flags["backend"] = backend
@@ -427,7 +495,9 @@ class SessionRegistry:
         return entry
 
     async def close(self, name: str) -> bool:
-        """Stop Chrome for a session; profile dir is preserved on disk.
+        """Stop Chrome for a session; profile dir is preserved on disk
+        (unless the session was started `ephemeral`, in which case the dir is
+        removed after teardown — see Wave 7.8 below; 'default' is never removed).
 
         Returns True if the session was running and is now closed.
         Idempotent — closing an absent session returns False without error.
@@ -457,6 +527,31 @@ class SessionRegistry:
         except Exception as exc:  # noqa: BLE001
             log.warning("close_session(%s) failed: %s", name, exc)
         log.info("session closed name=%s", name)
+        # Wave 7.8: ephemeral session — remove the profile dir now that Chrome
+        # is down so one-shot work leaves nothing on disk. The 'default'
+        # profile is never deleted. We return early so an ephemeral session is
+        # never warm-recycled (there'd be no dir left to reopen).
+        if entry.ephemeral and name != DEFAULT_SESSION_NAME:
+            if not _within_profiles_dir(profile_dir):
+                # Safety guard: refuse to delete a dir outside PROFILES_DIR (e.g.
+                # an absolute `--profile` path). Ephemeral means "throw away the
+                # managed profile", never "rmtree an arbitrary directory".
+                log.warning("ephemeral session %s: profile %s is outside "
+                            "PROFILES_DIR — not deleting", name, profile_dir)
+                return True
+            # Cancel any in-flight/parked prewarm BEFORE deleting so it can't
+            # race us and re-create the dir. close() is async, so await it
+            # (unlike the sync delete_profile_dir, which can only fire-and-forget).
+            if name in self._warm_tasks or name in self._warm_sessions:
+                await self.cancel_prewarm(name)
+            try:
+                if profile_dir.exists():
+                    shutil.rmtree(profile_dir)
+                    log.info("ephemeral profile deleted name=%s profile=%s",
+                             name, profile_dir)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("ephemeral cleanup failed for %s: %s", name, exc)
+            return True
         # Wave 7.7.3 warm recycle
         recycle = os.environ.get("VIBATCHIUM_WARM_RECYCLE", "0").lower() in (
             "1", "true", "yes", "on"

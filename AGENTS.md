@@ -93,8 +93,18 @@ what you know about the element:
 $VB logs --tail 50                    # session/error history
 $VB logs --since 10m | grep walled    # Cloudflare/Datadome hits
 $VB logs --since 10m --errors-only    # handler errors
-$VB session prune --pattern <prefix>  # wipe stale sessions
+$VB session prune --pattern <prefix>  # wipe stale sessions (by name)
+$VB session prune --older-than 7d     # wipe sessions idle >7d (safer sweep)
+$VB clean                             # dry-run: reclaimable disk report
+$VB clean --apply                     # reclaim stale profiles/locks/caches/log
 ```
+
+**Avoid profile-dir bloat.** Every distinct `--session <name>` leaves a
+persistent profile dir under `~/.config/vibatchium/profiles/`. For throwaway
+work, reuse a *bounded* pool of names (e.g. `work-0..3`) or pass
+`$VB start --ephemeral`, which deletes the profile dir when the session closes
+(never touches `default`; auto-disabled for goal-owned sessions). Run
+`$VB clean` periodically to reclaim what accumulated.
 
 ## Env overrides
 

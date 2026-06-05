@@ -154,6 +154,90 @@ def _resolve_target(daemon, target: str):
     return elements.resolve_target(s.page, daemon._snapshot, target)
 
 
+# ─── Wave 7.8: housekeeping helpers (used by the `clean` handler) ─────────
+
+def _file_size(p: Path) -> int:
+    try:
+        return p.stat().st_size
+    except OSError:
+        return 0
+
+
+def _dir_size(p: Path) -> int:
+    """Total size of a directory tree (follows no symlinks). 0 if missing."""
+    total = 0
+    try:
+        for root, _dirs, files in os.walk(p):
+            for f in files:
+                try:
+                    total += os.lstat(os.path.join(root, f)).st_size
+                except OSError:
+                    continue
+    except OSError:
+        pass
+    return total
+
+
+def _truncate_log_tail(path: Path, keep_bytes: int, *, apply: bool = True) -> int:
+    """Compute (and, when apply=True, perform) keeping only the last
+    `keep_bytes` of the daemon log. Returns the resulting size.
+
+    With apply=False this is a pure dry-run: it computes the exact post-
+    truncation size (including the line-alignment drop) WITHOUT touching the
+    file, so the clean report's reclaimed bytes match what apply actually frees.
+
+    The daemon holds this file open via a logging FileHandler, so a plain
+    truncate would leave the handler appending past a sparse hole. We locate
+    that handler, swap in a freshly-opened stream over the truncated file, and
+    keep the log line-aligned by dropping any partial leading line. Best-effort:
+    returns the resulting size (or the original size if anything goes wrong).
+    """
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return _file_size(path)
+    if len(data) <= keep_bytes:
+        return len(data)
+    tail = data[-keep_bytes:]
+    nl = tail.find(b"\n")
+    if 0 <= nl < len(tail) - 1:
+        tail = tail[nl + 1:]
+    if not apply:
+        return len(tail)
+    fh = None
+    for h in list(logging.getLogger().handlers):
+        if (isinstance(h, logging.FileHandler)
+                and getattr(h, "baseFilename", None) == str(path)):
+            fh = h
+            break
+    if fh is not None:
+        fh.acquire()
+    try:
+        if fh is not None:
+            try:
+                fh.flush()
+                if fh.stream:
+                    fh.stream.close()
+            except Exception:  # noqa: BLE001
+                pass
+            fh.stream = None
+        with open(path, "wb") as f:
+            f.write(tail)
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+        if fh is not None:
+            fh.stream = fh._open()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("log truncation failed: %s", exc)
+        return _file_size(path)
+    finally:
+        if fh is not None:
+            fh.release()
+    return len(tail)
+
+
 def register_all(daemon) -> None:
     @daemon.handler("ping")
     async def _ping(d, args):
@@ -289,10 +373,19 @@ def register_all(daemon) -> None:
         else:
             profile_dir = session_dir(name)
 
+        # 'default' is never deletable, so never mark/report it ephemeral
+        # (close() guards it anyway — this keeps the response honest).
+        want_ephemeral = bool(args.get("ephemeral")) and name != DEFAULT_SESSION_NAME
+
         if d.registry.has(name):
             entry = d.registry.get(name)
+            # Allow `start --ephemeral` to mark an already-running session for
+            # cleanup-on-close.
+            if want_ephemeral:
+                entry.ephemeral = True
             return {"already_started": True, "mode": entry.session.mode,
-                    "session": name, "profile": str(entry.profile_dir)}
+                    "session": name, "profile": str(entry.profile_dir),
+                    "ephemeral": entry.ephemeral}
 
         # 0.6.4: headless by default (a background daemon owns no display).
         # Explicit headless=true|false wins; VIBATCHIUM_DEFAULT_HEADED=1 opts a
@@ -301,10 +394,12 @@ def register_all(daemon) -> None:
         headless = resolve_headless(args)
         stealth_mouse = bool(args.get("stealth_mouse"))
         backend = args.get("backend") or "patchright"
+        ephemeral = want_ephemeral
         try:
             entry = await d.registry.create(
                 name, profile_dir=profile_dir, headless=headless,
                 stealth_mouse=stealth_mouse, backend=backend,
+                ephemeral=ephemeral,
             )
         except Exception as exc:
             # Surface stealth_mouse failures non-fatally, matching the prior
@@ -313,19 +408,19 @@ def register_all(daemon) -> None:
             if stealth_mouse and "stealth" in str(exc).lower():
                 entry = await d.registry.create(
                     name, profile_dir=profile_dir, headless=headless,
-                    stealth_mouse=False, backend=backend,
+                    stealth_mouse=False, backend=backend, ephemeral=ephemeral,
                 )
                 return {"started": True, "mode": "launch",
                         "session": name, "profile": str(entry.profile_dir),
                         "profile_name": entry.profile_dir.name,
-                        "backend": backend,
+                        "backend": backend, "ephemeral": ephemeral,
                         "stealth_mouse": False, "stealth_mouse_error": str(exc)}
             raise
 
         out = {"started": True, "mode": "launch",
                "session": name, "profile": str(entry.profile_dir),
                "profile_name": entry.profile_dir.name,
-               "backend": backend}
+               "backend": backend, "ephemeral": ephemeral}
         if stealth_mouse:
             out["stealth_mouse"] = True
         return out
@@ -803,6 +898,122 @@ def register_all(daemon) -> None:
         if name == get_active_session_name():
             raise ValueError(f"profile {name!r} is active — switch first")
         return await d._handlers["session_delete"](d, args)
+
+    @daemon.handler("clean")
+    async def _clean(d, args):
+        """One-shot housekeeping — reclaim disk from four sources:
+
+          profiles : stale per-run profile dirs (idle ≥ older_than seconds)
+          locks    : leftover Chrome SingletonLock/Socket/Cookie files in
+                     non-running profiles (these cause 'profile already in
+                     use' launch failures)
+          cache    : regenerable caches (vision-cache, observe-cache,
+                     screenshots/, explores/) — NOT the vision-spend ledger
+          logs     : truncate daemon.log to its last log_keep_bytes
+
+        Dry-run by default — pass apply=true to actually delete. Never touches
+        the 'default' profile, the active session, or anything running in this
+        daemon. HAR/network captures go to user-chosen paths, so they're out of
+        scope. Returns a per-category {count, bytes} report.
+        """
+        import shutil as _shutil
+        import time as _time
+        from .paths import CACHE_DIR, LOG_PATH
+
+        apply = bool(args.get("apply"))
+        ot = args.get("older_than")
+        older_than = float(ot) if ot is not None else 14 * 86400.0
+        keep = set(args.get("keep") or [])
+        log_keep_bytes = int(args.get("log_keep_bytes", 256 * 1024))
+        now = _time.time()
+        active = get_active_session_name()
+        # "in use" = running sessions PLUS pre-warming Chromes (not in the
+        # registry's _entries but holding a live lock on their profile dir).
+        # Both must be off-limits to lock removal AND profile pruning.
+        in_use = set(d.registry.list_running()) | d.registry.warming_names()
+        protected = {DEFAULT_SESSION_NAME, active, *keep}
+        cats: dict = {}
+
+        # ── stale profile dirs (by idle age) ──
+        if args.get("profiles", True):
+            names, total = [], 0
+            for row in d.registry.list_all():
+                name = row["name"]
+                if name in protected or name in in_use or row.get("running"):
+                    continue
+                la = row.get("last_active")
+                if la is None or (now - la) < older_than:
+                    continue
+                total += _dir_size(PROFILES_DIR / name)
+                names.append(name)
+                if apply:
+                    try:
+                        d.registry.delete_profile_dir(name)
+                    except Exception as exc:  # noqa: BLE001
+                        log.warning("clean: profile %s: %s", name, exc)
+            cats["profiles"] = {"count": len(names), "bytes": total,
+                                "names": sorted(names)}
+
+        # ── stale Chrome lock files (non-running profiles only) ──
+        if args.get("locks", True):
+            lock_names = ("SingletonLock", "SingletonSocket", "SingletonCookie")
+            count, total = 0, 0
+            for name in list_session_names():
+                if name in in_use:
+                    continue  # a live/warming profile legitimately holds its lock
+                pdir = PROFILES_DIR / name
+                for lk in lock_names:
+                    f = pdir / lk
+                    try:
+                        if not (f.is_symlink() or f.exists()):
+                            continue
+                        try:
+                            total += f.lstat().st_size
+                        except OSError:
+                            pass
+                        count += 1
+                        if apply:
+                            f.unlink(missing_ok=True)
+                    except OSError:
+                        continue
+            cats["locks"] = {"count": count, "bytes": total}
+
+        # ── regenerable caches (never the vision-spend ledger) ──
+        if args.get("cache", True):
+            targets = [CACHE_DIR / "vision-cache.json",
+                       CACHE_DIR / "observe-cache.json",
+                       CACHE_DIR / "explores",
+                       CACHE_DIR / "screenshots"]
+            items, total = [], 0
+            for t in targets:
+                if not t.exists():
+                    continue
+                total += _dir_size(t) if t.is_dir() else _file_size(t)
+                items.append(t.name)
+                if apply:
+                    try:
+                        if t.is_dir():
+                            _shutil.rmtree(t)
+                        else:
+                            t.unlink(missing_ok=True)
+                    except Exception as exc:  # noqa: BLE001
+                        log.warning("clean: cache %s: %s", t, exc)
+            cats["cache"] = {"count": len(items), "bytes": total, "items": items}
+
+        # ── daemon log ──
+        if args.get("logs", True):
+            before = _file_size(LOG_PATH)
+            # apply=False computes the exact post-truncation size without
+            # writing, so the dry-run report matches what --apply reclaims.
+            after = _truncate_log_tail(LOG_PATH, log_keep_bytes, apply=apply)
+            cats["logs"] = {"bytes_before": before, "bytes_after": after,
+                            "reclaimed": max(0, before - after)}
+
+        total_bytes = sum(cats.get(k, {}).get("bytes", 0)
+                          for k in ("profiles", "locks", "cache"))
+        total_bytes += cats.get("logs", {}).get("reclaimed", 0)
+        return {"dry_run": not apply, "categories": cats,
+                "total_bytes": total_bytes}
 
     @daemon.handler("attach")
     async def _attach(d, args):

@@ -70,6 +70,16 @@ def _make_caps_cb(daemon):
             entry.flags["goal_caps"] = caps
         else:
             entry.flags.pop("goal_caps", None)
+        # A goal-owned session must keep durable state: its checkpoints live in
+        # the profile dir, and pause/resume re-binds the same profile. So clear
+        # any `ephemeral` flag (e.g. from `start --ephemeral`) — otherwise the
+        # profile + checkpoints would be deleted on the next `session close`,
+        # and a later `goal resume` would silently bind a fresh empty profile.
+        # caps_cb fires on every ownership change, so this is the right hook.
+        if entry.ephemeral:
+            entry.ephemeral = False
+            log.info("session %s is now goal-owned — cleared its ephemeral flag "
+                     "so the profile persists for checkpoint/resume", session)
     return caps_cb
 
 

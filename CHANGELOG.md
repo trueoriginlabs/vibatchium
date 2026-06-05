@@ -4,6 +4,30 @@ All notable changes to vibatchium are documented here. Versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Until 1.0,
 minor bumps may include breaking changes; we'll always call them out here.
 
+## [0.6.5] — 2026-06-05
+
+### Added — profile-dir bloat prevention
+- **`vb start --ephemeral`** — the session's profile dir is deleted when the
+  session closes, so one-shot work leaves no cookies/login state on disk.
+  Prevents the bloat that accrues when callers mint a fresh `--session` name
+  per run. Never deletes `default`; refuses to delete any dir outside
+  `~/.config/vibatchium/profiles/` (so an absolute `--profile` can't be
+  rmtree'd); auto-disabled once a session becomes goal-owned (its checkpoints
+  must persist). Also exposed on the MCP `start` tool.
+- **`vb session prune --older-than <dur>`** — prune only profiles idle at least
+  the given duration (`7d`, `12h`, `30m`, `2w`, or bare seconds), so a sweep
+  reclaims stale per-run profiles without touching anything used recently.
+  `session_list` rows gain a `last_active` field (newest mtime of the profile
+  dir + immediate children) to drive it.
+- **`vb clean`** — one-shot housekeeping. Dry-run by default (prints a
+  reclaimable-space report); `--apply` to delete. Prunes stale profile dirs (by
+  idle age, default 14d), removes leftover Chrome `SingletonLock`/`Socket`/
+  `Cookie` files from stopped profiles (the "profile already in use" failures),
+  clears regenerable caches (vision/observe caches, `screenshots/`, `explores/`),
+  and truncates the daemon log to its last 256 KB. Never touches `default`, the
+  active/running/warming sessions, `--keep` names, or the vision-spend ledger.
+  Reachable under the `session` capability bucket.
+
 ## [0.6.4] — 2026-05-29
 
 ### Changed (behavior) — headless by default
