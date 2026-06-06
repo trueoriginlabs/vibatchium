@@ -4,6 +4,21 @@ All notable changes to vibatchium are documented here. Versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Until 1.0,
 minor bumps may include breaking changes; we'll always call them out here.
 
+## [0.6.6] — 2026-06-06
+
+### Added — human-like input wired into the semantic verbs
+- **`humanize on` now affects `click` and `type`** (previously only the
+  low-level coordinate `mouse` verb). For `click @eN`: a Bezier mouse approach
+  to a jittered interior point + pre-click hover + mouse-down dwell — but the
+  actual click is still Playwright's verified, hit-tested `locator.click()`, so
+  it can never land on the wrong element (humanization only adds motion +
+  timing). For `type`: gaussian per-keystroke cadence, with the **total time
+  bounded** so a long field can't exceed the RPC timeout. Explicit `--delay`
+  bypasses the humanized typing path. Default OFF; opt in per session.
+- Bulk `fill` is intentionally **not** humanized (it sets the value instantly,
+  no keystroke events), so text entered via the high-level `observe`/`act` flow
+  isn't humanized — use `type` for humanized keystrokes. See `docs/STEALTH.md`.
+
 ## [0.6.5] — 2026-06-05
 
 ### Added — profile-dir bloat prevention

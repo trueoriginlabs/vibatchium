@@ -156,3 +156,147 @@ def test_humanized_click_latency_acceptable(local_server):
         assert elapsed < 2.0, f"humanized click took {elapsed:.2f}s (>2s)"
     finally:
         call("humanize_off")
+
+
+# ─── element-level humanization (Wave 7.8.1) ────────────────────────────
+# The point of these is correctness: with humanize ON, the semantic
+# click/type verbs must still hit the RIGHT element and produce the RIGHT
+# value (the click stays Playwright's verified click; we only add motion).
+
+
+def test_humanized_type_delays_shape_and_clamp():
+    from vibatchium.humanize import humanized_type_delays
+    d = humanized_type_delays(40, seed=7)
+    assert len(d) == 40
+    assert all(25 <= x <= 320 for x in d)              # clamped to range
+    assert humanized_type_delays(5, seed=7) == humanized_type_delays(5, seed=7)
+    assert statistics.pstdev(humanized_type_delays(60, seed=1)) > 5  # actually varies
+
+
+def test_humanized_click_hits_correct_element(local_server):
+    """humanize ON: clicking #counter-btn repeatedly increments the counter —
+    proving the verified click lands on the intended element every time, not a
+    neighbor."""
+    call("go", {"url": f"{local_server}/simple.html"})
+    assert call("text", {"selector": "#counter"})["text"] == "0"
+    call("humanize_on")
+    try:
+        r = call("click", {"target": "#counter-btn"})
+        assert r["humanized"] is True
+        call("click", {"target": "#counter-btn"})
+        call("click", {"target": "#counter-btn"})
+        assert call("text", {"selector": "#counter"})["text"] == "3"
+    finally:
+        call("humanize_off")
+
+
+def test_humanized_type_produces_correct_value(local_server):
+    """humanize ON: typed text lands in the right field with the right value."""
+    call("go", {"url": f"{local_server}/simple.html"})
+    call("humanize_on")
+    try:
+        r = call("type", {"target": "#q", "text": "hello world"})
+        assert r.get("humanized") is True
+        assert call("value", {"selector": "#q"})["value"] == "hello world"
+        call("click", {"target": "#submit"})
+        call("sleep", {"ms": 200})
+        assert call("text", {"selector": "#result"})["text"] == "hello world"
+    finally:
+        call("humanize_off")
+
+
+def test_humanize_off_click_unchanged(local_server):
+    """Regression guard: with humanize OFF the click path is the plain one."""
+    call("go", {"url": f"{local_server}/simple.html"})
+    call("humanize_off")
+    r = call("click", {"target": "#counter-btn"})
+    assert r["humanized"] is False
+    assert call("text", {"selector": "#counter"})["text"] == "1"
+
+
+# ─── motion/typing actually runs (stub page — no browser) ───────────────
+# These mutation-catch a humanize path that silently no-ops: the integration
+# tests above would stay green (a plain click also increments the counter), so
+# we assert the Bezier moves / per-char keystrokes really happen.
+
+class _FakeMouse:
+    def __init__(self):
+        self.moves = 0
+
+    async def move(self, x, y):
+        self.moves += 1
+
+
+class _FakeKeyboard:
+    def __init__(self):
+        self.typed = []
+
+    async def type(self, ch):
+        self.typed.append(ch)
+
+
+class _FakePage:
+    def __init__(self):
+        self.mouse = _FakeMouse()
+        self.keyboard = _FakeKeyboard()
+
+
+class _FakeLocator:
+    def __init__(self, box):
+        self._box = box
+        self.focused = False
+
+    async def scroll_into_view_if_needed(self, timeout=None):
+        pass
+
+    async def bounding_box(self):
+        return self._box
+
+    async def focus(self, timeout=None):
+        self.focused = True
+
+
+async def test_approach_actually_moves_and_targets_inside_box():
+    from vibatchium.humanize import humanized_locator_approach
+    page = _FakePage()
+    loc = _FakeLocator({"x": 100, "y": 100, "width": 80, "height": 30})
+    pos = await humanized_locator_approach(page, loc)
+    assert page.mouse.moves >= 30            # the Bezier path really ran
+    assert pos is not None
+    x, y = pos
+    assert 100 <= x <= 180 and 100 <= y <= 130   # landed inside the element
+
+
+async def test_approach_no_box_falls_back_to_none():
+    from vibatchium.humanize import humanized_locator_approach
+    page = _FakePage()
+    pos = await humanized_locator_approach(page, _FakeLocator(None))
+    assert pos is None
+    assert page.mouse.moves == 0             # nothing to approach → caller just clicks
+
+
+async def test_humanized_type_dispatches_each_char_incl_unicode():
+    from vibatchium.humanize import humanized_type
+    page = _FakePage()
+    loc = _FakeLocator({"x": 0, "y": 0, "width": 10, "height": 10})
+    await humanized_type(page, loc, "aé🎉")
+    assert loc.focused is True
+    assert page.keyboard.typed == ["a", "é", "🎉"]
+
+
+async def test_humanized_type_empty_is_noop():
+    from vibatchium.humanize import humanized_type
+    page = _FakePage()
+    loc = _FakeLocator(None)
+    await humanized_type(page, loc, "")
+    assert loc.focused is True
+    assert page.keyboard.typed == []
+
+
+def test_budgeted_type_delays_bounds_long_text():
+    from vibatchium.humanize import budgeted_type_delays
+    assert budgeted_type_delays(0) == []
+    assert 600 < sum(budgeted_type_delays(10, seed=1)) < 2000     # ~full cadence
+    long = budgeted_type_delays(1000, seed=1)
+    assert len(long) == 1000
+    assert sum(long) <= 26000          # bounded — no 110s blow-up past the RPC timeout

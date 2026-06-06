@@ -1381,10 +1381,27 @@ def register_all(daemon) -> None:
         target = args["target"]
         timeout = int(args.get("timeout_ms", 30_000))
         auto_dismiss = bool(args.get("auto_dismiss_banners", False))
+        entry = d.registry.get(current_session_ctx.get())
+        humanize = bool(entry.flags.get("humanize")) if entry else False
         loc = _resolve_target(d, target)
+
+        async def _do_click(loc):
+            # When humanize is on, add a Bezier approach + dwell, but the actual
+            # click stays Playwright's verified click (hit-tested at dispatch),
+            # so we can never click the wrong element.
+            if humanize:
+                from ..humanize import humanized_locator_approach, sample_dwell_ms
+                pos = await humanized_locator_approach(
+                    entry.session.page, loc, cursor=entry.flags.get("_cursor"))
+                if pos is not None:
+                    entry.flags["_cursor"] = pos
+                await loc.click(timeout=timeout, delay=sample_dwell_ms())
+            else:
+                await loc.click(timeout=timeout)
+
         try:
-            await loc.click(timeout=timeout)
-            return {"clicked": target}
+            await _do_click(loc)
+            return {"clicked": target, "humanized": humanize}
         except Exception as exc:  # noqa: BLE001
             msg = str(exc).lower()
             intercepted = "intercepts pointer events" in msg or "subtree intercepts" in msg \
@@ -1400,8 +1417,8 @@ def register_all(daemon) -> None:
                 pass
             # Re-resolve (snapshot may have been invalidated by the banner click)
             loc = _resolve_target(d, target)
-            await loc.click(timeout=timeout)
-            return {"clicked": target, "auto_dismissed": True}
+            await _do_click(loc)
+            return {"clicked": target, "auto_dismissed": True, "humanized": humanize}
 
     @daemon.handler("dblclick")
     async def _dblclick(d, args):
@@ -1428,8 +1445,17 @@ def register_all(daemon) -> None:
     @daemon.handler("type")
     async def _type(d, args):
         loc = _resolve_target(d, args["target"])
+        timeout = int(args.get("timeout_ms", 30_000))
+        entry = d.registry.get(current_session_ctx.get())
+        humanize = bool(entry.flags.get("humanize")) if entry else False
+        # Humanize only when on AND the caller didn't pin an explicit delay.
+        if humanize and not args.get("delay_ms"):
+            from ..humanize import humanized_type
+            await humanized_type(entry.session.page, loc, args["text"],
+                                 timeout_ms=timeout)
+            return {"typed": args["target"], "humanized": True}
         await loc.press_sequentially(args["text"], delay=int(args.get("delay_ms", 0)),
-                                     timeout=int(args.get("timeout_ms", 30_000)))
+                                     timeout=timeout)
         return {"typed": args["target"]}
 
     @daemon.handler("hover")

@@ -193,3 +193,104 @@ async def humanized_scroll(page, dx: float, dy: float, *,
     for dt_ms, step_dy in steps:
         await page.mouse.wheel(dx / max(1, len(steps)), step_dy)
         await asyncio.sleep(dt_ms / 1000)
+
+
+# ─── element-aware humanization (safe: motion only, click stays verified) ──
+#
+# The cardinal rule for clicking by ELEMENT (vs raw coords): humanization must
+# only add the *approach* (movement) and *timing* (dwell). The actual click is
+# always Playwright's `locator.click()`, which re-resolves + hit-tests the
+# target the instant before dispatch. So a page that reflows mid-animation can
+# never make us click the wrong element — the worst case is the cursor ends a
+# few px off and Playwright clicks the correct element anyway. We NEVER dispatch
+# a bare mouse.down at a coordinate that hasn't been hit-tested against the
+# resolved element.
+
+
+def point_in_box(box: dict, *, rng: random.Random | None = None
+                 ) -> tuple[float, float]:
+    """A jittered click point inside the element's inner ~60% — gaussian around
+    center, hard-clamped to ±30% of each half-extent so we stay well clear of
+    the edges (and never stray onto an adjacent element)."""
+    r = rng or random
+    cx = box["x"] + box["width"] / 2
+    cy = box["y"] + box["height"] / 2
+    # Jitter ~12% of each extent, clamped to ±30% of the half-extent AND an
+    # absolute 64px — so on a huge hit-area we still aim near the centre, not
+    # 1000px off (which neither looks human nor helps).
+    cap_x = min(box["width"] * 0.3, 64)
+    cap_y = min(box["height"] * 0.3, 64)
+    ox = max(-cap_x, min(cap_x, r.gauss(0, box["width"] * 0.12)))
+    oy = max(-cap_y, min(cap_y, r.gauss(0, box["height"] * 0.12)))
+    return (cx + ox, cy + oy)
+
+
+async def humanized_locator_approach(page, loc, *,
+                                     cursor: tuple[float, float] | None = None
+                                     ) -> tuple[float, float] | None:
+    """Humanize the APPROACH to a Playwright locator — without clicking it.
+
+    Scrolls the element into view, reads its CURRENT bounding box, moves the
+    mouse along a Bezier path to a jittered interior point, and pauses briefly
+    (pre-click hover). Returns the new cursor position, or None if the element
+    has no usable box (caller should then just click directly).
+
+    Deliberately does NOT click: the caller dispatches Playwright's verified
+    `locator.click()` afterward, so correctness is identical to a normal click.
+    """
+    try:
+        await loc.scroll_into_view_if_needed(timeout=5000)
+    except Exception:  # noqa: BLE001
+        pass  # non-fatal — loc.click() will scroll again if it needs to
+    box = await loc.bounding_box()
+    if not box or box.get("width", 0) <= 0 or box.get("height", 0) <= 0:
+        return None
+    tx, ty = point_in_box(box)
+    await humanized_move(page, tx, ty, start=cursor)
+    await asyncio.sleep(random.uniform(0.05, 0.15))  # settle on the element
+    return (tx, ty)
+
+
+def humanized_type_delays(n: int, *, mean_ms: float = 110, stdev_ms: float = 45,
+                          floor_ms: float = 25, ceiling_ms: float = 320,
+                          seed: int | None = None) -> list[int]:
+    """Per-keystroke gaussian inter-key delays (ms) for `n` chars, clamped to a
+    realistic typist range. Pure + deterministic with `seed`."""
+    r = random.Random(seed) if seed is not None else random
+    return [int(max(floor_ms, min(ceiling_ms, r.gauss(mean_ms, stdev_ms))))
+            for _ in range(n)]
+
+
+def budgeted_type_delays(n: int, *, max_total_ms: float = 20000,
+                         base_mean_ms: float = 110, seed: int | None = None
+                         ) -> list[int]:
+    """Inter-key delays for `n` chars whose total stays within `max_total_ms`.
+
+    For short text this is the normal ~110ms/key cadence. For long text the
+    per-key mean shrinks so the whole thing fits the budget — otherwise a big
+    field (≳375 chars) typed at full cadence could exceed the daemon's RPC
+    timeout and surface as an opaque socket error mid-type. Jitter scales with
+    the mean so it still looks human.
+    """
+    if n <= 0:
+        return []
+    mean = min(base_mean_ms, max_total_ms / n)
+    return humanized_type_delays(n, mean_ms=mean, stdev_ms=mean * 0.4,
+                                 floor_ms=max(5.0, mean * 0.4),
+                                 ceiling_ms=mean * 2.5, seed=seed)
+
+
+async def humanized_type(page, loc, text: str, *, timeout_ms: int = 30000) -> None:
+    """Type `text` into `loc` with gaussian inter-key timing.
+
+    Focuses the validated element first, then dispatches one character at a
+    time, with the total time bounded (see `budgeted_type_delays`). Keys are
+    sent to the focused element — same targeting as `press_sequentially`, so
+    the typed value is unchanged; on a page that actively steals focus
+    mid-type they could land elsewhere (same exposure as `press_sequentially`,
+    marginally widened by the inter-key pauses).
+    """
+    await loc.focus(timeout=timeout_ms)
+    for ch, delay_ms in zip(text, budgeted_type_delays(len(text)), strict=True):
+        await page.keyboard.type(ch)
+        await asyncio.sleep(delay_ms / 1000)
