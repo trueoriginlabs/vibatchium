@@ -130,7 +130,9 @@ def test_setup_cursor_writes_fresh_mcp_json(monkeypatch, tmp_path):
     cfg = tmp_path / ".cursor" / "mcp.json"
     data = json.loads(cfg.read_text())
     assert data["mcpServers"]["vibatchium"]["command"] == "/fake/vibatchium"
-    assert data["mcpServers"]["vibatchium"]["args"] == ["mcp"]
+    # Registers the lean curated tool surface, not the full ~145.
+    assert data["mcpServers"]["vibatchium"]["args"] == [
+        "mcp", "--caps", setup_cmd.LEAN_CAPS]
 
 
 def test_setup_cursor_preserves_existing_servers(monkeypatch, tmp_path):
@@ -207,3 +209,122 @@ def test_resolve_vibatchium_binary_prefers_path(monkeypatch):
     monkeypatch.setattr(shutil, "which",
                         lambda n: "/usr/local/bin/vb" if n == "vb" else None)
     assert setup_cmd.resolve_vibatchium_binary() == "/usr/local/bin/vb"
+
+
+# ─── on-system discoverability: lean caps + auto-discoverable skill ─────────
+
+
+def test_setup_lean_caps_are_valid_buckets():
+    """LEAN_CAPS must resolve cleanly — a typo'd bucket would make the
+    `vb mcp --caps=…` registration command fail and silently break setup."""
+    from vibatchium.caps import CAP_BUCKETS, resolve_caps
+    resolved = resolve_caps(setup_cmd.LEAN_CAPS)  # raises CapsError on a bad name
+    assert resolved == {"core", "nav", "content", "input", "element",
+                        "agent", "vision", "session", "pages"}
+    assert resolved <= set(CAP_BUCKETS)            # every bucket really exists
+    # It is a genuine subset — not accidentally the whole surface.
+    assert resolved < set(CAP_BUCKETS)
+
+
+def test_claude_skill_frontmatter_and_triggers(tmp_path, monkeypatch):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    res = setup_cmd.write_claude_skill("/opt/vb")
+    assert res == "created"
+    skill = tmp_path / ".claude" / "skills" / "vibatchium" / "SKILL.md"
+    text = skill.read_text()
+    # YAML frontmatter the host matches on to auto-invoke.
+    assert text.startswith("---\nname: vibatchium\ndescription: ")
+    assert "Cloudflare" in text and "SPA" in text and "log into" in text
+    # The 80%-case verbs and the "already installed" guardrail.
+    assert "vb explore" in text and "vb research" in text and "vb observe" in text
+    assert "/opt/vb" in text
+    assert "python -m vibatchium" in text  # the do-NOT trap
+
+
+def test_claude_skill_idempotent_then_updates(tmp_path, monkeypatch):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    assert setup_cmd.write_claude_skill("/opt/vb") == "created"
+    assert setup_cmd.write_claude_skill("/opt/vb") == "unchanged"
+    assert setup_cmd.write_claude_skill("/usr/bin/vb") == "updated"  # binary changed
+
+
+def test_claude_skill_dry_run_never_writes(tmp_path, monkeypatch):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    assert setup_cmd.write_claude_skill("/opt/vb", dry_run=True) == "would-created"
+    assert not (tmp_path / ".claude" / "skills" / "vibatchium" / "SKILL.md").exists()
+
+
+def test_setup_claude_installs_skill_even_without_claude_cli(tmp_path, monkeypatch):
+    """setup_claude writes the skill as part of the docs pass; it must not
+    depend on the `claude` binary being present (skill is just a file)."""
+    monkeypatch.setattr(shutil, "which", lambda n: None)  # no claude CLI
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    res = setup_cmd.setup_claude("/opt/vb", dry_run=False, write_docs=True)
+    assert res.skill == "created"
+    assert (tmp_path / ".claude" / "skills" / "vibatchium" / "SKILL.md").exists()
+
+
+def test_setup_cursor_never_writes_global_mdc_rule(tmp_path, monkeypatch):
+    """Cursor ignores ~/.cursor/rules/*.mdc (global rules are plain-text in
+    Settings; .mdc is project-scoped only) — so setup must NOT write one, and
+    must say so instead of pretending it installed an auto-applied rule."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    res = setup_cmd.setup_cursor("/opt/vb", dry_run=False, write_docs=True)
+    assert res.skill == "skipped"
+    assert not (tmp_path / ".cursor" / "rules").exists()
+    assert any("project" in n.lower() and "rule" in n.lower() for n in res.notes)
+
+
+# ─── registration argv (the gap that let the missing-`--` bug ship) ─────────
+
+
+class _FakeCompleted:
+    def __init__(self, returncode=0, stdout="", stderr=""):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+def _capture_mcp_add(monkeypatch):
+    """Mock subprocess.run so `mcp get` reports 'not registered' and `mcp add`
+    succeeds, recording every argv. Returns the shared calls list."""
+    calls: list[list[str]] = []
+
+    def fake_run(argv, **kw):
+        calls.append(list(argv))
+        if "get" in argv:                 # _mcp_already_registered probe
+            return _FakeCompleted(returncode=1)
+        return _FakeCompleted(returncode=0)
+
+    monkeypatch.setattr(setup_cmd.subprocess, "run", fake_run)
+    return calls
+
+
+def test_setup_claude_registration_argv_has_separator_and_caps(tmp_path, monkeypatch):
+    """`claude mcp add` parses `--caps` as its OWN option unless a `--`
+    separator precedes the command — without it, registration fails. Pin the
+    exact argv so a regression in the separator/caps is caught."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(shutil, "which",
+                        lambda n: "/fake/claude" if n == "claude" else None)
+    calls = _capture_mcp_add(monkeypatch)
+    res = setup_cmd.setup_claude("/opt/vb", dry_run=False, write_docs=False)
+    assert res.mcp == "registered"
+    add = next(c for c in calls if "add" in c)
+    assert add == ["/fake/claude", "mcp", "add", "--scope", "user",
+                   "vibatchium", "--", "/opt/vb", "mcp",
+                   "--caps", setup_cmd.LEAN_CAPS]
+    assert add[add.index("/opt/vb") - 1] == "--"   # `--` immediately before cmd
+
+
+def test_setup_codex_registration_argv_has_separator_and_caps(tmp_path, monkeypatch):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(shutil, "which",
+                        lambda n: "/fake/codex" if n == "codex" else None)
+    calls = _capture_mcp_add(monkeypatch)
+    res = setup_cmd.setup_codex("/opt/vb", dry_run=False, write_docs=False)
+    assert res.mcp == "registered"
+    add = next(c for c in calls if "add" in c)
+    assert add == ["/fake/codex", "mcp", "add", "vibatchium", "--",
+                   "/opt/vb", "mcp", "--caps", setup_cmd.LEAN_CAPS]
+    assert add[add.index("/opt/vb") - 1] == "--"

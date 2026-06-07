@@ -828,7 +828,8 @@ def setup(ctx, agents, check, no_docs):
     click.echo()
     click.echo("results:")
     for r in result["results"]:
-        click.echo(f"  {r['agent']:8s}  mcp={r['mcp']:14s} docs={r['docs']}")
+        click.echo(f"  {r['agent']:8s}  mcp={r['mcp']:14s} docs={r['docs']:10s} "
+                   f"skill={r.get('skill', 'skipped')}")
         for note in r["notes"]:
             click.echo(f"      · {note}")
     if not check and any(r["mcp"] == "registered" for r in result["results"]):

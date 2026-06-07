@@ -6,7 +6,7 @@ Patched Playwright + multi-session daemon + credential vault + vision clicking +
 ```
 pipx install vibatchium     # or: pip install vibatchium
 patchright install chrome
-vb setup                    # auto-register with Codex / Claude Code / Cursor (idempotent)
+vb setup                    # register MCP + an auto-discoverable skill so agents reach for vb (idempotent)
 ```
 
 > Bleeding edge from `master`: `pipx install git+https://github.com/trueoriginlabs/vibatchium`

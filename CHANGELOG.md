@@ -4,6 +4,30 @@ All notable changes to vibatchium are documented here. Versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Until 1.0,
 minor bumps may include breaking changes; we'll always call them out here.
 
+## [0.6.7] — 2026-06-07
+
+### Added — on-system discoverability (agents reach for vb unprompted)
+- **`vb setup` now installs an auto-discoverable Claude Code skill** at
+  `~/.claude/skills/vibatchium/SKILL.md`, not just an MCP registration + a docs
+  paragraph. Its `description` is the trigger the host matches to *auto-invoke*
+  vb for the right tasks (walled sites, SPAs, login, multi-step, parallel)
+  without the user naming it. Codex continues to use its `~/.codex/AGENTS.md`
+  block. Cursor registers the MCP server only — Cursor has no user-scope
+  auto-applied rule mechanism (global rules are plain-text in Settings; `.mdc`
+  rules are project-scoped), so add an `.mdc` to a project's `.cursor/rules/`
+  for per-project auto-invoke. The new `skill=` column in `vb setup` output
+  reports each.
+
+### Changed — curated default MCP surface (less tool overload)
+- **`vb setup` registers the MCP server with a lean default cap set**
+  (`core,nav,content,input,element,agent,vision,session,pages`) instead of the
+  full ~145-verb surface — enough to browse, extract, interact, screenshot,
+  switch tabs (OAuth/popup login), and run parallel sessions, without burying
+  the ~10 verbs an agent actually reaches for. The long tail (network, devtools,
+  secrets, goals, storage, dialogs…) stays one re-registration away via
+  `--caps=all`. Existing registrations are untouched (setup short-circuits on
+  already-registered).
+
 ## [0.6.6] — 2026-06-06
 
 ### Added — human-like input wired into the semantic verbs

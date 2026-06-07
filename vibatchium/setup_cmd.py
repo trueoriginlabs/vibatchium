@@ -57,6 +57,97 @@ def _doc_block(binary: str) -> str:
                                      binary=binary)
 
 
+# ─── on-system discoverability: lean MCP surface + host-discoverable skill ──
+#
+# The MCP server exposes ~145 verbs. Registering the full surface buries the
+# ~10 an agent actually reaches for and taxes the host's tool-selection. We
+# register a curated working set by default — enough to browse, extract,
+# interact, screenshot, switch tabs (OAuth/popup login), and run parallel
+# sessions — and leave the long tail (network, devtools, secrets, goals,
+# storage, dialogs…) one re-registration away via `--caps=all`. Keep every name
+# here a real bucket in `caps.py` (test_setup_lean_caps_are_valid_buckets guards
+# against typos that would make `vb mcp --caps=…` fail at registration time).
+LEAN_CAPS = "core,nav,content,input,element,agent,vision,session,pages"
+
+# A Claude Code Skill installed at ~/.claude/skills/vibatchium/SKILL.md. Its
+# `description` is the trigger the host matches to AUTO-invoke vb without the
+# user naming it — the single biggest lever for on-system discoverability. Keep
+# it sharp about WHEN a real browser is the right tool (and when it isn't).
+# (Cursor has no equivalent user-scope auto-applied rule: global rules are
+# plain-text in Settings and .mdc rules are project-scoped only, so there's no
+# Cursor skill file to install — see setup_cursor.)
+_SKILL_DESCRIPTION = (
+    "Drive a real stealth Chrome when plain HTTP/WebFetch won't work — sites "
+    "behind Cloudflare/DataDome/PerimeterX, JavaScript SPAs, logged-in or "
+    "authenticated pages, multi-step form/checkout flows, and parallel "
+    "multi-site automation. Use whenever the user wants to browse, scrape, "
+    "research, log into, or click through a website that blocks bots or needs "
+    "a real browser. Runs via the `vb` CLI + MCP tools."
+)
+
+_SKILL_BODY = """# vibatchium — agentic stealth browser
+
+`vb` is installed at `{binary}` (also on `$PATH` as `vb`).
+
+**Reach for this when** a page is walled (Cloudflare/DataDome/PerimeterX), is a
+JavaScript SPA, needs a login/session, or the task is multi-step. For plain
+static HTML or a Google/news lookup, use WebFetch/WebSearch — it's cheaper.
+
+## The 80% — one-call verbs
+- `vb explore <url>` — look at a page: text + screenshot, auto-closes.
+- `vb research --target <url> --intent "..." --intent "..."` — parallel fan-out.
+- `vb observe` then `vb act "<instruction>"` — semantic see-then-do.
+
+## Multi-step / logged-in flows
+    vb session new work && vb --session work start
+    vb --session work go <url>      # log in by hand once; cookies persist
+    vb --session work observe       # @eN element refs
+    vb --session work click @e3
+
+Sessions are independent Chromes — run several in parallel, no cookie bleed.
+
+## Notes
+- Already installed; do **not** `pip install` or `python -m vibatchium`. Call `vb`.
+- `vb explore`/`research` are CLI commands — shell out to `vb`. The MCP server
+  may expose only a curated subset of verbs; the full surface is always on the
+  CLI (`vb --help`), and you can widen the MCP tools by re-registering the
+  server with `--caps=all`.
+"""
+
+
+def _skill_md(binary: str) -> str:
+    fm = f"---\nname: vibatchium\ndescription: {_SKILL_DESCRIPTION}\n---\n\n"
+    return fm + _SKILL_BODY.format(binary=binary)
+
+
+def _write_owned_file(path: Path, content: str, dry_run: bool = False) -> str:
+    """Write a file vibatchium fully owns (a skill / rule we author end-to-end).
+
+    Unlike ensure_md_block (which splices a marked block into a user-owned file),
+    this replaces the whole file. Idempotent: returns
+    "created" | "updated" | "unchanged" (or "would-X" in dry-run).
+    """
+    def _label(action: str) -> str:
+        return f"would-{action}" if dry_run else action
+    if path.exists():
+        if path.read_text() == content:
+            return "unchanged"
+        if not dry_run:
+            path.write_text(content)
+        return _label("updated")
+    if not dry_run:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content)
+    return _label("created")
+
+
+def write_claude_skill(binary: str, dry_run: bool = False) -> str:
+    """Install the auto-discoverable Claude Code skill into the user scope."""
+    return _write_owned_file(
+        Path.home() / ".claude" / "skills" / "vibatchium" / "SKILL.md",
+        _skill_md(binary), dry_run=dry_run)
+
+
 # ─── detection ──────────────────────────────────────────────────────────
 
 @dataclass
@@ -162,6 +253,7 @@ class SetupResult:
     agent: str
     mcp: str = "skipped"      # "registered" | "already" | "skipped" | "failed"
     docs: str = "skipped"     # "created" | "updated" | "unchanged" | "skipped" | "failed"
+    skill: str = "skipped"    # "created" | "updated" | "unchanged" | "skipped" | "failed"
     notes: list[str] = field(default_factory=list)
 
 
@@ -176,7 +268,8 @@ def setup_codex(binary: str, dry_run: bool = False,
             res.mcp = "would-register"
         else:
             try:
-                subprocess.run([cli, "mcp", "add", "vibatchium", "--", binary, "mcp"],
+                subprocess.run([cli, "mcp", "add", "vibatchium", "--",
+                                binary, "mcp", "--caps", LEAN_CAPS],
                               capture_output=True, check=True, text=True, timeout=20)
                 res.mcp = "registered"
             except subprocess.CalledProcessError as e:
@@ -191,6 +284,8 @@ def setup_codex(binary: str, dry_run: bool = False,
         except OSError as e:
             res.docs = "failed"
             res.notes.append(f"AGENTS.md write failed: {e}")
+    # Codex's auto-discovery surface is AGENTS.md (the doc block above); it has
+    # no separate skill file, so `skill` stays "skipped" for codex.
     return res
 
 
@@ -206,7 +301,7 @@ def setup_claude(binary: str, dry_run: bool = False,
         else:
             try:
                 subprocess.run([cli, "mcp", "add", "--scope", "user",
-                              "vibatchium", binary, "mcp"],
+                              "vibatchium", "--", binary, "mcp", "--caps", LEAN_CAPS],
                               capture_output=True, check=True, text=True, timeout=20)
                 res.mcp = "registered"
             except subprocess.CalledProcessError as e:
@@ -221,6 +316,12 @@ def setup_claude(binary: str, dry_run: bool = False,
         except OSError as e:
             res.docs = "failed"
             res.notes.append(f"CLAUDE.md write failed: {e}")
+        # The auto-discoverable skill — what makes Claude reach for vb unprompted.
+        try:
+            res.skill = write_claude_skill(binary, dry_run=dry_run)
+        except OSError as e:
+            res.skill = "failed"
+            res.notes.append(f"skill write failed: {e}")
     return res
 
 
@@ -244,13 +345,19 @@ def setup_cursor(binary: str, dry_run: bool = False,
         if dry_run:
             res.mcp = "would-register"
         else:
-            servers["vibatchium"] = {"command": binary, "args": ["mcp"]}
+            servers["vibatchium"] = {"command": binary,
+                                     "args": ["mcp", "--caps", LEAN_CAPS]}
             cfg.parent.mkdir(parents=True, exist_ok=True)
             cfg.write_text(json.dumps(existing, indent=2))
             res.mcp = "registered"
-    # Cursor has no widely-supported global instructions file — note it
+    # Cursor's MCP server is registered above (that surface IS read globally).
+    # Cursor has NO user-scope auto-applied rule mechanism: global rules are
+    # plain-text in Settings, and .mdc rules are project-scoped only
+    # (~/.cursor/rules/*.mdc is ignored). So there's no skill file to install.
     if write_docs:
-        res.notes.append("Cursor has no user-scope AGENTS.md convention; project rules only")
+        res.notes.append(
+            "Cursor: MCP registered (lean caps). No user-scope rule mechanism — "
+            "add an .mdc to a project's .cursor/rules/ for per-project auto-invoke.")
     return res
 
 
@@ -278,6 +385,7 @@ def run_setup(agents: list[str] | None = None, dry_run: bool = False,
         "dry_run": dry_run,
         "detected": {n: {"detected": info.detected, "reason": info.reason}
                     for n, info in detected.items()},
-        "results": [{"agent": r.agent, "mcp": r.mcp, "docs": r.docs, "notes": r.notes}
+        "results": [{"agent": r.agent, "mcp": r.mcp, "docs": r.docs,
+                     "skill": r.skill, "notes": r.notes}
                    for r in results],
     }
