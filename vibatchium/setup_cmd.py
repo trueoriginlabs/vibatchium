@@ -46,8 +46,8 @@ walled (Cloudflare, Datadome), SPAs, multi-step interactive flows, login.
 DO NOT `pip install vibatchium` (Debian/Ubuntu blocks it via PEP 668) — already
 installed. DO NOT call `python -m vibatchium.cli` — binary is on $PATH.
 
-Deep docs in the vibatchium repo: `AGENTS.md`, `docs/OPERATIONS.md`,
-`docs/CAPABILITIES.md`. Run `vb --help` for the full surface.
+Deep docs in the vibatchium repo: `AGENTS.md`. Run `vb --help` for the
+full surface.
 {end}
 """
 

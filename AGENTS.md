@@ -182,6 +182,4 @@ back up. Events persist in SQLite — poll `vb goal events <id> --after-seq N` (
 
 ## Going deeper
 
-- Full verb reference: [`docs/CAPABILITIES.md`](docs/CAPABILITIES.md) — 127 verbs across 30 categories
-- Operator recipes + anti-patterns from real runs: [`docs/OPERATIONS.md`](docs/OPERATIONS.md)
-- Stealth posture + defender clearance: [`docs/STEALTH.md`](docs/STEALTH.md)
+- Full verb reference: `vb --help` and `vb <command> --help` — every CLI / MCP / REST verb.

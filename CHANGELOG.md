@@ -41,7 +41,7 @@ minor bumps may include breaking changes; we'll always call them out here.
   bypasses the humanized typing path. Default OFF; opt in per session.
 - Bulk `fill` is intentionally **not** humanized (it sets the value instantly,
   no keystroke events), so text entered via the high-level `observe`/`act` flow
-  isn't humanized — use `type` for humanized keystrokes. See `docs/STEALTH.md`.
+  isn't humanized — use `type` for humanized keystrokes.
 
 ## [0.6.5] — 2026-06-05
 

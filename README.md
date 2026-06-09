@@ -81,9 +81,6 @@ Active-session resolution: `--session FLAG` → `$VIBATCHIUM_SESSION` env → `~
 ## Documentation
 
 - [`AGENTS.md`](AGENTS.md) — coding-agent contract (Codex / Cursor / Claude Code)
-- [`docs/CAPABILITIES.md`](docs/CAPABILITIES.md) — per-verb reference (every CLI / MCP / REST verb)
-- [`docs/OPERATIONS.md`](docs/OPERATIONS.md) — operator playbook: env vars, recipes, anti-patterns from real runs
-- [`docs/STEALTH.md`](docs/STEALTH.md) — stealth posture, defender clearance, trade-offs
 
 ## Server modes
 
@@ -117,7 +114,7 @@ For the REST shim: without `--caps`, the bearer token grants every verb includin
 
 - **5+ concurrent sessions = 1-2GB RAM.** Each persistent-context Chrome is ~200-400MB. Bump cap with `VIBATCHIUM_MAX_SESSIONS=8`.
 - **Vision spend cap is process-wide.** N fan-out agents share one daily/lifetime budget.
-- **Init scripts don't work on patchright backend.** `chrome.runtime` stays `undefined` — accepted trade for stealth wins ([details](docs/STEALTH.md)).
+- **Init scripts don't work on patchright backend.** `chrome.runtime` stays `undefined` — accepted trade for stealth wins.
 - **Login walls (X, LinkedIn) require attach mode.** Cold-launch fan-out can't defeat sites requiring authenticated sessions.
 - **Single daemon = single point of failure.** No HA built in.
 - **PyPI version (0.1.0) is stale.** Install from the git URL above for the current feature surface.
