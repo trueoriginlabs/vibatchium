@@ -646,6 +646,77 @@ def register_all(daemon) -> None:
                 out["exit_ip_error"] = str(exc)
         return out
 
+    # ─── 0.6.11: per-session timezone/locale (geo) coherence ───────────
+
+    @daemon.handler("geo_set")
+    async def _geo_set(d, args):
+        """Persist a timezone for the current session. Takes effect on next
+        start. Set it to match a proxy's country so timezone / IP cohere (the
+        host's clock behind a foreign proxy IP is a loud bot tell).
+
+        Distinct from the runtime `geolocation` (lat/lng) override — this is a
+        launch-time, persisted config like `proxy set`. (navigator.language is
+        intentionally NOT overridden — it can't reach worker threads without a
+        main-vs-worker mismatch; see geo.py.)
+
+        Args: `country` (ISO-2, resolves to a representative timezone) and/or an
+        explicit `timezone_id` (IANA), which overrides the country lookup.
+        """
+        from ..geo import resolve_geo, save_session_geo
+        from .registry import current_session_ctx as _ctx
+        from .paths import session_dir as _sd
+        geo = resolve_geo(
+            country=args.get("country"),
+            timezone_id=args.get("timezone_id"),
+        )
+        sname = _ctx.get()
+        entry = d.registry.get(sname)
+        pdir = entry.profile_dir if entry else _sd(sname)
+        save_session_geo(pdir, geo)
+        return {"set": True, "session": sname,
+                "timezone_id": geo.get("timezone_id"),
+                "note": "takes effect on next `start` (close session first if running)"}
+
+    @daemon.handler("geo_clear")
+    async def _geo_clear(d, args):
+        from ..geo import save_session_geo
+        from .registry import current_session_ctx as _ctx
+        from .paths import session_dir as _sd
+        sname = _ctx.get()
+        entry = d.registry.get(sname)
+        pdir = entry.profile_dir if entry else _sd(sname)
+        save_session_geo(pdir, None)
+        return {"cleared": True, "session": sname}
+
+    @daemon.handler("geo_info")
+    async def _geo_info(d, args):
+        """Show the configured timezone + (if running) what the browser actually
+        reports — proving the override took."""
+        from ..geo import load_session_geo
+        from .registry import current_session_ctx as _ctx
+        from .paths import session_dir as _sd
+        sname = _ctx.get()
+        entry = d.registry.get(sname)
+        pdir = entry.profile_dir if entry else _sd(sname)
+        geo = load_session_geo(pdir)
+        out = {"session": sname, "configured": bool(geo),
+               "timezone_id": (geo or {}).get("timezone_id")}
+        if entry is not None:
+            # geo_info is a registry verb (holds only mutate_lock), but this
+            # touches the live page — take the per-session lock so we don't race
+            # a concurrent session-scoped verb on the same page. No inversion:
+            # session verbs never acquire mutate_lock while holding entry.lock.
+            try:
+                async with entry.lock:
+                    live = await entry.session.page.evaluate(
+                        "() => ({tz: Intl.DateTimeFormat().resolvedOptions().timeZone,"
+                        " offset: new Date().getTimezoneOffset()})")
+                out["browser_timezone"] = live.get("tz")
+                out["browser_utc_offset_min"] = live.get("offset")
+            except Exception as exc:  # noqa: BLE001
+                out["browser_probe_error"] = str(exc)
+        return out
+
     # ─── Wave 6.1c: session checkpoint / restore ───────────────────────
 
     @daemon.handler("checkpoint_save")
@@ -851,7 +922,7 @@ def register_all(daemon) -> None:
         name = validate_name(args.get("name"), kind="session name")
         if name == get_active_session_name():
             raise ValueError(f"session {name!r} is active — switch first")
-        deleted = d.registry.delete_profile_dir(name)
+        deleted = await d.registry.delete_profile_dir(name)
         return {"deleted": deleted, "name": name}
 
     # ─── profile management (legacy aliases for session_* ─ 1:1 model) ──
@@ -928,7 +999,7 @@ def register_all(daemon) -> None:
                 names.append(name)
                 if apply:
                     try:
-                        d.registry.delete_profile_dir(name)
+                        await d.registry.delete_profile_dir(name)
                     except Exception as exc:  # noqa: BLE001
                         log.warning("clean: profile %s: %s", name, exc)
             cats["profiles"] = {"count": len(names), "bytes": total,
@@ -1144,7 +1215,10 @@ def register_all(daemon) -> None:
                 and os.environ.get("VIBATCHIUM_NO_AUTO_START", "0").lower()
                     not in ("1", "true", "yes")):
             log.info("auto-start session=%s (no existing session for `go`)", name)
-            await d._handlers["start"](d, {"headless": True})
+            # 0.6.11: respect VIBATCHIUM_DEFAULT_HEADED instead of hardcoding
+            # headless — `go` carries no posture, so resolve_headless({}) applies
+            # the canonical precedence (defaults headless, honors the env opt-in).
+            await d._handlers["start"](d, {"headless": resolve_headless({})})
         s = _need_session(d)
         url = args["url"]
         # Per-goal domain allowlist enforcement: while a goal owns this session

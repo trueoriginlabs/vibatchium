@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from typing import Any
 
 import mcp.types as types
@@ -433,6 +434,23 @@ TOOLS: list[tuple[str, str, dict, str, Any]] = [
      {"type": "object", "properties": {"name": _str("Session name.")},
       "required": ["name"]},
      "session_delete", None),
+    ("clean",
+     "Housekeeping — reclaim disk from stale profile dirs, leftover Chrome lock "
+     "files, regenerable caches, and the daemon log. DRY-RUN by default; pass "
+     "apply=true to actually delete. Never touches the default/active/running "
+     "sessions. Returns a per-category {count, bytes} report.",
+     {"type": "object", "properties": {
+         "apply": _bool("Actually delete (default false = dry-run report).", False),
+         "older_than": _int("Prune profiles idle ≥ this many seconds (default 14d).", None),
+         "keep": {"type": "array", "items": {"type": "string"},
+                  "description": "Session names to never prune."},
+         "log_keep_bytes": _int("Truncate daemon.log to its last N bytes.", None),
+         "profiles": _bool("Include stale profile dirs (default true).", True),
+         "locks": _bool("Include leftover Chrome lock files (default true).", True),
+         "cache": _bool("Include regenerable caches (default true).", True),
+         "logs": _bool("Include daemon-log truncation (default true).", True),
+     }},
+     "clean", None),
     # ─── Wave 5.4b: fingerprint scorer ─────────────────────────────────
     ("fingerprint",
      "Open a bot-detection target and return a numeric stealth score. "
@@ -506,6 +524,23 @@ TOOLS: list[tuple[str, str, dict, str, Any]] = [
     ("proxy_info",
      "Show configured proxy + (if session running) current exit IP and latency.",
      {"type": "object", "properties": {}}, "proxy_info", None),
+    # ─── 0.6.11: timezone coherence (pairs with proxy) ───────────────
+    ("geo_set",
+     "Persist a timezone for the current session (takes effect on next start). "
+     "Set it to match a proxy's country so timezone/IP cohere — the host clock "
+     "behind a foreign proxy IP is a bot tell. Distinct from the runtime "
+     "`geolocation` lat/lng override. (navigator.language is intentionally not "
+     "overridden — it can't reach worker threads without a mismatch tell.)",
+     {"type": "object", "properties": {
+         "country": _str("ISO-2 country (us, gb, de, …) → representative timezone."),
+         "timezone_id": _str("Explicit IANA timezone, e.g. America/New_York (overrides country)."),
+     }},
+     "geo_set", None),
+    ("geo_clear", "Remove the timezone override from the current session.",
+     {"type": "object", "properties": {}}, "geo_clear", None),
+    ("geo_info",
+     "Show the configured timezone + (if running) what the browser reports.",
+     {"type": "object", "properties": {}}, "geo_info", None),
     # ─── Wave 6.1c: session checkpoint / restore ─────────────────────
     ("checkpoint_save",
      "Save the current session (tabs + cookies + LS/SS + viewport) as a named checkpoint.",
@@ -952,6 +987,30 @@ def _err(msg: str) -> types.CallToolResult:
     )
 
 
+def _apply_mcp_start_posture(cmd: str, args: dict) -> dict:
+    """MCP `start` posture resolution (0.6.11), extracted so it is unit-testable
+    without a live MCP transport. Mutates and returns `args`.
+
+    The CLI is headless-default by design (a background daemon owns no display);
+    MCP-driven agents want the same. Precedence when the call omits `headless`:
+      1. an explicit per-call `headless` always wins (left untouched here);
+      2. VIBATCHIUM_MCP_HEADED_DEFAULT=1 → force this MCP server headed
+         (headless=False);
+      3. else `headless` is left UNSET so the daemon's resolve_headless()
+         applies the canonical precedence — defaults headless, but honors a
+         daemon-wide VIBATCHIUM_DEFAULT_HEADED opt-in.
+
+    (Previously this hardcoded headless=True when MCP_HEADED_DEFAULT was unset,
+    which both ignored VIBATCHIUM_DEFAULT_HEADED and made MCP_HEADED_DEFAULT a
+    no-op — it skipped the force but the daemon defaulted headless regardless.)
+    """
+    if cmd == "start" and "headless" not in args:
+        if os.environ.get("VIBATCHIUM_MCP_HEADED_DEFAULT", "0").lower() \
+                in ("1", "true", "yes"):
+            args["headless"] = False
+    return args
+
+
 @server.call_tool()
 async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.Content] | types.CallToolResult:
     entry = _TOOL_BY_NAME.get(name)
@@ -981,16 +1040,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.Content]
         _name, _desc, _schema, cmd, mapper = entry
     args = mapper(arguments) if mapper else dict(arguments or {})
 
-    # Wave 7.7.5: MCP-specific default overrides. CLI users get the
-    # canonical Patchright headed default (visual debugging); MCP-driven
-    # agents almost always want headless (background scraping, fan-out,
-    # no desktop clutter). Per-call `headless: false` still wins. Set
-    # VIBATCHIUM_MCP_HEADED_DEFAULT=1 to disable this override.
-    if cmd == "start" and "headless" not in args:
-        import os as _os
-        if _os.environ.get("VIBATCHIUM_MCP_HEADED_DEFAULT", "0").lower() \
-                not in ("1", "true", "yes"):
-            args["headless"] = True
+    args = _apply_mcp_start_posture(cmd, args)
 
     # Extract the optional session arg — passed to daemon_call as session=
     # rather than threaded through args (the daemon's dispatcher consumes

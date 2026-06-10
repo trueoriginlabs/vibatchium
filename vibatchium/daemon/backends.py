@@ -83,9 +83,11 @@ async def launch_patchright_session(
     headless: bool = False,
     pw: Playwright | None = None,
     proxy: dict | None = None,
+    timezone_id: str | None = None,
 ) -> BrowserSession:
     """Canonical Patchright launch (current default)."""
-    return await launch_session(profile_dir, headless=headless, pw=pw, proxy=proxy)
+    return await launch_session(profile_dir, headless=headless, pw=pw,
+                                proxy=proxy, timezone_id=timezone_id)
 
 
 async def launch_nodriver_session(
@@ -94,6 +96,7 @@ async def launch_nodriver_session(
     headless: bool = False,
     pw: Playwright | None = None,
     proxy: dict | None = None,
+    timezone_id: str | None = None,
 ) -> BrowserSession:
     """Launch Chrome via nodriver, then connect Patchright over CDP.
 
@@ -129,6 +132,12 @@ async def launch_nodriver_session(
     extra_args = []
     if proxy:
         extra_args.append(f"--proxy-server={proxy['server']}")
+        # 0.6.11: WebRTC leak guard MUST accompany the proxy on the nodriver
+        # path too — without it a page can discover the real IP via STUN even
+        # though HTTP is tunneled. The patchright path adds these in
+        # launch_session; nodriver launches Chrome itself, so add them here.
+        from ..proxy import webrtc_leak_guard_args
+        extra_args.extend(webrtc_leak_guard_args())
         # nodriver doesn't auto-inject Basic-Auth — caller must pass an
         # auth-handling extension or use a proxy URL that includes inline creds.
         # For now, warn if username/password present.
@@ -169,8 +178,36 @@ async def launch_nodriver_session(
     sess.mode = "launch"          # treat as launch (we own the Chrome process)
     sess.profile_dir = profile_dir
     sess.headless = headless      # record posture for the warm-claim guard
+    sess.timezone_id = timezone_id  # record geo posture (observability/parity)
     sess._nodriver_browser = browser  # keep handle for cleanup
+    if timezone_id:
+        await _apply_geo_overrides_cdp(sess.context, timezone_id)
     return sess
+
+
+async def _apply_geo_overrides_cdp(context, timezone_id: str) -> None:
+    """Apply the timezone via CDP Emulation on the nodriver (connect_over_cdp)
+    path, where the launch-time `timezone_id` context option isn't available.
+    Covers existing pages and wires new ones. Defensive — a failure never breaks
+    launch. Runtime-unverified (nodriver is opt-in; patchright is the tested geo
+    path). (Locale is intentionally not overridden — see geo.py.)
+    """
+    import asyncio as _aio
+
+    async def _apply(page) -> None:
+        try:
+            cdp = await context.new_cdp_session(page)
+            await cdp.send("Emulation.setTimezoneOverride",
+                           {"timezoneId": timezone_id})
+        except Exception as exc:  # noqa: BLE001
+            log.warning("nodriver geo override failed (%s): %s",
+                        type(exc).__name__, exc)
+
+    # Register the new-page hook BEFORE applying to existing pages, so a page
+    # that opens during the awaits below can't slip through unhandled.
+    context.on("page", lambda p: _aio.ensure_future(_apply(p)))
+    for p in list(context.pages):
+        await _apply(p)
 
 
 async def launch(
@@ -180,6 +217,7 @@ async def launch(
     headless: bool = False,
     pw: Playwright | None = None,
     proxy: dict | None = None,
+    timezone_id: str | None = None,
 ) -> BrowserSession:
     """Dispatch to the requested backend's launcher."""
     if backend not in VALID_BACKENDS:
@@ -188,10 +226,12 @@ async def launch(
         )
     if backend in ("patchright", "auto"):
         return await launch_patchright_session(profile_dir, headless=headless,
-                                                pw=pw, proxy=proxy)
+                                                pw=pw, proxy=proxy,
+                                                timezone_id=timezone_id)
     if backend == "nodriver":
         return await launch_nodriver_session(profile_dir, headless=headless,
-                                              pw=pw, proxy=proxy)
+                                              pw=pw, proxy=proxy,
+                                              timezone_id=timezone_id)
     raise AssertionError(f"unreachable backend: {backend}")
 
 

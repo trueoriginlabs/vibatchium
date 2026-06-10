@@ -4,6 +4,101 @@ All notable changes to vibatchium are documented here. Versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Until 1.0,
 minor bumps may include breaking changes; we'll always call them out here.
 
+## [0.6.11] — 2026-06-10
+
+### Added — timezone coherence (`vb geo`)
+- **The host clock behind a foreign proxy IP was a louder bot tell than any UA
+  leak.** A Chrome reporting `Australia/Sydney` (via
+  `Intl.DateTimeFormat().resolvedOptions().timeZone`) while egressing through a
+  US datacenter proxy is trivially flagged — and the whole point of a proxy is
+  to move the IP, leaving the clock behind. New `vb geo set` persists a
+  per-session **timezone** (mirrors `vb proxy set`: stored in the profile dir,
+  applied on next `start`) so it coheres with the proxy's country:
+  - `vb geo set --country us` — ISO-2 code → a representative IANA timezone
+    (27 common proxy countries). `--timezone` overrides the lookup for precise
+    control.
+  - Applied via **protocol-level CDP Emulation** (`Emulation.setTimezoneOverride`)
+    — which survives Patchright's `add_init_script` filter (it rides the CDP
+    protocol, not an injected script) **and propagates to worker threads**.
+    Verified with a real headless Chrome reporting two distinct zones
+    (Europe/Berlin **and** Asia/Tokyo) — in the main thread *and* a Worker —
+    with the actual wall-clock offset shifting, not just the label.
+  - `vb geo info` shows the configured timezone **and** what the running browser
+    actually reports — so you can prove the override took.
+  - A geo-configured session always launches fresh (never claims a geo-less
+    pre-warm), exactly like a proxied session. Setting a proxy **without** a geo
+    override now logs a tz/IP-mismatch warning rather than leaking silently.
+  - Distinct from the existing runtime `geolocation` (lat/lng) override; also
+    exposed over MCP (`geo_set`/`geo_clear`/`geo_info`) alongside `proxy_*`.
+  - **`navigator.language` is deliberately NOT overridden.** The only mechanism
+    (Playwright's per-target `locale` / `Emulation.setLocaleOverride`) does not
+    reach worker threads — it would leave a Worker reporting the host language
+    while the main thread reports the override, a *hard* main-vs-worker mismatch
+    (the exact class the 0.6.8 UA SharedWorker fix eliminated) and a stronger
+    tell than the soft "language ≠ IP country" signal it would address. An
+    English browser physically abroad is a common, unsuspicious profile; an
+    impossible main≠worker language is not. (Empirically confirmed: timezone
+    propagates to workers; locale does not.)
+
+### Fixed — the audit's lower-severity tail (0.6.10 follow-through)
+- **Three posture hardcodes now respect `VIBATCHIUM_DEFAULT_HEADED`.** The
+  `go`-first auto-spawn, warm-recycle, and MCP `start` default all hardcoded
+  `headless=True`, so opting the *whole daemon* headed (the documented promise)
+  only half-worked. They now route through the canonical `resolve_headless()`.
+  This also surfaced a latent bug: `VIBATCHIUM_MCP_HEADED_DEFAULT=1` was itself
+  a **no-op** — it skipped forcing headless, but the daemon then defaulted to
+  headless anyway, so it never actually produced a headed MCP session. It now
+  forces headed as named (and defers to `VIBATCHIUM_DEFAULT_HEADED` otherwise).
+- **Verb-log redaction keyed on fields that don't exist.** With `set_log_verbs`
+  on, `route_add` redacted a phantom `json` field while leaving `headers` (which
+  can carry `Authorization`) in the clear; `vision_type`'s typed `text` (a
+  password vector, like `type`/`fill`) wasn't redacted at all. Both fixed.
+  `secret_init`'s `{"key"}` entry redacted a nonexistent arg — the generated
+  `key_b64` lives only in the *response* (gated behind `print_key`, never logged
+  through the arg-only redactor), so the entry was removed rather than renamed
+  to another field that would also never match (no dead config).
+
+### Fixed — deeper adversarial audit (security + robustness)
+- **WebRTC leak guard now applies on the `nodriver` backend too.** The
+  patchright backend injects the WebRTC IP-handling flags whenever a proxy is
+  set, but the `nodriver` launcher added `--proxy-server` *without* them — so a
+  page could discover the real IP via STUN despite the proxy tunnel. The same
+  guard flags are now added on the nodriver path.
+- **REST shim could 500 on verbs whose tool name ≠ daemon command.** `/v1/tools`
+  advertises MCP tool names (e.g. `is_state`), but `invoke()` passed the name
+  straight to the daemon, which registers the command as `is` — so
+  `POST /v1/is_state` failed. REST now translates name → daemon command (and
+  applies the tool's arg-mapper), mirroring the MCP call path.
+- **URL-bearing verb args are credential-masked in debug logs.** With
+  `set_log_verbs` on, `go`/`verify_url`/`wait_url` could log a URL embedding
+  `user:pass@host`. Their userinfo is now masked (`***@host`) — keeping the host
+  visible for debugging while honoring "credentials never appear in logs."
+  `_redact_for_log` also now always returns a copy (never the caller's dict).
+- **`geo_info` takes the per-session lock before touching the live page.** It's
+  a registry verb (holds only the registry lock), but it probes the running
+  browser — so it now acquires `entry.lock` to avoid racing a concurrent
+  session-scoped verb on the same page.
+- **`delete_profile_dir` no longer races an in-flight pre-warm.** It scheduled
+  the pre-warm cancel as fire-and-forget, then immediately `rmtree`'d — which
+  could delete the profile out from under a launching Chrome. It now awaits the
+  cancel first (made async; callers updated).
+- **`close_all` cancels each pre-warm once.** A completed pre-warm lives in both
+  `_warm_sessions` and `_warm_tasks`; the drain loop concatenated the lists and
+  cancelled it twice. Now de-duplicated via a set union.
+
+### Changed
+- Dead code removed: an orphaned async `_run_one_cell` + its unreachable
+  `if False` branch in `evals.py` (the sync path is the real one), and an unused
+  `pg` closure param in `browser.py`. Stale docs corrected: the MCP "CLI is
+  headed-default" comment (it's headless-default by design) and the `evals`
+  default-matrix docstring (all three targets × patchright × humanize-off).
+
+### Note
+- Closes the audit tail tracked in 0.6.10. The same review confirmed `humanize`
+  (which superseded the removed `--stealth-mouse`) is genuinely wired — Bezier
+  paths (≥30 points), gaussian dwell, per-keystroke typing across all three
+  click/type call sites — with unit + integration tests; re-verified live.
+
 ## [0.6.10] — 2026-06-10
 
 ### Fixed — three controls that silently did nothing

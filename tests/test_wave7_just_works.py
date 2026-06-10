@@ -14,8 +14,6 @@ without removing vibatchium's primitive power:
 """
 from __future__ import annotations
 
-import os
-
 from vibatchium.client import call, DaemonError
 
 
@@ -191,40 +189,34 @@ def test_explore_no_screenshot_when_disabled(local_server):
 # ─── 3. MCP headless default ────────────────────────────────────────────
 
 
-def test_mcp_injects_headless_default_when_unspecified():
-    """When the agent calls `start` through MCP without passing headless,
-    the MCP server should inject `headless: true`. This is a direct unit
-    test on the resolution logic so we don't need a live MCP transport."""
-    # Simulate the MCP call_tool override logic
-    def _mcp_default_inject(cmd: str, args: dict) -> dict:
-        out = dict(args)
-        if cmd == "start" and "headless" not in out:
-            if os.environ.get("VIBATCHIUM_MCP_HEADED_DEFAULT", "0").lower() \
-                    not in ("1", "true", "yes"):
-                out["headless"] = True
-        return out
-
-    # Agent calls start with no args → MCP defaults to headless
-    assert _mcp_default_inject("start", {}).get("headless") is True
-    # Agent explicitly passes headless=false → MCP doesn't override
-    assert _mcp_default_inject("start", {"headless": False}).get("headless") is False
+def test_mcp_leaves_headless_unset_so_daemon_decides(monkeypatch):
+    """0.6.11: when the agent calls `start` through MCP without `headless` and
+    VIBATCHIUM_MCP_HEADED_DEFAULT is unset, MCP must leave `headless` UNSET so
+    the daemon's resolve_headless() applies the canonical precedence (defaults
+    headless, but honors a daemon-wide VIBATCHIUM_DEFAULT_HEADED opt-in). The
+    OLD behavior hardcoded headless=True here, which ignored DEFAULT_HEADED.
+    Imports the REAL helper so this can't drift from the implementation."""
+    from vibatchium.mcp_server import _apply_mcp_start_posture
+    monkeypatch.delenv("VIBATCHIUM_MCP_HEADED_DEFAULT", raising=False)
+    # No env, no explicit arg → headless left UNSET (daemon decides)
+    assert "headless" not in _apply_mcp_start_posture("start", {})
+    # Explicit per-call headless always wins (untouched)
+    assert _apply_mcp_start_posture("start", {"headless": False})["headless"] is False
+    assert _apply_mcp_start_posture("start", {"headless": True})["headless"] is True
     # Other verbs untouched
-    assert "headless" not in _mcp_default_inject("go", {"url": "x"})
+    assert "headless" not in _apply_mcp_start_posture("go", {"url": "x"})
 
 
-def test_mcp_headed_default_opt_out_env(monkeypatch):
-    """VIBATCHIUM_MCP_HEADED_DEFAULT=1 reverts to the canonical Patchright
-    headed default, for operators who want visual debugging via MCP."""
-    def _mcp_default_inject(cmd: str, args: dict) -> dict:
-        out = dict(args)
-        if cmd == "start" and "headless" not in out:
-            if os.environ.get("VIBATCHIUM_MCP_HEADED_DEFAULT", "0").lower() \
-                    not in ("1", "true", "yes"):
-                out["headless"] = True
-        return out
+def test_mcp_headed_default_env_forces_headed(monkeypatch):
+    """0.6.11: VIBATCHIUM_MCP_HEADED_DEFAULT=1 must actually force this MCP
+    server headed (headless=False). Previously it was a no-op — it skipped the
+    headless=True force, but the daemon then defaulted headless anyway, so the
+    env var never produced a headed session."""
+    from vibatchium.mcp_server import _apply_mcp_start_posture
     monkeypatch.setenv("VIBATCHIUM_MCP_HEADED_DEFAULT", "1")
-    # Now MCP doesn't inject — caller gets the daemon's default (headed)
-    assert "headless" not in _mcp_default_inject("start", {})
+    assert _apply_mcp_start_posture("start", {})["headless"] is False
+    # Still defers to an explicit per-call value
+    assert _apply_mcp_start_posture("start", {"headless": True})["headless"] is True
 
 
 def test_explore_in_mcp_core_bucket():

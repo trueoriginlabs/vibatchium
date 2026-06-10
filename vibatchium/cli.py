@@ -2242,6 +2242,65 @@ def proxy_info(ctx):
     _emit(call("proxy_info"), ctx.obj["json"])
 
 
+# ─── 0.6.11: per-session timezone/locale (geo) coherence ────────────────
+
+@cli.group()
+def geo():
+    """Per-session timezone coherence.
+
+    The host's clock behind a foreign proxy IP is a loud bot tell (compare
+    `Intl.DateTimeFormat().resolvedOptions().timeZone` to the IP's country).
+    Set a timezone that matches your proxy's country so they cohere:
+
+        vb --session work geo set --country us
+        vb --session work geo set --timezone Europe/Berlin
+        vb --session work start        # applies the geo override
+        vb --session work geo info     # what the browser actually reports
+        vb --session work geo clear
+
+    Launch-time + persisted (takes effect on next `start`), like `proxy set` —
+    distinct from the runtime `geolocation` (lat/lng) override. `--timezone`
+    overrides the `--country` lookup.
+
+    (navigator.language is intentionally NOT overridden: the only mechanism
+    can't reach worker threads without a main-vs-worker mismatch that is a
+    stronger tell than the soft language-vs-IP signal it would fix.)
+    """
+
+
+@geo.command("set")
+@click.option("--country", default=None,
+              help="ISO-2 country (us, gb, de, …) → representative timezone.")
+@click.option("--timezone", "timezone_id", default=None,
+              help="Explicit IANA timezone (e.g. America/New_York). Overrides --country.")
+@click.pass_context
+def geo_set(ctx, country, timezone_id):
+    """Persist a timezone for the current session."""
+    if not (country or timezone_id):
+        click.echo("error: pass --country or --timezone", err=True)
+        sys.exit(2)
+    args = {}
+    if country:
+        args["country"] = country
+    if timezone_id:
+        args["timezone_id"] = timezone_id
+    _emit(call("geo_set", args), ctx.obj["json"])
+
+
+@geo.command("clear")
+@click.pass_context
+def geo_clear(ctx):
+    """Remove the timezone override (takes effect on next start)."""
+    _emit(call("geo_clear"), ctx.obj["json"])
+
+
+@geo.command("info")
+@click.pass_context
+def geo_info(ctx):
+    """Show the configured timezone + what the running browser actually reports."""
+    _emit(call("geo_info"), ctx.obj["json"])
+
+
 # ─── Wave 6.1c: session checkpoint / restore ────────────────────────────
 
 @cli.group()

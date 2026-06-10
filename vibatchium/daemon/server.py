@@ -45,14 +45,31 @@ _REDACTED_ARG_FIELDS: dict[str, set[str]] = {
     "secret_set":        {"value"},          # the secret material itself
     "fill":              {"text"},           # may be a password / secret value
     "type":              {"text"},           # same
+    "vision_type":       {"text"},           # typed via the vision verb — same
     "keys":              {"keys"},           # may be typed password
     "press":             {"keys"},
     "proxy_set":         {"url"},            # contains user:pass@host
     "eval":              {"expr"},           # may include inline credentials
     "eval_handle":       {"expr"},
     "handle_eval":       {"expr"},
-    "route_add":         {"body", "json"},   # mock content may contain secrets
-    "secret_init":       {"key"},            # base64 key material
+    "route_add":         {"body", "headers"},  # mock body + headers may carry auth
+    # NOTE: secret_init has no sensitive *args* — only prefer/force/print_key.
+    # The generated key (`key_b64`) is in the *response*, gated behind
+    # `print_key`, and responses are never logged through this path. A redaction
+    # entry here would protect a field that never reaches this arg-only redactor
+    # (the previous `{"key"}` did nothing), so there deliberately isn't one.
+}
+
+# 0.6.11: verbs whose args are URLs/patterns that MAY embed `user:pass@host`
+# (HTTP basic-auth form). Rather than nuke the whole field (losing the host,
+# which is useful in a debug log), mask only the userinfo — keeping the
+# "credentials never appear in logs" guarantee while staying debuggable.
+# (proxy_set stays in the whole-redact map above: proxy URLs can also carry
+# secrets in query params, so the entire URL is replaced.)
+_URL_ARG_FIELDS: dict[str, set[str]] = {
+    "go":         {"url"},
+    "verify_url": {"url"},
+    "wait_url":   {"pattern"},
 }
 
 
@@ -65,12 +82,18 @@ def _redact_for_log(cmd: str, args: dict) -> dict:
     most likely vector for accidentally logging passwords / tokens.
     """
     redact = _REDACTED_ARG_FIELDS.get(cmd)
-    if not redact:
-        return args
+    url_fields = _URL_ARG_FIELDS.get(cmd)
+    # Always return a shallow COPY (docstring contract) — never the caller's
+    # dict, even when there's nothing to strip.
     out = dict(args)
-    for k in redact:
+    for k in (redact or ()):
         if k in out:
             out[k] = "<redacted>"
+    if url_fields:
+        from ..proxy import mask_userinfo
+        for k in url_fields:
+            if isinstance(out.get(k), str):
+                out[k] = mask_userinfo(out[k])
     return out
 
 
@@ -118,6 +141,8 @@ class Daemon:
         # Wave 7.8: housekeeping — prunes profile dirs / caches, no session.
         "clean",
         "proxy_set", "proxy_clear", "proxy_info",
+        # 0.6.11: timezone/locale coherence — profile-dir config, no session.
+        "geo_set", "geo_clear", "geo_info",
         "checkpoint_list", "checkpoint_delete",
         # Wave 6.3a: secrets are not session-scoped
         "secret_init", "secret_set", "secret_list", "secret_delete", "secret_totp",

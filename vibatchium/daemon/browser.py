@@ -112,6 +112,10 @@ class BrowserSession:
     # pre-warm to a --headed request (and vice-versa) — the config the comment
     # always promised to match but the boolean never checked.
     headless: bool = False
+    # 0.6.11: the geo timezone override this session launched with (None =
+    # unset). Recorded for observability (geo_info / status) and so tests/the
+    # warm path can introspect posture, mirroring `headless`.
+    timezone_id: str | None = None
     frame_ref: object = None         # patchright.Frame | None
     dialog_policy: dict = field(default_factory=lambda: {"action": "dismiss"})
     downloads: list = field(default_factory=list)
@@ -214,7 +218,7 @@ def _wire_page_tracking(session: BrowserSession) -> None:
     session.context.on("page", on_new_page)
     # Hook close on existing pages too
     for p in session.context.pages:
-        def make_handler(pg):
+        def make_handler():
             def on_close(_):
                 try:
                     live = [x for x in session.context.pages if not x.is_closed()]
@@ -223,12 +227,13 @@ def _wire_page_tracking(session: BrowserSession) -> None:
                 except Exception:  # noqa: BLE001
                     pass
             return on_close
-        p.on("close", make_handler(p))
+        p.on("close", make_handler())
 
 
 async def launch_session(profile_dir: Path, headless: bool = False,
                          *, pw: Playwright | None = None,
-                         proxy: dict | None = None) -> BrowserSession:
+                         proxy: dict | None = None,
+                         timezone_id: str | None = None) -> BrowserSession:
     """Cold-launch real Chrome with persistent context (canonical Patchright config).
 
     The Playwright driver (Node.js subprocess) can be shared across multiple
@@ -240,6 +245,13 @@ async def launch_session(profile_dir: Path, headless: bool = False,
     `proxy`: optional Playwright proxy config dict
     `{server, username, password}`. When set, also injects WebRTC leak-guard
     Chrome flags so STUN can't bypass the proxy to expose the real IP.
+
+    `timezone_id` (0.6.11): coherence override, typically set to match a proxy's
+    country (see geo.py). Rides protocol-level CDP Emulation
+    (`Emulation.setTimezoneOverride`) — NOT add_init_script — so it survives
+    Patchright's script filter AND propagates to worker threads. Defeats the
+    host-tz-vs-proxy-IP mismatch tell. (Locale/navigator.language is deliberately
+    NOT overridden — see geo.py: it can't reach workers without a mismatch.)
     """
     profile_dir.mkdir(parents=True, exist_ok=True)
     log.info("launch persistent context profile=%s headless=%s proxy=%s",
@@ -289,6 +301,11 @@ async def launch_session(profile_dir: Path, headless: bool = False,
         launch_kwargs["ignore_default_args"] = ignore_default_args
     if proxy:
         launch_kwargs["proxy"] = proxy
+    # 0.6.11: timezone coherence. Protocol-level CDP Emulation override
+    # (survives Patchright's add_init_script filter AND reaches workers). Set to
+    # match a proxy's country so the browser clock doesn't betray the host.
+    if timezone_id:
+        launch_kwargs["timezone_id"] = timezone_id
     context = await pw.chromium.launch_persistent_context(**launch_kwargs)
     # Wave 7.5d stealth note: bare Patchright leaves `window.chrome.runtime`
     # undefined, which IS a known fingerprint signal — but Patchright
@@ -304,7 +321,7 @@ async def launch_session(profile_dir: Path, headless: bool = False,
     page = context.pages[0] if context.pages else await context.new_page()
     sess = BrowserSession(pw=pw, context=context, page=page, mode="launch",
                           profile_dir=profile_dir, owns_pw=owns_pw,
-                          headless=headless)
+                          headless=headless, timezone_id=timezone_id)
     _wire_page_tracking(sess)
     return sess
 

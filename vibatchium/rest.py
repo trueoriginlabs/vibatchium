@@ -147,6 +147,12 @@ def build_app(*, require_auth: bool = True, token: str | None = None,
         token = get_or_create_token()
     _expected_token = token  # closure
     _allowed = _allowed_verbs(caps)  # None = unrestricted
+    # 0.6.11: /v1/tools advertises MCP tool NAMES, but the daemon registers
+    # DAEMON command names — they differ for a few verbs (tool 'is_state' →
+    # daemon cmd 'is') and some tools remap their args. Mirror the MCP call path
+    # so POST /v1/<tool> reaches the right handler instead of 500-ing on an
+    # unknown command. Maps name → (daemon_cmd, arg_mapper).
+    _tool_dispatch = {t[0]: (t[3], t[4]) for t in TOOLS}
 
     from . import __version__ as _pkg_version
     app = FastAPI(title="vibatchium", version=_pkg_version,
@@ -361,13 +367,18 @@ def build_app(*, require_auth: bool = True, token: str | None = None,
             raise HTTPException(status_code=400, detail="body must be a JSON object")
         # Optional session targeting via query string OR body field
         session = request.query_params.get("session") or body.pop("session", None)
+        # Translate the public tool name → daemon cmd (+ apply any arg mapper),
+        # mirroring mcp_server.call_tool. Unknown verbs (e.g. dotted plugin
+        # verbs) pass through unchanged.
+        cmd, mapper = _tool_dispatch.get(verb, (verb, None))
+        call_args = mapper(body) if mapper else body
         # Spawn daemon if not running (mirror MCP behavior)
         if not daemon_is_running():
             spawn_daemon()
         # Daemon call is sync — run in thread so we don't block the event loop
         import asyncio
         try:
-            result = await asyncio.to_thread(daemon_call, verb, body,
+            result = await asyncio.to_thread(daemon_call, cmd, call_args,
                                               session=session)
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=500,

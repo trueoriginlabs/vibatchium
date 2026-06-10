@@ -214,6 +214,86 @@ def test_humanize_off_click_unchanged(local_server):
     assert call("text", {"selector": "#counter"})["text"] == "1"
 
 
+# ─── live-DOM proof (real Chrome, not the _FakePage) ────────────────────
+# The ≥30-point assertions above run against _FakePage. These confirm the path
+# and timing survive to a REAL browser DOM — closing the gap where a no-op could
+# pass the fake-page count yet teleport on a live page.
+
+
+def _val(res):
+    return res.get("value", res) if isinstance(res, dict) else res
+
+
+def test_humanized_click_traces_a_real_path_on_live_dom(local_server):
+    """A humanized click dispatches MANY intermediate mousemove events on the
+    actual page (a Bezier path), where a teleport would dispatch ~1. Compares
+    humanize ON vs OFF on the same page so the delta is the proof."""
+    call("go", {"url": f"{local_server}/simple.html"})
+    install = """(() => {
+        window.__moves = [];
+        document.addEventListener('mousemove',
+            e => window.__moves.push([e.clientX, e.clientY]), {passive: true});
+        return true;
+    })()"""
+    count = "window.__moves.length"
+    distinct = "new Set(window.__moves.map(p => p.join(','))).size"
+
+    # humanize OFF baseline — plain Playwright click is at most a couple moves.
+    call("humanize_off")
+    call("eval", {"expr": install})
+    call("click", {"target": "#counter-btn"})
+    off_n = _val(call("eval", {"expr": count}))
+
+    # humanize ON — Bezier path.
+    call("humanize_on")
+    try:
+        call("eval", {"expr": install})  # reset recorder
+        r = call("click", {"target": "#counter-btn"})
+        assert r["humanized"] is True
+        on_n = _val(call("eval", {"expr": count}))
+        on_distinct = _val(call("eval", {"expr": distinct}))
+    finally:
+        call("humanize_off")
+
+    assert on_n >= 8, (
+        f"humanized click dispatched only {on_n} mousemove events on the live "
+        f"DOM — a real Bezier path should produce many (teleport regression?)")
+    assert on_distinct >= 5, f"only {on_distinct} distinct points — not a path"
+    assert on_n > off_n, (
+        f"humanize ON ({on_n}) did not produce more moves than OFF ({off_n}) — "
+        f"the humanized path isn't reaching the real browser")
+
+
+def test_humanized_typing_has_varied_interkey_timing_on_live_dom(local_server):
+    """Humanized typing produces non-zero, non-constant inter-keystroke delays
+    on the real DOM — gaussian cadence, not an instant bulk-set."""
+    import statistics
+    call("go", {"url": f"{local_server}/simple.html"})
+    call("eval", {"expr": """(() => {
+        window.__keys = [];
+        document.querySelector('#q').addEventListener(
+            'keydown', () => window.__keys.push(performance.now()));
+        return true;
+    })()"""})
+    call("humanize_on")
+    try:
+        call("type", {"target": "#q", "text": "hello world typing"})
+    finally:
+        call("humanize_off")
+    deltas = _val(call("eval", {"expr": """(() => {
+        const t = window.__keys, d = [];
+        for (let i = 1; i < t.length; i++) d.push(t[i] - t[i - 1]);
+        return d;
+    })()"""}))
+    assert isinstance(deltas, list) and len(deltas) >= 10, (
+        f"too few keydown intervals ({len(deltas) if isinstance(deltas, list) else deltas}) "
+        f"— per-char dispatch may not be reaching the DOM")
+    assert min(deltas) > 0, "inter-key delays are 0 — not humanized timing (bulk set?)"
+    assert statistics.pstdev(deltas) > 1, (
+        f"inter-key timing is ~constant (stdev={statistics.pstdev(deltas):.2f}ms) "
+        f"— gaussian cadence isn't being applied")
+
+
 # ─── motion/typing actually runs (stub page — no browser) ───────────────
 # These mutation-catch a humanize path that silently no-ops: the integration
 # tests above would stay green (a plain click also increments the counter), so

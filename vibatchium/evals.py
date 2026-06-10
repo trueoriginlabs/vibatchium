@@ -13,8 +13,8 @@ Cells in the matrix:
 
 For each cell, we spawn an isolated session (`vibatchium_evals_<uuid>`),
 configure backend + humanize, navigate to the target, scrape the score,
-then tear down the session. Default: just patchright × off vs patchright ×
-on to keep wall-clock short (~30s).
+then tear down the session. Default: all three built-in targets × patchright
+× humanize off (humanize_modes=(False,)) to keep wall-clock short (~30s).
 
 Output formats:
   - markdown (default): printable table for the README
@@ -26,7 +26,6 @@ CI gate: `--min-score N` exits non-zero if any cell scored below N.
 """
 from __future__ import annotations
 
-import asyncio
 import json as _json
 import logging
 import re
@@ -40,46 +39,6 @@ log = logging.getLogger("vibatchium.evals")
 
 BUILTIN_TARGETS = ("sannysoft", "creepjs", "brotector")
 BUILTIN_BACKENDS = ("patchright",)  # nodriver is opt-in; user passes explicitly
-
-
-async def _run_one_cell(client_call, target: str, backend: str,
-                         humanize: bool, *, settle_ms: int = 5000) -> dict:
-    """Run a single (target, backend, humanize) cell. Returns a row dict."""
-    sname = f"vibatchium_evals_{uuid.uuid4().hex[:8]}"
-    cell: dict[str, Any] = {
-        "target": target, "backend": backend, "humanize": humanize,
-        "score": None, "error": None, "elapsed_s": None,
-    }
-    t0 = time.time()
-    try:
-        client_call("session_new", {"name": sname})
-        start_args = {"headless": True}
-        if backend != "patchright":
-            start_args["backend"] = backend
-        client_call("start", start_args, session=sname)
-        if humanize:
-            client_call("humanize_on", session=sname)
-        # The fingerprint handler reuses the session's current page; navigate
-        # happens inside the handler.
-        res = client_call("fingerprint",
-                          {"target": target, "settle_ms": settle_ms},
-                          session=sname)
-        cell["score"] = res.get("score")
-        cell["signals"] = res.get("signals")
-        cell["url"] = res.get("url")
-    except Exception as exc:  # noqa: BLE001
-        cell["error"] = f"{type(exc).__name__}: {exc}"
-    finally:
-        try:
-            client_call("session_close", {"name": sname})
-        except Exception:  # noqa: BLE001
-            pass
-        try:
-            client_call("session_delete", {"name": sname})
-        except Exception:  # noqa: BLE001
-            pass
-        cell["elapsed_s"] = round(time.time() - t0, 2)
-    return cell
 
 
 def run_eval_matrix(client_call, *, targets=BUILTIN_TARGETS,
@@ -97,10 +56,7 @@ def run_eval_matrix(client_call, *, targets=BUILTIN_TARGETS,
             for target in targets:
                 log.info("eval: target=%s backend=%s humanize=%s",
                          target, backend, humanize)
-                cell = asyncio.get_event_loop().run_until_complete(
-                    _run_one_cell(client_call, target, backend, humanize,
-                                   settle_ms=settle_ms)
-                ) if False else _run_one_cell_sync(
+                cell = _run_one_cell_sync(
                     client_call, target, backend, humanize, settle_ms
                 )
                 rows.append(cell)
@@ -109,7 +65,8 @@ def run_eval_matrix(client_call, *, targets=BUILTIN_TARGETS,
 
 def _run_one_cell_sync(client_call, target: str, backend: str,
                         humanize: bool, settle_ms: int) -> dict:
-    """Sync wrapper for _run_one_cell — the client is sync."""
+    """Run a single (target, backend, humanize) cell. Returns a row dict.
+    Sync — the eval client (daemon RPC) is synchronous."""
     sname = f"vibatchium_evals_{uuid.uuid4().hex[:8]}"
     cell: dict[str, Any] = {
         "target": target, "backend": backend, "humanize": humanize,

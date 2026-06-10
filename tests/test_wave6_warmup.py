@@ -16,8 +16,6 @@ import tempfile
 import time
 from pathlib import Path
 
-import pytest
-
 from vibatchium.client import call, DaemonError
 from vibatchium.daemon.paths import PROFILES_DIR
 from vibatchium.daemon.registry import get_warm_mode
@@ -57,9 +55,11 @@ async def test_headed_request_does_not_claim_headless_prewarm(monkeypatch):
 
     calls = {"launch": 0, "closed": []}
 
-    async def fake_launch(backend, pdir, *, headless, pw=None, proxy=None):
+    async def fake_launch(backend, pdir, *, headless, pw=None, proxy=None,
+                          timezone_id=None):
         calls["launch"] += 1
-        return SimpleNamespace(headless=headless, profile_dir=pdir, mode="launch")
+        return SimpleNamespace(headless=headless, profile_dir=pdir, mode="launch",
+                               timezone_id=timezone_id)
 
     async def fake_close(sess):
         calls["closed"].append(sess)
@@ -97,6 +97,28 @@ async def test_headed_request_does_not_claim_headless_prewarm(monkeypatch):
             "matching-posture pre-warm should still be reused (optimization intact)"
         )
         assert calls["launch"] == 0, "no fresh launch when the warm matches posture"
+
+        # (C) 0.6.11: a geo-configured session must NOT claim a geo-less warm
+        # (the warm was launched without the timezone override, so it'd silently
+        # mismatch — same class as the headless bug). Guard adds `geo_cfg is
+        # None` exactly like proxy.
+        from vibatchium import geo as _geo
+        reg3 = SessionRegistry()
+        monkeypatch.setattr(reg3, "_ensure_pw", fake_ensure_pw)
+        calls["launch"] = 0
+        calls["closed"] = []
+        pdir_c = base / "geosess"
+        pdir_c.mkdir(parents=True, exist_ok=True)
+        _geo.save_session_geo(pdir_c, {"timezone_id": "Asia/Tokyo"})
+        warm_c = SimpleNamespace(headless=True, profile_dir=pdir_c, mode="launch")
+        reg3._warm_sessions["geosess"] = warm_c
+        entry_c = await reg3.create("geosess", profile_dir=pdir_c, headless=True)
+        assert entry_c.session is not warm_c, (
+            "geo-configured request claimed a geo-less pre-warm (the bug)")
+        assert calls["launch"] == 1, "a fresh geo-applied Chrome should launch"
+        assert warm_c in calls["closed"], "the rejected geo-less warm should close"
+        assert entry_c.session.timezone_id == "Asia/Tokyo", (
+            "the fresh launch did not receive the configured timezone")
     finally:
         shutil.rmtree(base, ignore_errors=True)
 

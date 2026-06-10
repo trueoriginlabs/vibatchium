@@ -427,10 +427,21 @@ class SessionRegistry:
                 # Log only the exception class — don't leak creds into logs.
                 log.warning("ignoring malformed proxy for %s: %s",
                             name, type(exc).__name__)
+        # 0.6.11: per-session timezone/locale coherence (geo.json). Applied at
+        # launch via CDP Emulation. When a proxy moves the egress IP but no geo
+        # is set, the host timezone betrays it — surface that tell rather than
+        # leak it silently.
+        from ..geo import load_session_geo
+        geo_cfg = load_session_geo(pdir)
+        if proxy_cfg is not None and geo_cfg is None:
+            log.warning(
+                "session %s has a proxy but no geo override — the host "
+                "timezone may not match the proxy's IP (a bot tell). "
+                "Set `vb geo set --country <cc>` to cohere.", name)
         # Wave 6.1b: prefer a pre-warmed session if one is available for this
-        # name AND the requested config matches (backend, headless, no proxy).
-        # Proxy-configured sessions always launch fresh because the warm
-        # session was launched without the proxy.
+        # name AND the requested config matches (backend, headless, no proxy,
+        # no geo). Proxy- or geo-configured sessions always launch fresh because
+        # the warm session was launched without those overrides.
         #
         # If a prewarm is in-flight (task started but not done), await it
         # first — both that task and a fresh launch would race for the
@@ -444,7 +455,7 @@ class SessionRegistry:
         warm = self._warm_sessions.pop(name, None)
         if (warm is not None and backend == "patchright"
                 and warm.profile_dir == pdir and warm.headless == headless
-                and proxy_cfg is None):
+                and proxy_cfg is None and geo_cfg is None):
             sess = warm
             log.info("session %s claimed pre-warmed Chrome", name)
         else:
@@ -455,7 +466,8 @@ class SessionRegistry:
                 except Exception:  # noqa: BLE001
                     pass
             sess = await _backends.launch(backend, pdir, headless=headless,
-                                           pw=pw, proxy=proxy_cfg)
+                                           pw=pw, proxy=proxy_cfg,
+                                           timezone_id=(geo_cfg or {}).get("timezone_id"))
         sess.flags = getattr(sess, "flags", {}) if hasattr(sess, "flags") else {}
         entry = SessionEntry(name=name, profile_dir=pdir, session=sess,
                              ephemeral=ephemeral)
@@ -482,6 +494,17 @@ class SessionRegistry:
             raise SessionLimitError(f"VIBATCHIUM_MAX_SESSIONS={cap} reached")
         pw = await self._ensure_pw()
         sess = await attach_session(cdp_url, pw=pw)
+        # 0.6.11: geo is a cold-launch (`start`) override applied at
+        # launch_persistent_context time. Attach connects to an already-running
+        # Chrome whose timezone is its own real one (coherent with its real IP);
+        # forcing an override here could BREAK that coherence. So we don't apply
+        # it — but we don't silently ignore a configured geo either: warn.
+        from ..geo import load_session_geo
+        if load_session_geo(session_dir(name)):
+            log.warning("session %s has a geo timezone override but is ATTACHing "
+                        "to an existing Chrome — geo applies only to cold-launch "
+                        "(`start`); the attached browser keeps its own timezone.",
+                        name)
         entry = SessionEntry(name=name, profile_dir=session_dir(name), session=sess)
         self._entries[name] = entry
         log.info("session attached name=%s cdp_url=%s", name, cdp_url)
@@ -533,8 +556,8 @@ class SessionRegistry:
                             "PROFILES_DIR — not deleting", name, profile_dir)
                 return True
             # Cancel any in-flight/parked prewarm BEFORE deleting so it can't
-            # race us and re-create the dir. close() is async, so await it
-            # (unlike the sync delete_profile_dir, which can only fire-and-forget).
+            # race us and re-create the dir (delete_profile_dir awaits the same
+            # cancel for the same reason).
             if name in self._warm_tasks or name in self._warm_sessions:
                 await self.cancel_prewarm(name)
             try:
@@ -551,7 +574,13 @@ class SessionRegistry:
         )
         if recycle and get_warm_mode() in {"opportunistic", "both"}:
             try:
-                self.schedule_prewarm(name, profile_dir, headless=True)
+                # 0.6.11: recycle at the daemon default posture (honors
+                # VIBATCHIUM_DEFAULT_HEADED) instead of hardcoding headless, so
+                # a headed-default daemon's recycled warms are claimable. Lazy
+                # import: handlers imports registry, so module-level would cycle.
+                from .handlers import resolve_headless
+                self.schedule_prewarm(name, profile_dir,
+                                      headless=resolve_headless({}))
                 log.info("warm-recycle scheduled for name=%s", name)
             except Exception as exc:  # noqa: BLE001
                 log.warning("warm-recycle schedule failed for %s: %s",
@@ -569,13 +598,15 @@ class SessionRegistry:
         for name in names:
             if await self.close(name):
                 n += 1
-        # Wave 6.1b: drain pre-warms too
-        for name in list(self._warm_sessions.keys()) + list(self._warm_tasks.keys()):
+        # Wave 6.1b: drain pre-warms too. Union the two dicts — a completed
+        # prewarm lives in BOTH _warm_sessions and _warm_tasks, so concatenating
+        # lists would cancel it twice (harmless but wasteful/confusing).
+        for name in set(self._warm_sessions) | set(self._warm_tasks):
             await self.cancel_prewarm(name)
         await self._maybe_stop_pw()
         return n
 
-    def delete_profile_dir(self, name: str) -> bool:
+    async def delete_profile_dir(self, name: str) -> bool:
         """Remove the on-disk profile dir. Refuses to delete a running session
         or the special 'default' name. Cancels any in-flight pre-warm so we
         don't leak a Chrome whose profile dir was just removed."""
@@ -585,10 +616,13 @@ class SessionRegistry:
             raise RuntimeError(
                 f"session {name!r} is running — close it first"
             )
-        # Wave 6.1b: cancel any pre-warm (cooperative; the task will see the
-        # missing dir and drop). We can't `await` here since this is sync.
+        # 0.6.11: AWAIT the cancel before rmtree. The old fire-and-forget
+        # `create_task` raced the rmtree below — if a prewarm was mid-launch
+        # (Chrome writing into the profile dir), rmtree could delete files out
+        # from under it, leaving a corrupt/failed Chrome or an orphaned process.
+        # Awaiting drains/cancels the in-flight launch first.
         if name in self._warm_tasks or name in self._warm_sessions:
-            asyncio.create_task(self.cancel_prewarm(name))
+            await self.cancel_prewarm(name)
         pdir = PROFILES_DIR / name
         if not pdir.exists():
             return False
