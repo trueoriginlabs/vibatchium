@@ -107,6 +107,11 @@ class BrowserSession:
     mode: str  # "launch" | "attach"
     profile_dir: Path | None = None
     cdp_url: str | None = None
+    # The posture this session was actually launched with. Recorded so the
+    # warm-claim guard in registry.create() can refuse to hand a headless
+    # pre-warm to a --headed request (and vice-versa) — the config the comment
+    # always promised to match but the boolean never checked.
+    headless: bool = False
     frame_ref: object = None         # patchright.Frame | None
     dialog_policy: dict = field(default_factory=lambda: {"action": "dismiss"})
     downloads: list = field(default_factory=list)
@@ -242,7 +247,8 @@ async def launch_session(profile_dir: Path, headless: bool = False,
     # or attach mode (real user Chrome).
     page = context.pages[0] if context.pages else await context.new_page()
     sess = BrowserSession(pw=pw, context=context, page=page, mode="launch",
-                          profile_dir=profile_dir, owns_pw=owns_pw)
+                          profile_dir=profile_dir, owns_pw=owns_pw,
+                          headless=headless)
     _wire_page_tracking(sess)
     return sess
 

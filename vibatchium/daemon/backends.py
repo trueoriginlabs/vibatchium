@@ -168,6 +168,7 @@ async def launch_nodriver_session(
     sess = await attach_session(cdp_url, pw=pw)
     sess.mode = "launch"          # treat as launch (we own the Chrome process)
     sess.profile_dir = profile_dir
+    sess.headless = headless      # record posture for the warm-claim guard
     sess._nodriver_browser = browser  # keep handle for cleanup
     return sess
 

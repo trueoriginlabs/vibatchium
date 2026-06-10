@@ -445,7 +445,8 @@ class SessionRegistry:
                 pass
         warm = self._warm_sessions.pop(name, None)
         if (warm is not None and backend == "patchright"
-                and warm.profile_dir == pdir and proxy_cfg is None):
+                and warm.profile_dir == pdir and warm.headless == headless
+                and proxy_cfg is None):
             sess = warm
             log.info("session %s claimed pre-warmed Chrome", name)
         else:

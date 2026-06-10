@@ -4,6 +4,25 @@ All notable changes to vibatchium are documented here. Versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Until 1.0,
 minor bumps may include breaking changes; we'll always call them out here.
 
+## [0.6.9] — 2026-06-10
+
+### Fixed — `--headed` silently served a headless pre-warm
+- **A `--headed` start could be handed an already-headless pre-warmed Chrome.**
+  The daemon opportunistically pre-warms Chrome headless (the non-TTY default),
+  and `registry.create()`'s warm-claim guard matched on backend + profile +
+  proxy but **omitted headless** — the one config its own comment promised to
+  check ("the requested config matches (backend, headless, no proxy)"). Result:
+  `--headed` "succeeded" (exit 0, files written) while opening zero windows,
+  because it reused the headless warm. Latent until 0.6.4 made the default
+  pre-warm headless.
+- **Fix:** record the launch posture on the session (`BrowserSession.headless`,
+  set in `launch_session` and the nodriver path) and add `warm.headless ==
+  headless` to the claim guard. A posture-mismatched warm is now rejected
+  (closed, and a fresh Chrome launched with the requested posture); a matching
+  warm is still reused, so the pre-warm optimization is intact. A regression
+  test asserts a `--headed` request never claims a headless pre-warm — and is
+  verified to fail without the guard.
+
 ## [0.6.8] — 2026-06-10
 
 ### Fixed (stealth) — headless no longer announces `HeadlessChrome`

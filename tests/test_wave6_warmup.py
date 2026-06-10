@@ -12,8 +12,11 @@ from __future__ import annotations
 
 import os
 import shutil
+import tempfile
 import time
+from pathlib import Path
 
+import pytest
 
 from vibatchium.client import call, DaemonError
 from vibatchium.daemon.paths import PROFILES_DIR
@@ -31,6 +34,71 @@ def _ensure_clean(name: str) -> None:
             shutil.rmtree(p)
         except Exception:  # noqa: BLE001
             pass
+
+
+# ─── warm-claim posture guard (0.6.9 regression) ────────────────────────
+
+
+async def test_headed_request_does_not_claim_headless_prewarm(monkeypatch):
+    """0.6.9 regression: a --headed start must NOT be handed a headless
+    pre-warm. registry.create()'s warm-claim guard previously checked
+    backend + profile + proxy but omitted headless (the config its own comment
+    promised to match), so --headed silently got the already-headless warm and
+    opened zero windows.
+
+    Tests the guard logic directly: backends.launch/close and _ensure_pw are
+    stubbed (no real Chrome -> no display needed, deterministic). Fails without
+    the fix: in case A the headed request claims the warm, so no fresh launch
+    happens and entry.session is the (headless) warm.
+    """
+    from types import SimpleNamespace
+    from vibatchium.daemon.registry import SessionRegistry
+    from vibatchium.daemon import backends
+
+    calls = {"launch": 0, "closed": []}
+
+    async def fake_launch(backend, pdir, *, headless, pw=None, proxy=None):
+        calls["launch"] += 1
+        return SimpleNamespace(headless=headless, profile_dir=pdir, mode="launch")
+
+    async def fake_close(sess):
+        calls["closed"].append(sess)
+
+    async def fake_ensure_pw():
+        return object()
+
+    monkeypatch.setattr(backends, "launch", fake_launch)
+    monkeypatch.setattr(backends, "close", fake_close)
+    base = Path(tempfile.mkdtemp(prefix="warmguard_"))
+    try:
+        # (A) the bug: headless warm, --headed request -> must NOT claim it.
+        reg = SessionRegistry()
+        monkeypatch.setattr(reg, "_ensure_pw", fake_ensure_pw)
+        pdir_a = base / "headed"
+        warm_a = SimpleNamespace(headless=True, profile_dir=pdir_a, mode="launch")
+        reg._warm_sessions["headed"] = warm_a
+        entry_a = await reg.create("headed", profile_dir=pdir_a, headless=False)
+        assert entry_a.session is not warm_a, (
+            "--headed request was handed the headless pre-warm (the bug)"
+        )
+        assert entry_a.session.headless is False, "claimed session is not headed"
+        assert calls["launch"] == 1, "a fresh headed Chrome should have been launched"
+        assert warm_a in calls["closed"], "the rejected headless warm should be closed"
+
+        # (B) control: headless warm, headless request -> reuse it.
+        reg2 = SessionRegistry()
+        monkeypatch.setattr(reg2, "_ensure_pw", fake_ensure_pw)
+        calls["launch"] = 0
+        pdir_b = base / "headless"
+        warm_b = SimpleNamespace(headless=True, profile_dir=pdir_b, mode="launch")
+        reg2._warm_sessions["headless"] = warm_b
+        entry_b = await reg2.create("headless", profile_dir=pdir_b, headless=True)
+        assert entry_b.session is warm_b, (
+            "matching-posture pre-warm should still be reused (optimization intact)"
+        )
+        assert calls["launch"] == 0, "no fresh launch when the warm matches posture"
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
 
 
 # ─── pure mode-parser tests ─────────────────────────────────────────────
