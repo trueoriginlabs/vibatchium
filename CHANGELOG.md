@@ -4,6 +4,56 @@ All notable changes to vibatchium are documented here. Versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Until 1.0,
 minor bumps may include breaking changes; we'll always call them out here.
 
+## [0.6.8] — 2026-06-10
+
+### Fixed (stealth) — headless no longer announces `HeadlessChrome`
+- **The headless default leaked the automation token on the wire.** Since 0.6.4
+  made headless the default for every programmatic path (MCP, `go`-first
+  auto-spawn, non-TTY CLI), new-headless Chrome (which Patchright launches via
+  bare `--headless`) stamps `HeadlessChrome/<v>` into the User-Agent **string** —
+  on every JS context (main page **and** SharedWorkers) and in the `User-Agent`
+  request header, sent before any JS runs, so the cheapest edge/WAF rule
+  (`UA contains "Headless"`) caught every agent session. The JS-runtime gate
+  (sannysoft 31/31) never tested the UA, so it shipped silently. *(Measured: this
+  is UA-string-only — the Sec-CH-UA client hints don't leak in new-headless;
+  `userAgentData.brands` already reports `Google Chrome`.)*
+- **Fix: a browser-wide `--user-agent` flag** set to the de-Headless'd string
+  (`browser.coherent_headless_ua` probes the real Chrome UA once per daemon
+  lifetime — no hardcoded version — and strips only the `Headless` marker;
+  OS/platform/version preserved verbatim, not OS spoofing). A flag, not a
+  Playwright `user_agent` context option, on purpose: the context option rides
+  per-context `setUserAgentOverride`, which can't reach a SharedWorker — it would
+  leave the worker UA saying `HeadlessChrome` while the main thread says `Chrome`,
+  a mismatch that's a *stronger* tell than the original. The flag sets the
+  browser's actual UA, covering every context. Headed is untouched (already
+  reports `Chrome`). Propagated to the nodriver backend too (`uc.start`
+  `browser_args`), which bypasses the patchright launch path.
+
+### Added — headless posture gate
+- **Two stealth-gate assertions** (`tests/test_wave7_stealth_gate.py`) pin no
+  `Headless` token in `navigator.userAgent` on **both the main thread and a
+  SharedWorker** — the SharedWorker assertion is the regression guard against
+  reverting to the per-context mechanism. (The earlier `userAgentData.brands`
+  assertion was dropped as vacuous — new-headless brands are already clean, so
+  it could never fail.)
+
+### Changed
+- **Walled-page `advice` now leads with posture escalation.** On a detected
+  wall, the hint suggests restarting **headed** first (stealthier, keeps cookies
+  via the persistent profile) before the heavier nodriver backend swap.
+- Corrected stale "headed is the default / headless not recommended for stealth"
+  wording in the `start` MCP tool description and `registry.create` docstring
+  (both predated 0.6.4).
+
+### Known residuals (headless, unchanged)
+- The UA fix closes the UA-string tell only. Headless still renders WebGL via
+  Mesa **SwiftShader** and reports an **800×600** screen at **dpr 1** with a
+  **0px scrollbar** (the last is Patchright's own `--hide-scrollbars`) —
+  distinguishable from a real desktop by a CreepJS-class fingerprinter.
+  `--window-size` does **not** cure the screen tell (moves only the viewport →
+  incoherent window-larger-than-screen); only headed (or headed-under-Xvfb)
+  clears these. Going headed on a wall (see advice above) is the escape hatch.
+
 ## [0.6.7] — 2026-06-07
 
 ### Added — on-system discoverability (agents reach for vb unprompted)

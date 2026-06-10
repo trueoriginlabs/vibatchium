@@ -1,6 +1,7 @@
 """Patchwright browser lifecycle — launch persistent context OR attach over CDP."""
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from dataclasses import dataclass, field
@@ -14,6 +15,79 @@ from patchright.async_api import (
 )
 
 log = logging.getLogger("vibatchium.browser")
+
+
+# ─── headless User-Agent de-Headless'ing ─────────────────────────────────
+#
+# New-headless Chrome (132+, which Patchright launches via bare `--headless`)
+# stamps the `HeadlessChrome/<v>` token into the User-Agent STRING — on every
+# JS thread (main page AND Web/SharedWorkers) and in the `User-Agent` request
+# header. It is a dead-giveaway automation tell, and since 0.6.4 every
+# agent-facing path (MCP, `go`-first auto-spawn, non-TTY CLI) defaults
+# headless, so this rode every fan-out. Patchright does NOT touch it (verified
+# in its driver source: no Headless-stripping anywhere) and it filters
+# `add_init_script`, so the JS-injection school can't fix it either.
+#
+# IMPORTANT — what does NOT leak: the Sec-CH-UA client hints. New-headless
+# already reports `Google Chrome`/`Chromium` in `userAgentData.brands`, the
+# high-entropy `fullVersionList`, and the Sec-CH-UA header at baseline. So
+# this is a UA-STRING-only problem; we must NOT touch client hints.
+#
+# Mechanism — a browser-wide `--user-agent=<clean>` launch flag, NOT a
+# Playwright `user_agent` context option. Patchright applies the context
+# option via per-context `Network.setUserAgentOverride`, which is target-
+# scoped and so CANNOT reach a SharedWorker (a separate target) — measured:
+# the context option leaves the SharedWorker UA saying `HeadlessChrome`, a
+# main-vs-worker MISMATCH that is a STRONGER tell than the original uniform
+# leak. The `--user-agent` flag sets the browser's actual UA, so it covers
+# every target including SharedWorkers, and it lands at the launch layer —
+# outside Patchright's CDP-message patching, so no interference. Patchright
+# passes custom `args` through unfiltered (`chromeArguments.push(...args)`).
+# We strip ONLY the Headless marker; OS/platform/version tokens are preserved
+# verbatim (not OS spoofing).
+#
+# We probe the real Chrome's UA once per daemon lifetime (so the string
+# reflects the ACTUAL installed version — no staleness tell) and cache it
+# in-process. The lock keeps a cold-start fan-out from racing N probes.
+_HEADLESS_UA_CACHE: str | None = None
+_HEADLESS_UA_PROBED = False
+_HEADLESS_UA_LOCK = asyncio.Lock()
+
+
+async def coherent_headless_ua(pw: Playwright) -> str | None:
+    """Clean UA (HeadlessChrome→Chrome) for headless launches, or None if this
+    Chrome doesn't stamp the Headless token (nothing to fix) or the probe fails
+    (launch proceeds un-overridden rather than blocking).
+
+    Returned as a string to pass via the browser-wide ``--user-agent`` flag —
+    see the module comment for why a launch flag, not a context option.
+    """
+    global _HEADLESS_UA_CACHE, _HEADLESS_UA_PROBED
+    if _HEADLESS_UA_PROBED:
+        return _HEADLESS_UA_CACHE
+    async with _HEADLESS_UA_LOCK:
+        if _HEADLESS_UA_PROBED:  # filled while we waited on the lock
+            return _HEADLESS_UA_CACHE
+        try:
+            browser = await pw.chromium.launch(
+                channel="chrome", headless=True, args=["--disable-dev-shm-usage"],
+            )
+            try:
+                page = await browser.new_page()
+                raw = await page.evaluate("navigator.userAgent")
+            finally:
+                await browser.close()
+        except Exception as e:  # noqa: BLE001 — never let a probe failure block a launch
+            log.warning("headless UA probe failed (%s) — launching without UA "
+                        "override; will retry on next headless launch", e)
+            return None  # leave _PROBED False so the next launch retries
+        if "HeadlessChrome" in raw:
+            _HEADLESS_UA_CACHE = raw.replace("HeadlessChrome", "Chrome")
+            log.info("headless UA override active: %s", _HEADLESS_UA_CACHE)
+        else:
+            _HEADLESS_UA_CACHE = None  # this Chrome doesn't leak — leave UA untouched
+        _HEADLESS_UA_PROBED = True
+        return _HEADLESS_UA_CACHE
 
 
 @dataclass
@@ -120,6 +194,15 @@ async def launch_session(profile_dir: Path, headless: bool = False,
     #     manifesting as `Page.goto` timeouts on later-spawned sessions even
     #     though `launch_persistent_context` returned cleanly.
     extra_args = ["--disable-dev-shm-usage"] if headless else []
+    # Headless Chrome leaks `HeadlessChrome` in the UA string (main page +
+    # SharedWorkers + the User-Agent header). De-Headless it browser-wide via
+    # the `--user-agent` flag so it reaches every target — a context-level
+    # `user_agent` would miss SharedWorkers (see coherent_headless_ua). Headed
+    # already reports `Chrome`, so this is headless-only.
+    if headless:
+        clean_ua = await coherent_headless_ua(pw)
+        if clean_ua:
+            extra_args = list(extra_args) + [f"--user-agent={clean_ua}"]
     # Wave 6.2a: WebRTC leak guard when a proxy is configured.
     if proxy:
         from ..proxy import webrtc_leak_guard_args

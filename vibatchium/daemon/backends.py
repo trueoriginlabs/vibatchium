@@ -26,9 +26,14 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from patchright.async_api import Playwright
+from patchright.async_api import Playwright, async_playwright
 
-from .browser import BrowserSession, attach_session, launch_session
+from .browser import (
+    BrowserSession,
+    attach_session,
+    coherent_headless_ua,
+    launch_session,
+)
 
 log = logging.getLogger("vibatchium.backends")
 
@@ -130,6 +135,23 @@ async def launch_nodriver_session(
         if proxy.get("username") or proxy.get("password"):
             log.warning("nodriver proxy doesn't support inline auth; "
                         "use a Chrome extension or IP-allowlisted proxy")
+    # De-Headless the UA on the nodriver path too — nodriver launches Chrome
+    # itself (bypasses launch_session), so it doesn't inherit the patchright
+    # path's `--user-agent` flag. Same browser-wide flag via browser_args.
+    # The clean-UA probe needs a live patchright driver; reuse the shared one,
+    # or spin a throwaway just for the probe on a cold nodriver-first launch.
+    if headless:
+        probe_pw, own_probe_pw = pw, False
+        if probe_pw is None:
+            probe_pw = await async_playwright().start()
+            own_probe_pw = True
+        try:
+            clean_ua = await coherent_headless_ua(probe_pw)
+        finally:
+            if own_probe_pw:
+                await probe_pw.stop()
+        if clean_ua:
+            extra_args.append(f"--user-agent={clean_ua}")
     browser = await uc.start(
         user_data_dir=str(profile_dir),
         headless=headless,

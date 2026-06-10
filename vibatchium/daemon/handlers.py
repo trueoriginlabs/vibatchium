@@ -1213,10 +1213,18 @@ def register_all(daemon) -> None:
             entry = d.registry.get(name)
             current_backend = entry.flags.get("backend") if entry else None
             if current_backend in (None, "patchright"):
+                # Two escalation levers, both keep cookies (same persistent
+                # profile): (1) posture — headed drops the headless screen/
+                # GPU/scrollbar tells the UA override can't reach, often enough
+                # on its own and cheaper than a backend swap; (2) backend —
+                # nodriver beats patchright on the hardest Cloudflare gates
+                # (2026 benchmark). Suggest headed first, nodriver if it holds.
                 out["advice"] = (
-                    f"page looks {wall}-walled; try "
-                    f"`vb session close {name} && "
-                    f"vb --session {name} start --backend nodriver`"
+                    f"page looks {wall}-walled. Try headed first (stealthier "
+                    f"than headless, keeps cookies): `vb session close {name} "
+                    f"&& vb --session {name} start --headed`. If it still "
+                    f"walls, swap backend: `vb --session {name} start "
+                    f"--backend nodriver` (after close)."
                 )
         # Skills: surface per-host field-notes (opt-in via VIBATCHIUM_SKILLS).
         # Best-effort — a skills-store hiccup must never break navigation.

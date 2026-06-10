@@ -51,7 +51,9 @@ TOOLS: list[tuple[str, str, dict, str, Any]] = [
     ("start", "Start a browser session (cold-launch real Chrome).",
      {"type": "object", "properties": {
          "profile": _str("Persistent profile dir (default: cache dir)."),
-         "headless": _bool("Headless mode (not recommended for stealth)."),
+         "headless": _bool("Headless mode — the MCP default. UA is de-Headless'd "
+                           "automatically; headed clears residual GPU/screen tells "
+                           "and is worth a retry on hard walls."),
          "backend": _str("Stealth backend: patchright (default) | nodriver | auto. "
                          "nodriver needs `pip install vibatchium[nodriver]`."),
          "stealth_mouse": _bool("Layer CDP-Patches humanized mouse.", False),

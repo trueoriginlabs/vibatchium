@@ -379,7 +379,14 @@ class SessionRegistry:
           name: session identifier (also used as profile dir basename when
                 profile_dir is None).
           profile_dir: explicit user-data-dir; defaults to PROFILES_DIR/<name>.
-          headless: opt out of headed mode (NOT recommended for stealth).
+          headless: run without a visible window — the default for daemon/agent
+                paths (a background daemon owns no display). The UA *string* is
+                de-Headless'd automatically (browser.coherent_headless_ua, via a
+                browser-wide --user-agent flag that also covers SharedWorkers),
+                so the `HeadlessChrome` leak is closed on every context. The
+                Sec-CH-UA client hints don't leak in new-headless mode (already
+                report `Google Chrome`). Residual headless tells (SwiftShader
+                WebGL, 800x600 screen, 0px scrollbar) remain — headed clears those.
           stealth_mouse: layer CDP-Patches humanized input.
           backend: 'patchright' (default), 'nodriver', or 'auto'.
                    nodriver requires `pip install vibatchium[nodriver]` and

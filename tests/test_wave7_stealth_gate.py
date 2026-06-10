@@ -106,6 +106,64 @@ def test_navigator_webdriver_is_falsy(local_server):
     assert not val, f"navigator.webdriver is truthy: {val!r}"
 
 
+def test_headless_main_ua_has_no_headless_token(local_server):
+    """0.6.8 regression gate: new-headless Chrome (132+, which Patchright
+    launches via bare `--headless`) stamps `HeadlessChrome/<v>` into the UA
+    string. The conftest session is headless, and since 0.6.4 every agent-facing
+    path defaults headless, so this IS the de-facto agent fingerprint — it must
+    not announce automation. browser.py de-Headless'es it via a browser-wide
+    `--user-agent` flag. If this turns red, the override regressed and every
+    fan-out is back to broadcasting `HeadlessChrome` on the main thread.
+
+    NOTE: we do NOT assert on `userAgentData.brands` — new-headless reports
+    `Google Chrome` brands at baseline (no leak), so such an assertion would be
+    vacuous (can't fail). The UA *string* is the only main-thread leak surface.
+    """
+    call("go", {"url": f"{local_server}/simple.html"})
+    res = call("eval", {"expr": "navigator.userAgent"})
+    ua = res.get("value", res)
+    assert isinstance(ua, str) and ua, f"could not read navigator.userAgent: {ua!r}"
+    assert "Headless" not in ua, (
+        f"main-thread UA string leaks the Headless automation token: {ua!r}"
+    )
+
+
+def test_headless_sharedworker_ua_has_no_headless_token(local_server):
+    """The teeth of the 0.6.8 fix. A SharedWorker runs in a SEPARATE target,
+    so a per-context `user_agent` override (CDP `setUserAgentOverride`) does NOT
+    reach it — leaving the SharedWorker UA saying `HeadlessChrome` while the main
+    thread says `Chrome`. That main-vs-worker MISMATCH is a stronger tell than
+    the original uniform leak, and CreepJS-class detectors cross-check exactly
+    this. Only the browser-wide `--user-agent` flag covers the SharedWorker;
+    this test fails if anyone reverts to the context-option mechanism.
+
+    Skips if the SharedWorker probe is inconclusive (timeout / unsupported),
+    rather than passing silently."""
+    call("go", {"url": f"{local_server}/simple.html"})
+    res = call("eval", {"expr": """(async () => {
+        try {
+            const code = "self.onconnect=e=>{const p=e.ports[0];"
+                + "p.onmessage=()=>p.postMessage(navigator.userAgent);}";
+            const sw = new SharedWorker(
+                URL.createObjectURL(new Blob([code], {type:'application/javascript'})));
+            return await new Promise((res) => {
+                const t = setTimeout(() => res('TIMEOUT'), 4000);
+                sw.port.onmessage = ev => { clearTimeout(t); res(ev.data); };
+                sw.port.start(); sw.port.postMessage(0);
+            });
+        } catch (e) { return 'ERR:' + String(e); }
+    })()"""})
+    ua = res.get("value", res)
+    if ua == "TIMEOUT" or (isinstance(ua, str) and ua.startswith("ERR:")):
+        pytest.skip(f"SharedWorker UA probe inconclusive: {ua}")
+    assert isinstance(ua, str) and ua, f"no SharedWorker UA returned: {ua!r}"
+    assert "Headless" not in ua, (
+        f"SharedWorker UA leaks the Headless token — main thread is clean but "
+        f"the worker isn't (the context-`user_agent` bug; must use the browser-"
+        f"wide --user-agent flag): {ua!r}"
+    )
+
+
 # ─── 2. File permission audit ────────────────────────────────────────────
 
 
