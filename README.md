@@ -19,13 +19,13 @@ vb research --target https://example.com \          # parallel fan-out, N intent
   --intent "pricing model" --intent "customers" --intent "tech stack"
 ```
 
-**Status:** active development, alpha. 526 tests green. 31/31 on bot.sannysoft.com. Cleared HackerOne Cloudflare cold-launch. Apache-2.0 (GPL/AGPL only via opt-in extras).
+**Status:** active development, alpha. 606 tests green. 31/31 on bot.sannysoft.com. Cleared HackerOne Cloudflare cold-launch. Apache-2.0 (GPL/AGPL only via opt-in extras).
 
 ## Updating
 
 ```bash
 vb update                  # upgrade to the latest PyPI release + restart the daemon
-vb update --version 0.6.2  # or pin a specific version
+vb update --version 0.6.8  # or pin a specific version
 ```
 
 `vb update` detects how vibatchium was installed (pipx or pip, with a PEP-668
@@ -117,7 +117,6 @@ For the REST shim: without `--caps`, the bearer token grants every verb includin
 - **Init scripts don't work on patchright backend.** `chrome.runtime` stays `undefined` — accepted trade for stealth wins.
 - **Login walls (X, LinkedIn) require attach mode.** Cold-launch fan-out can't defeat sites requiring authenticated sessions.
 - **Single daemon = single point of failure.** No HA built in.
-- **PyPI version (0.1.0) is stale.** Install from the git URL above for the current feature surface.
 
 ## License
 

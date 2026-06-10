@@ -426,3 +426,149 @@ async def test_goal_caps_block_out_of_bucket_verbs(tmp_path, monkeypatch):
     # browser — a different error).
     r2 = await call("eval", {"_session": "S", "expr": "1+1"}, ok=False)
     assert "blocked by goal caps" not in (r2.get("error") or "")
+
+
+# ─── goal domain allowlist enforcement on navigation (`go`) ──────────────────
+
+class _StubResp:
+    status = 200
+
+
+class _StubPage:
+    """Minimal page that records goto() calls — enough to drive the `go`
+    handler with wait_for_render disabled. No real Chrome."""
+    def __init__(self):
+        self.url = "about:blank"
+        self.goto_calls: list[str] = []
+
+    def is_closed(self):
+        return False
+
+    async def goto(self, url, wait_until=None, timeout=None):
+        self.goto_calls.append(url)
+        self.url = url
+        return _StubResp()
+
+    async def title(self):
+        return "OK"
+
+
+class _StubSession:
+    mode = "stub"
+
+    def __init__(self):
+        self.page = _StubPage()
+        self.frame_ref = None
+        class _Ctx:
+            pages = []
+        self.context = _Ctx()
+
+
+async def test_goal_allowlist_gates_navigation(tmp_path, monkeypatch):
+    """A goal with a domain_allowlist must REFUSE an off-allowlist `go` and
+    PERMIT an on-allowlist one. Fails before the fix (allowlist was never
+    enforced — both navigations would proceed)."""
+    monkeypatch.setattr(gstore, "GOALS_DB", tmp_path / "goals.db")
+    monkeypatch.setenv("VIBATCHIUM_NO_AUTO_START", "1")
+    from pathlib import Path
+    from vibatchium.daemon.server import Daemon
+    from vibatchium.daemon.registry import SessionEntry
+
+    d = Daemon()
+    stub = _StubSession()
+    d.registry._entries["S"] = SessionEntry(
+        name="S", profile_dir=Path(tmp_path / "S"), session=stub)
+
+    async def call(cmd, args=None, ok=True):
+        r = await d.dispatch({"id": "1", "cmd": cmd, "args": args or {}})
+        if ok:
+            assert r["ok"], (cmd, r.get("error"))
+        return r
+
+    # Goal pins an allowlist of example.com (subdomains permitted).
+    g = (await call("goal_new", {"description": "x", "session": "S",
+                                 "allow_domains": "example.com"}))["result"]
+    await call("goal_next")
+    assert d.registry.get("S").flags.get("goal_domains") == "example.com"
+
+    # On-allowlist navigation is permitted and actually reaches goto().
+    await call("go", {"_session": "S", "url": "https://docs.example.com/page",
+                      "wait_for_render": False})
+    assert stub.page.goto_calls == ["https://docs.example.com/page"]
+
+    # Off-allowlist navigation is REFUSED before goto() — no extra goto call.
+    r = await call("go", {"_session": "S", "url": "https://evil.test/phish",
+                          "wait_for_render": False}, ok=False)
+    assert not r["ok"]
+    assert "blocked by goal domain allowlist" in r["error"]
+    assert stub.page.goto_calls == ["https://docs.example.com/page"]
+
+    # Finishing the goal un-pins the allowlist; navigation is no longer gated.
+    await call("goal_done", {"goal_id": g["id"]})
+    assert "goal_domains" not in d.registry.get("S").flags
+    await call("go", {"_session": "S", "url": "https://evil.test/now-ok",
+                      "wait_for_render": False})
+    assert stub.page.goto_calls[-1] == "https://evil.test/now-ok"
+
+
+async def test_nav_guard_blocks_off_allowlist_at_request_layer():
+    """0.6.10 robust enforcement: a session whose nav_allowlist is set blocks a
+    top-level navigation to an off-allowlist host at the REQUEST layer
+    (ensure_nav_guard / context.route), not just the `go` verb — so a click /
+    redirect / JS navigation can't escape the goal's domain boundary. Allowed
+    hosts pass through. Uses a real headless Chrome + a local server.
+
+    Ordered allowed-then-blocked on purpose: a blocked goto leaves the page
+    unwinding the abort, and an immediate re-goto would raise the unrelated
+    'interrupted by another navigation' — a test artifact, not the guard. (The
+    `go`-gate refuses off-allowlist explicit nav before goto, so that sequence
+    never arises in production.)"""
+    import shutil
+    import tempfile
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    from pathlib import Path
+
+    import pytest as _pytest
+
+    from vibatchium.daemon.browser import (
+        close_session, ensure_nav_guard, launch_session,
+    )
+
+    class _H(BaseHTTPRequestHandler):
+        def do_GET(self):
+            b = b"ok"
+            self.send_response(200)
+            self.send_header("Content-Length", "2")
+            self.end_headers()
+            self.wfile.write(b)
+
+        def log_message(self, *a):
+            pass
+
+    srv = HTTPServer(("127.0.0.1", 0), _H)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{port}/"
+    tmp = Path(tempfile.mkdtemp(prefix="navguardtest_"))
+    sess = await launch_session(tmp, headless=True)
+    try:
+        # on-allowlist → loads
+        sess.nav_allowlist = {"127.0.0.1"}
+        await ensure_nav_guard(sess)
+        resp = await sess.page.goto(url, timeout=10_000)
+        assert resp is not None and resp.ok, "on-allowlist navigation should load"
+        # off-allowlist → blocked at the request layer (abort → goto raises)
+        sess.nav_allowlist = {"allowed.test"}
+        with _pytest.raises(Exception) as ei:
+            await sess.page.goto(url, timeout=10_000)
+        assert "BLOCKED" in str(ei.value).upper(), (
+            f"expected an ERR_BLOCKED_BY_CLIENT-style abort, got: {ei.value}"
+        )
+    finally:
+        try:
+            await close_session(sess)
+        except Exception:  # noqa: BLE001
+            pass
+        srv.shutdown()
+        shutil.rmtree(tmp, ignore_errors=True)

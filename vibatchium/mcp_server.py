@@ -56,7 +56,6 @@ TOOLS: list[tuple[str, str, dict, str, Any]] = [
                            "and is worth a retry on hard walls."),
          "backend": _str("Stealth backend: patchright (default) | nodriver | auto. "
                          "nodriver needs `pip install vibatchium[nodriver]`."),
-         "stealth_mouse": _bool("Layer CDP-Patches humanized mouse.", False),
          "ephemeral": _bool("Delete this session's profile dir on close — for "
                             "one-shot work that shouldn't leave login state on "
                             "disk. Prevents profile bloat from per-run sessions.",

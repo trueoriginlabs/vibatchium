@@ -28,6 +28,7 @@ thread, between awaits.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import time
 
@@ -54,17 +55,21 @@ class GoalError(RuntimeError):
 
 class GoalEngine:
     def __init__(self, store: GoalStore, *, checkpoint_cb=None, restore_cb=None,
-                 caps_cb=None):
+                 caps_cb=None, domains_cb=None):
         """``checkpoint_cb(session, name) -> checkpoint_id`` (async) is called
         at each step boundary to snapshot the session; ``restore_cb(session,
         checkpoint_id)`` (async) re-applies it when a paused goal resumes.
         ``caps_cb(session, caps_csv_or_None)`` (sync) pins/unpins the session's
         cap set as the goal takes/releases ownership (per-goal caps enforcement).
-        All optional — omitted in tests with no live session."""
+        ``domains_cb(session, allow_csv_or_None)`` (sync) pins/unpins the
+        session's domain allowlist the same way (per-goal navigation gating —
+        enforced at the ``go`` chokepoint). All optional — omitted in tests with
+        no live session."""
         self.store = store
         self._checkpoint_cb = checkpoint_cb
         self._restore_cb = restore_cb
         self._caps_cb = caps_cb
+        self._domains_cb = domains_cb
         self._session_owner: dict[str, str] = {}   # session → goal_id
         self._notifiers: dict[str, notifiers.Notifier] = {}
 
@@ -75,6 +80,19 @@ class GoalEngine:
             self._caps_cb(session, caps)
         except Exception:  # noqa: BLE001
             log.debug("caps_cb raised (ignored)", exc_info=True)
+
+    async def _apply_domains(self, session: str, allow: str | None) -> None:
+        if self._domains_cb is None:
+            return
+        try:
+            res = self._domains_cb(session, allow)
+            # Tolerate both sync (tests) and async (daemon — installs the
+            # navigation guard, which must complete BEFORE the goal navigates,
+            # so we await it) domains_cb implementations.
+            if inspect.isawaitable(res):
+                await res
+        except Exception:  # noqa: BLE001
+            log.debug("domains_cb raised (ignored)", exc_info=True)
 
     # ─── store access (off the event loop) ───────────────────────────────────
 
@@ -164,6 +182,7 @@ class GoalEngine:
         # next() can't hand the same session to a second goal.
         self._session_owner[sess] = gid
         self._apply_caps(sess, goal.get("caps"))
+        await self._apply_domains(sess, goal.get("domain_allowlist"))
         await self._db("update_goal", gid, status="running", consumed=consumed)
         goal = await self._db("get_goal", gid)
         # Resume: re-apply checkpoint into the (fresh) session bind.
@@ -239,7 +258,7 @@ class GoalEngine:
                            consumed=consumed, current_step=new_step,
                            client_token_idx=token_idx)
             goal = await self._db("get_goal", gid)
-            self._release(goal)
+            await self._release(goal)
             await self._emit(goal, "failed", {"reason": "budget_exceeded",
                                               "limit": exceeded})
             return result
@@ -278,7 +297,7 @@ class GoalEngine:
         await self._db("update_goal", gid, status="needs_input",
                        pending_question=question)
         goal = await self._db("get_goal", gid)
-        self._release(goal)
+        await self._release(goal)
         await self._emit(goal, "question", {"question": question})
         return {"goal_id": gid, "status": "needs_input", "question": question}
 
@@ -299,7 +318,7 @@ class GoalEngine:
         await self._must_get(gid)
         await self._db("update_goal", gid, status="done", outputs=outputs or {})
         goal = await self._db("get_goal", gid)
-        self._release(goal)
+        await self._release(goal)
         await self._emit(goal, "done", {"outputs": outputs or {}})
         return {"goal_id": gid, "status": "done"}
 
@@ -307,7 +326,7 @@ class GoalEngine:
         await self._must_get(gid)
         await self._db("update_goal", gid, status="failed")
         goal = await self._db("get_goal", gid)
-        self._release(goal)
+        await self._release(goal)
         await self._emit(goal, "failed", {"reason": reason})
         return {"goal_id": gid, "status": "failed"}
 
@@ -317,7 +336,7 @@ class GoalEngine:
             return {"goal_id": gid, "status": goal["status"]}
         await self._db("update_goal", gid, status="cancelled")
         goal = await self._db("get_goal", gid)
-        self._release(goal)
+        await self._release(goal)
         await self._emit(goal, "cancelled", {})
         return {"goal_id": gid, "status": "cancelled"}
 
@@ -327,7 +346,7 @@ class GoalEngine:
             raise GoalError(f"can only pause a running goal (is {goal['status']!r})")
         await self._db("update_goal", gid, status="paused")
         goal = await self._db("get_goal", gid)
-        self._release(goal)
+        await self._release(goal)
         await self._emit(goal, "session_released", {"reason": "paused"})
         return {"goal_id": gid, "status": "paused"}
 
@@ -400,11 +419,12 @@ class GoalEngine:
             raise GoalError(f"no goal {gid!r}")
         return goal
 
-    def _release(self, goal: dict) -> None:
+    async def _release(self, goal: dict) -> None:
         sess = goal["session"]
         if self._session_owner.get(sess) == goal["id"]:
             del self._session_owner[sess]
-            self._apply_caps(sess, None)   # un-pin the session's cap set
+            self._apply_caps(sess, None)      # un-pin the session's cap set
+            await self._apply_domains(sess, None)   # un-pin the session's allowlist
 
     @staticmethod
     def _budget_exceeded(budget: dict, consumed: dict):

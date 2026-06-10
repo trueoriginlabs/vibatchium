@@ -83,6 +83,35 @@ def _make_caps_cb(daemon):
     return caps_cb
 
 
+def _make_domains_cb(daemon):
+    """Pin/unpin a session's domain allowlist as a goal takes/releases ownership.
+
+    Sets two things: ``SessionEntry.flags['goal_domains']`` (the raw CSV — read
+    by the `go` handler for a clear, early "blocked by goal allowlist" error and
+    by observability), and ``session.nav_allowlist`` (the parsed host set) which
+    backs the lazily-installed navigation guard so off-allowlist navigation is
+    blocked however it is triggered (clicks/redirects/JS), not just `go`."""
+    async def domains_cb(session: str, allow: str | None) -> None:
+        entry = daemon.registry.get(session)
+        if entry is None:
+            return
+        sess = entry.session
+        if allow:
+            from .allowlist import parse_allowlist
+            from ..daemon.browser import ensure_nav_guard
+            entry.flags["goal_domains"] = allow
+            sess.nav_allowlist = parse_allowlist(allow)
+            try:
+                await ensure_nav_guard(sess)
+            except Exception:  # noqa: BLE001 — never let guard install fail goal start
+                log.warning("nav-guard install failed for session %s",
+                            session, exc_info=True)
+        else:
+            entry.flags.pop("goal_domains", None)
+            sess.nav_allowlist = None
+    return domains_cb
+
+
 async def _get_engine(daemon) -> GoalEngine:
     eng = getattr(daemon, "_goal_engine", None)
     if eng is None:
@@ -90,7 +119,8 @@ async def _get_engine(daemon) -> GoalEngine:
         if "checkpoint_save" in daemon._handlers:
             checkpoint_cb, restore_cb = _make_checkpoint_cbs(daemon)
         eng = GoalEngine(GoalStore(), checkpoint_cb=checkpoint_cb,
-                         restore_cb=restore_cb, caps_cb=_make_caps_cb(daemon))
+                         restore_cb=restore_cb, caps_cb=_make_caps_cb(daemon),
+                         domains_cb=_make_domains_cb(daemon))
         daemon._goal_engine = eng
         # Flip stale `running` goals from a crashed prior daemon to paused.
         try:

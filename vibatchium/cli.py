@@ -207,9 +207,6 @@ def _cli_resolve_headless(explicit, *, isatty: bool) -> bool:
                    "`VIBATCHIUM_DEFAULT_HEADED=1` forces headed; "
                    "`VIBATCHIUM_DEFAULT_HEADLESS=1` forces headless; "
                    "explicit --headless / --headed always wins.")
-@click.option("--stealth-mouse", is_flag=True,
-              help="Layer humanized mouse via CDP-Patches. Install separately: "
-                   "`pip install git+https://github.com/Kaliiiiiiiiii-Vinyzu/CDP-Patches.git@main`")
 @click.option("--backend", default="patchright",
               type=click.Choice(["patchright", "nodriver", "auto"]),
               help="Stealth backend. patchright (default) = current Patchright stack. "
@@ -221,7 +218,7 @@ def _cli_resolve_headless(explicit, *, isatty: bool) -> bool:
                    "work that shouldn't leave cookies/login state on disk — prevents "
                    "profile-dir bloat from per-run session names. Never affects 'default'.")
 @click.pass_context
-def start(ctx, profile, headless, stealth_mouse, backend, ephemeral):
+def start(ctx, profile, headless, backend, ephemeral):
     """Start a browser session (cold launch real Chrome + persistent context).
 
     Default headed/headless is inferred from the calling context: a TTY means a
@@ -237,8 +234,6 @@ def start(ctx, profile, headless, stealth_mouse, backend, ephemeral):
     # too, so programmatic callers (plugins, research, the xscraper reader)
     # never pop a window unless they explicitly ask.
     args["headless"] = _cli_resolve_headless(headless, isatty=sys.stdin.isatty())
-    if stealth_mouse:
-        args["stealth_mouse"] = True
     if backend != "patchright":
         args["backend"] = backend
     if ephemeral:

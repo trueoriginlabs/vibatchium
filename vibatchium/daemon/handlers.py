@@ -392,37 +392,17 @@ def register_all(daemon) -> None:
         # whole daemon back into headed. Interactive `vb start` sends headed
         # explicitly so humans at a terminal still get a window.
         headless = resolve_headless(args)
-        stealth_mouse = bool(args.get("stealth_mouse"))
         backend = args.get("backend") or "patchright"
         ephemeral = want_ephemeral
-        try:
-            entry = await d.registry.create(
-                name, profile_dir=profile_dir, headless=headless,
-                stealth_mouse=stealth_mouse, backend=backend,
-                ephemeral=ephemeral,
-            )
-        except Exception as exc:
-            # Surface stealth_mouse failures non-fatally, matching the prior
-            # opt-in behavior — if Chrome itself launched OK but stealth_mouse
-            # install failed (e.g. missing CDP-Patches), retry without it.
-            if stealth_mouse and "stealth" in str(exc).lower():
-                entry = await d.registry.create(
-                    name, profile_dir=profile_dir, headless=headless,
-                    stealth_mouse=False, backend=backend, ephemeral=ephemeral,
-                )
-                return {"started": True, "mode": "launch",
-                        "session": name, "profile": str(entry.profile_dir),
-                        "profile_name": entry.profile_dir.name,
-                        "backend": backend, "ephemeral": ephemeral,
-                        "stealth_mouse": False, "stealth_mouse_error": str(exc)}
-            raise
+        entry = await d.registry.create(
+            name, profile_dir=profile_dir, headless=headless,
+            backend=backend, ephemeral=ephemeral,
+        )
 
         out = {"started": True, "mode": "launch",
                "session": name, "profile": str(entry.profile_dir),
                "profile_name": entry.profile_dir.name,
                "backend": backend, "ephemeral": ephemeral}
-        if stealth_mouse:
-            out["stealth_mouse"] = True
         return out
 
     # ─── session management ────────────────────────────────────────────
@@ -1167,6 +1147,22 @@ def register_all(daemon) -> None:
             await d._handlers["start"](d, {"headless": True})
         s = _need_session(d)
         url = args["url"]
+        # Per-goal domain allowlist enforcement: while a goal owns this session
+        # it pins an allowlist via entry.flags['goal_domains']. Navigations to a
+        # host that is neither an allowed host nor a subdomain of one are
+        # REFUSED here — the safety boundary the goal declared. Mirrors the
+        # per-goal caps gate (which lives in the dispatcher because it keys off
+        # the verb name; this one lives here because it keys off the URL arg).
+        entry = d.registry.get(name)
+        allow_csv = entry.flags.get("goal_domains") if entry else None
+        if allow_csv:
+            from ..goals.allowlist import origin_allowed, parse_allowlist
+            if not origin_allowed(url, parse_allowlist(allow_csv)):
+                log.warning("navigation to %r blocked by goal domain allowlist "
+                            "(%s) on session %s", url, allow_csv, name)
+                raise ValueError(
+                    f"navigation to {url!r} blocked by goal domain allowlist "
+                    f"({allow_csv})")
         wait_until = args.get("wait_until", "domcontentloaded")
         timeout = int(args.get("timeout_ms", 60_000))
         resp = await s.page.goto(url, wait_until=wait_until, timeout=timeout)

@@ -238,6 +238,16 @@ PATTERNS: list[tuple[re.Pattern, str, str]] = [
 # ─── Wave 7.7: hidden-DOM smuggling detector (§7 from gray swan) ──────
 
 
+# HTML void elements: these fire handle_starttag but NEVER handle_endtag
+# (they have no closing tag). The hidden/visible stack must NOT push a
+# frame for them, or every void element on the page desyncs the stack for
+# the rest of the document.
+_VOID_ELEMENTS = frozenset({
+    "area", "base", "br", "col", "embed", "hr", "img", "input",
+    "link", "meta", "param", "source", "track", "wbr",
+})
+
+
 def extract_hidden_text(html: str) -> dict:
     """Pull text that would NOT render to a human but a DOM-traversing
     agent (text/html extraction in vibatchium's case) would still see.
@@ -292,11 +302,14 @@ def extract_hidden_text(html: str) -> dict:
                 return True, "hidden_style"
             return False, None
 
-        def handle_starttag(self, tag, attrs_list):
+        def _record_attrs(self, attrs_list) -> bool:
+            """Count hidden-vectors + harvest AT-only attribute text for a
+            tag, WITHOUT touching the visible/hidden stack. Returns the
+            `hidden` verdict so the caller can decide whether to push a
+            stack frame (container tags) or not (void / self-closing tags,
+            which have no matching end tag to pop the frame back off)."""
             attrs = {k.lower(): (v or "") for k, v in attrs_list}
-            # Hidden block start
             hidden, reason = self._is_hidden(attrs)
-            self._stack.append(hidden)
             if hidden and reason:
                 vectors[reason] += 1
                 self._hidden_reasons.append(reason)
@@ -310,6 +323,26 @@ def extract_hidden_text(html: str) -> dict:
                     if val:
                         chunks.append(val)
                         vectors["alt_text"] += 1
+            return hidden
+
+        def handle_starttag(self, tag, attrs_list):
+            hidden = self._record_attrs(attrs_list)
+            # Void elements (<img>, <br>, <hr>, …) fire handle_starttag but
+            # NEVER handle_endtag — pushing a frame for them would leave the
+            # stack one-deep too tall for the rest of the document, which
+            # both leaks visible text as "hidden" (false positive) and lets
+            # a later display:none block close early (false negative). Skip
+            # the push for them; their attr-derived text is already recorded.
+            if tag.lower() not in _VOID_ELEMENTS:
+                self._stack.append(hidden)
+
+        def handle_startendtag(self, tag, attrs_list):
+            # Explicit XHTML self-closing tag (<br/>, <img/>, <span …/>).
+            # The base class would route this through handle_starttag +
+            # handle_endtag; we override to run the same attr/vector logic
+            # but never push a frame (there is no end tag to pop), keeping
+            # the stack balanced regardless of whether the tag is void.
+            self._record_attrs(attrs_list)
 
         def handle_endtag(self, tag):
             if self._stack:

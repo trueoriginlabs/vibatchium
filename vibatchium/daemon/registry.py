@@ -369,7 +369,6 @@ class SessionRegistry:
         *,
         profile_dir: Path | None = None,
         headless: bool = False,
-        stealth_mouse: bool = False,
         backend: str = "patchright",
         ephemeral: bool = False,
     ) -> SessionEntry:
@@ -387,7 +386,6 @@ class SessionRegistry:
                 Sec-CH-UA client hints don't leak in new-headless mode (already
                 report `Google Chrome`). Residual headless tells (SwiftShader
                 WebGL, 800x600 screen, 0px scrollbar) remain — headed clears those.
-          stealth_mouse: layer CDP-Patches humanized input.
           backend: 'patchright' (default), 'nodriver', or 'auto'.
                    nodriver requires `pip install vibatchium[nodriver]` and
                    uses its hardened launch flags + Patchright connect_over_cdp.
@@ -459,19 +457,6 @@ class SessionRegistry:
             sess = await _backends.launch(backend, pdir, headless=headless,
                                            pw=pw, proxy=proxy_cfg)
         sess.flags = getattr(sess, "flags", {}) if hasattr(sess, "flags") else {}
-        if stealth_mouse:
-            # If the optional stealth-mouse layer can't install, tear down the
-            # Chrome we just spawned so we don't leak a process. The caller's
-            # exception propagates up.
-            from ..stealth import install_humanized_mouse
-            try:
-                await install_humanized_mouse(sess)
-            except Exception:
-                try:
-                    await _backends.close(sess)
-                except Exception:  # noqa: BLE001
-                    pass
-                raise
         entry = SessionEntry(name=name, profile_dir=pdir, session=sess,
                              ephemeral=ephemeral)
         # Stash backend choice on the entry so observability tools and the

@@ -4,6 +4,52 @@ All notable changes to vibatchium are documented here. Versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Until 1.0,
 minor bumps may include breaking changes; we'll always call them out here.
 
+## [0.6.10] — 2026-06-10
+
+### Fixed — three controls that silently did nothing
+- **Goal `domain_allowlist` is now enforced.** `--allow-domains` (CLI) /
+  `allow_domains` (MCP) was parsed, stored, surfaced, and inherited by subgoals
+  — but never actually applied, so an autonomous goal could navigate anywhere.
+  It is now enforced at the **navigation layer**: while a goal owns a session, a
+  context-level guard aborts top-level navigations to any host that isn't an
+  allowed host (or a subdomain of one), so the boundary holds however navigation
+  is triggered — the `go` verb, a link click, an HTTP redirect, or JS
+  `location=` — and it covers new tabs. The guard installs only while a goal
+  pins an allowlist (no HTTP-cache cost on normal sessions). Matching is
+  scheme/port-agnostic, subdomain-aware, refuses host-less URLs
+  (`about:`/`data:`), and rejects suffix-confusion (`example.com.evil.com`).
+- **Hidden-DOM injection scanner no longer desyncs on void elements.**
+  `extract_hidden_text` pushed a visible/hidden stack frame for every start tag,
+  but HTML void elements (`<img>`, `<br>`, `<input>`, …) never fire an end tag —
+  so the stack drifted on nearly every real page, both missing genuine injection
+  hidden in `display:none`/`aria-hidden` (false negative) and flagging
+  plainly-visible text as hidden (false positive). Fixed: skip the push for void
+  elements + handle explicit self-closing tags.
+- **Proxy parse errors no longer leak credentials.** A malformed proxy URL with
+  inline `user:pass@host` embedded the raw URL in the `ProxyParseError` message →
+  the RPC error response and the daemon log. Credentials are now masked
+  (`***@host`) at every raise site, restoring the "credentials never appear in
+  logs" guarantee.
+
+### Removed — `--stealth-mouse` (it never did anything)
+- The `--stealth-mouse` flag (plus the `stealth_mouse` MCP arg and the `stealth/`
+  package) built a CDP-Patches `AsyncInput` layer, reported `stealth_mouse: true`
+  / "installed", then **never wired it into any mouse or keyboard operation** — a
+  silent no-op since it shipped. `humanize on` already provides humanized input
+  (Bezier mouse, gaussian typing) through the verified, hit-tested verb path and
+  works headless, so it supersedes it. Removed rather than left advertising a
+  capability it didn't deliver — use `humanize on`.
+
+### Changed
+- README refreshed: current PyPI version (the stale "0.1.0 is stale, install from
+  git" note is gone) and an accurate test count.
+
+### Note
+- All four were surfaced by an adversarial audit prompted by the 0.6.9 warm-claim
+  bug — every one the same class (a control that reports success while doing
+  nothing). Lower-severity audit findings (remaining posture hardcodes, dropped
+  log-redaction fields, doc drift) are tracked for 0.6.11.
+
 ## [0.6.9] — 2026-06-10
 
 ### Fixed — `--headed` silently served a headless pre-warm

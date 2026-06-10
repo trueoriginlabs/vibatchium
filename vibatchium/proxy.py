@@ -40,13 +40,54 @@ class ProxyParseError(ValueError):
     """Raised when a proxy URL is malformed or addresses an unknown adapter."""
 
 
+def mask_userinfo(url: object) -> str:
+    """Return ``url`` with any ``user:pass@`` userinfo replaced by ``***@``.
+
+    Credential hygiene: proxy URLs may embed inline credentials
+    (``scheme://user:pass@host:port``). Those must never reach an exception
+    message, an RPC error response, or a log line (README: "Credentials never
+    appear in logs ... grep-tested in CI"). This helper is the single choke
+    point used wherever a proxy URL could enter such a string.
+
+    Robust to: a missing scheme, no userinfo, an IPv6 literal host, trailing
+    path/query/fragment, an ``@`` inside the query, and malformed/non-string
+    input. It is purely string-based so it never raises (even on input that
+    ``urlparse`` chokes on) and always returns a string.
+    """
+    if not isinstance(url, str) or not url:
+        # Non-string / empty: surface a repr so the message is still useful,
+        # without exposing anything (there are no credentials to leak).
+        return repr(url)
+    # Split off the scheme (``scheme://``) if present, masking what follows.
+    prefix = ""
+    rest = url
+    sep = "://"
+    i = url.find(sep)
+    if i != -1:
+        prefix = url[: i + len(sep)]
+        rest = url[i + len(sep) :]
+    # The authority ends at the first '/', '?' or '#' delimiter.
+    end = len(rest)
+    for ch in "/?#":
+        j = rest.find(ch)
+        if j != -1 and j < end:
+            end = j
+    authority, tail = rest[:end], rest[end:]
+    at = authority.rfind("@")  # rfind: tolerate '@' inside the password
+    if at != -1:
+        authority = "***@" + authority[at + 1 :]
+    return prefix + authority + tail
+
+
 # ─── adapter registry ──────────────────────────────────────────────────
 
 
 def _generic(url: str, parsed) -> dict:
     """http://, https://, socks5:// — pass through unchanged."""
     if not parsed.hostname:
-        raise ProxyParseError(f"missing host in proxy URL: {url!r}")
+        raise ProxyParseError(f"missing host in proxy URL: {mask_userinfo(url)!r}")
+    if any(c.isspace() for c in parsed.hostname):
+        raise ProxyParseError(f"invalid host in proxy URL: {mask_userinfo(url)!r}")
     port = parsed.port or (443 if parsed.scheme == "https" else 80)
     cfg = {"server": f"{parsed.scheme}://{parsed.hostname}:{port}"}
     if parsed.username:
@@ -167,7 +208,7 @@ def parse(url: str) -> dict:
     Raises ProxyParseError on invalid URL or unknown provider.
     """
     if not url or "://" not in url:
-        raise ProxyParseError(f"invalid proxy URL: {url!r}")
+        raise ProxyParseError(f"invalid proxy URL: {mask_userinfo(url)!r}")
     parsed = urlparse(url)
     scheme = parsed.scheme.lower()
     adapter = _ADAPTERS.get(scheme)

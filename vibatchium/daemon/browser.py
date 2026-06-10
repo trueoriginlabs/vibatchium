@@ -119,12 +119,68 @@ class BrowserSession:
     # Wave 5: when False, this session does NOT own its Playwright driver
     # subprocess — the daemon does (shared). close_session won't `.stop()` it.
     owns_pw: bool = True
+    # 0.6.10: per-goal domain allowlist (set of bare lowercase hosts), pinned
+    # while a goal owns this session. None = no restriction. Enforced at the
+    # navigation layer by ensure_nav_guard so link-clicks / redirects / JS
+    # navigation are blocked, not just the explicit `go` verb.
+    nav_allowlist: set | None = None
+    _nav_guard_installed: bool = False
 
     @property
     def target(self):
         """Return the active page-or-frame for verbs that should respect a
         currently-switched frame."""
         return self.frame_ref if self.frame_ref is not None else self.page
+
+
+async def ensure_nav_guard(session: BrowserSession) -> None:
+    """Install a context-level navigation guard (idempotent) that aborts
+    top-level navigations to hosts outside ``session.nav_allowlist``.
+
+    This is the robust enforcement point for a goal's domain allowlist: because
+    it intercepts the actual navigation *request* at the context level, it
+    blocks off-allowlist navigation however it is triggered — the explicit `go`
+    verb, a link click, an HTTP redirect, or JS `location=` — and it covers new
+    tabs/popups automatically (context-level routing). Only TOP-LEVEL (main
+    frame) document navigations are gated; subresources and iframes pass through
+    so an allowed page that pulls a third-party CDN/script still loads.
+
+    Installed LAZILY (only once a goal pins an allowlist) because
+    `context.route("**/*")` disables Chrome's HTTP cache for the session — we
+    must not impose that on every non-goal session. The guard reads
+    ``session.nav_allowlist`` live, so it goes inert (pure fallback) the moment
+    the goal releases the session and clears it. Composes with the user-facing
+    `route_add` interception via ``route.fallback()``.
+    """
+    if session._nav_guard_installed:
+        return
+
+    async def _guard(route):
+        req = route.request
+        allowed = session.nav_allowlist
+        if (allowed and req.is_navigation_request()
+                and req.frame.parent_frame is None):
+            from ..goals.allowlist import origin_allowed
+            if not origin_allowed(req.url, allowed):
+                log.warning("blocked off-allowlist navigation to %s", req.url)
+                try:
+                    await route.abort("blockedbyclient")
+                except Exception:  # noqa: BLE001
+                    pass
+                return
+        # Allowed (or non-navigation / inert) → let the request proceed.
+        # continue_() performs the request directly; fallback() is avoided
+        # because with a single context route + no next handler it does not
+        # reliably perform the request (the allowed nav would hang). A
+        # user-added route_add rule is unaffected for its own patterns; this
+        # guard only fires on "**/*" for the allowlist check.
+        try:
+            await route.continue_()
+        except Exception:  # noqa: BLE001
+            pass
+
+    await session.context.route("**/*", _guard)
+    session._nav_guard_installed = True
 
 
 def _wire_page_tracking(session: BrowserSession) -> None:

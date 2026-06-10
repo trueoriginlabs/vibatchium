@@ -25,7 +25,7 @@ from vibatchium.client import call, DaemonError
 from vibatchium.daemon.paths import PROFILES_DIR
 from vibatchium.proxy import (
     ProxyParseError, parse, list_providers, load_proxy_file, save_session_proxy,
-    load_session_proxy, webrtc_leak_guard_args,
+    load_session_proxy, webrtc_leak_guard_args, mask_userinfo,
 )
 
 
@@ -105,6 +105,47 @@ def test_parse_malformed_raises():
 def test_parse_missing_required_brightdata_fields():
     with pytest.raises(ProxyParseError, match="brightdata URL must be"):
         parse("brightdata://onlyuser@zone")  # no password
+
+
+# ─── credential-leak guard (README: creds never appear in logs) ──────────
+
+
+@pytest.mark.parametrize(
+    "bad_url",
+    [
+        "http://user:secret@bad host",   # malformed host (whitespace) + creds
+        "http://user:secret@:8080",      # missing host, has creds
+        "user:secret@host",              # missing scheme, has creds
+    ],
+)
+def test_proxy_parse_error_does_not_leak_credentials(bad_url):
+    """A malformed proxy URL carrying inline credentials must raise without
+    embedding `user`/`secret` in the exception string — otherwise the creds
+    flow into the RPC error response and the daemon log."""
+    with pytest.raises(ProxyParseError) as ei:
+        parse(bad_url)
+    msg = str(ei.value)
+    assert "secret" not in msg, f"password leaked: {msg!r}"
+    assert "user" not in msg, f"username leaked: {msg!r}"
+    assert "***@" in msg, f"userinfo not masked: {msg!r}"
+
+
+def test_mask_userinfo_edge_cases():
+    # user:pass@host → ***@host (with and without scheme)
+    assert mask_userinfo("http://user:secret@host:8080") == "http://***@host:8080"
+    assert mask_userinfo("user:secret@host") == "***@host"
+    # username-only userinfo is still masked
+    assert mask_userinfo("http://user@host") == "http://***@host"
+    # no userinfo → unchanged
+    assert mask_userinfo("http://host:8080") == "http://host:8080"
+    # IPv6 literal host preserved, creds masked
+    assert mask_userinfo("socks5://u:p@[2001:db8::1]:1080") == "socks5://***@[2001:db8::1]:1080"
+    # path / query / fragment preserved; '@' inside query does not confuse it
+    assert mask_userinfo("http://u:p@host/x?q=a@b#f") == "http://***@host/x?q=a@b#f"
+    # malformed / non-string input never raises, never leaks
+    assert "secret" not in mask_userinfo("notaurl")
+    assert mask_userinfo("") == "''"
+    assert mask_userinfo(None) == "None"
 
 
 def test_list_providers_includes_built_ins():

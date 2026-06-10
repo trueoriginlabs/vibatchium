@@ -1,4 +1,4 @@
-"""Tests for Wave 4: HAR export, eval_handle, stealth-mouse fallback."""
+"""Tests for Wave 4: HAR export, eval_handle."""
 import json
 
 from vibatchium.client import call
@@ -79,16 +79,3 @@ def test_handle_eval_unknown_id_errors(local_server):
     from vibatchium.client import DaemonError
     with pytest.raises(DaemonError, match="unknown handle"):
         call("handle_eval", {"handle": "h_nonexistent", "expr": "(x) => x"})
-
-
-def test_stealth_mouse_falls_back_cleanly():
-    """Without cdp_patches installed, --stealth-mouse should report fallback,
-    not crash. (Session fixture starts WITHOUT --stealth-mouse, so this is
-    covered by direct CLI smoke in the README — here we just import-check.)
-    """
-    from vibatchium.stealth import humanize_mouse_available
-    ok, info = humanize_mouse_available()
-    # We don't assert ok=False because the test machine might have cdp_patches;
-    # we just assert the function returns a (bool, str) tuple cleanly.
-    assert isinstance(ok, bool)
-    assert isinstance(info, str)
