@@ -14,6 +14,10 @@ without removing vibatchium's primitive power:
 """
 from __future__ import annotations
 
+import asyncio
+
+import pytest
+
 from vibatchium.client import call, DaemonError
 
 
@@ -72,7 +76,7 @@ def test_go_auto_start_can_be_disabled(monkeypatch, local_server):
 
 
 def test_explore_one_call_returns_text_and_screenshot(local_server):
-    """The whole point of explore: one call → page content + visual."""
+    """screenshot='always' forces the visual: one call → page content + PNG."""
     name = "explore_probe_session"
     try:
         call("session_close", {"name": name})
@@ -85,6 +89,7 @@ def test_explore_one_call_returns_text_and_screenshot(local_server):
     try:
         result = call("explore",
                       {"url": f"{local_server}/simple.html",
+                       "screenshot": "always",  # 0.7.0: opt in to the screenshot
                        "skip_verify": True},  # local_server isn't reachable by name
                       session=name)
         # Expected shape
@@ -93,12 +98,114 @@ def test_explore_one_call_returns_text_and_screenshot(local_server):
         assert result.get("status") == 200
         assert result.get("text"), "expected non-empty text"
         assert result.get("screenshot_b64"), "expected base64 screenshot"
+        assert "requested" in (result.get("screenshot_reason") or "")
         assert result.get("closed") is True, "session should auto-close"
         assert result.get("elapsed_ms", 0) > 0
         # Session should no longer be running (auto-closed)
         listing = call("session_list")
         running = {s["name"] for s in listing.get("sessions", []) if s.get("running")}
         assert name not in running
+    finally:
+        try:
+            call("session_delete", {"name": name})
+        except DaemonError:
+            pass
+
+
+def test_explore_auto_default_skips_screenshot_on_text_page(local_server):
+    """0.7.0 TEXT-FIRST: a text-rich page returns NO screenshot by default —
+    the common case is fast + cheap (no base64 in the agent's context)."""
+    name = "explore_textfirst_session"
+    try:
+        call("session_close", {"name": name})
+    except DaemonError:
+        pass
+    try:
+        result = call("explore",
+                      {"url": f"{local_server}/simple.html",
+                       "skip_verify": True},   # no `screenshot` → default 'auto'
+                      session=name)
+        assert result.get("text"), "expected non-empty text"
+        assert "screenshot_b64" not in result, "auto default must NOT screenshot a text page"
+        assert "screenshot_reason" not in result
+    finally:
+        try:
+            call("session_delete", {"name": name})
+        except DaemonError:
+            pass
+
+
+def test_explore_auto_fallback_screenshots_blank_page(local_server):
+    """0.7.0: when the text path 'can't' (page yields no usable text), `auto`
+    falls back to a screenshot so the agent still has something to look at.
+
+    NOTE: blank.html has an empty <body>, so go's SPA-hydration wait can never
+    see innerText>100 and deterministically burns its full ~5s render_timeout
+    before this returns. That ~5s is expected here (not a hang) — it is the
+    price of exercising the genuinely-empty fallback path."""
+    name = "explore_fallback_session"
+    try:
+        call("session_close", {"name": name})
+    except DaemonError:
+        pass
+    try:
+        result = call("explore",
+                      {"url": f"{local_server}/blank.html",
+                       "skip_verify": True},   # default 'auto'
+                      session=name)
+        assert not (result.get("text") or "").strip(), "blank.html should yield no text"
+        assert result.get("screenshot_b64"), "auto must fall back to a screenshot"
+        assert "text-fallback" in (result.get("screenshot_reason") or "")
+    finally:
+        try:
+            call("session_delete", {"name": name})
+        except DaemonError:
+            pass
+
+
+def test_explore_never_string_suppresses_even_the_fallback(local_server):
+    """The 'never' STRING (what the CLI --no-screenshot and MCP clients emit —
+    a distinct handler branch from the bool False) suppresses the screenshot
+    even on a page where `auto` WOULD fall back (blank.html). Eats the ~5s
+    hydration wait like the blank-fallback test above."""
+    name = "explore_never_str_session"
+    try:
+        call("session_close", {"name": name})
+    except DaemonError:
+        pass
+    try:
+        result = call("explore",
+                      {"url": f"{local_server}/blank.html",
+                       "screenshot": "never", "skip_verify": True},
+                      session=name)
+        assert "screenshot_b64" not in result   # 'never' beats the auto fallback
+        assert "screenshot_reason" not in result
+    finally:
+        try:
+            call("session_delete", {"name": name})
+        except DaemonError:
+            pass
+
+
+def test_explore_auto_screenshots_walled_page(local_server):
+    """0.7.0: auto mode falls back to a screenshot on a challenge/login wall
+    even when the wall renders enough boilerplate to clear min_text_chars —
+    seeing the wall pixels is exactly the case where a screenshot helps. (Pre-fix
+    a walled page with >64 chars got NO screenshot.)"""
+    name = "explore_walled_session"
+    try:
+        call("session_close", {"name": name})
+    except DaemonError:
+        pass
+    try:
+        result = call("explore",
+                      {"url": f"{local_server}/walled.html",
+                       "skip_verify": True},   # default 'auto'
+                      session=name)
+        assert result.get("walled"), "go should flag the cloudflare wall"
+        assert len((result.get("text") or "").strip()) >= 64, "wall text clears the threshold"
+        assert result.get("screenshot_b64"), "auto must still screenshot a walled page"
+        assert "walled-fallback" in (result.get("screenshot_reason") or "")
     finally:
         try:
             call("session_delete", {"name": name})
@@ -235,3 +342,107 @@ def test_mcp_lists_explore_tool_in_schema():
     explore_tool = next(t for t in TOOLS if t[0] == "explore")
     # Description should mention "ONE-CALL" or similar steering language
     assert "ONE-CALL" in explore_tool[1] or "one-call" in explore_tool[1].lower()
+
+
+# ─── 4. screenshots come back as viewable image blocks, not base64 text ──
+
+
+def test_mcp_explore_default_screenshot_is_auto():
+    """0.7.0: the explore tool no longer defaults to screenshot=true — the
+    schema default is the text-first 'auto' policy, and the schema accepts BOTH
+    the enum strings and the back-compat booleans the handler/docs promise."""
+    from vibatchium.mcp_server import TOOLS
+    explore_tool = next(t for t in TOOLS if t[0] == "explore")
+    schema = explore_tool[2]
+    shot = schema["properties"]["screenshot"]
+    assert shot.get("default") == "auto"
+    branches = shot["anyOf"]
+    enums = next(b["enum"] for b in branches if "enum" in b)
+    assert set(enums) == {"auto", "always", "never"}
+    assert any(b.get("type") == "boolean" for b in branches)   # bools stay valid
+    # full-page must no longer be the default (viewport is cheaper)
+    assert schema["properties"]["full_page"].get("default") is False
+    # the auto-fallback threshold is exposed so agents can tune it per call
+    assert schema["properties"]["min_text_chars"].get("default") == 64
+
+
+def test_mcp_explore_schema_validates_string_and_bool_screenshot():
+    """The published inputSchema must accept BOTH the enum strings and the
+    back-compat booleans — the MCP SDK jsonschema-validates args BEFORE the
+    handler runs, so a string-only schema would reject screenshot=true and the
+    handler's bool-coercion (and the 'booleans still accepted' docs) would be a
+    lie over MCP."""
+    jsonschema = pytest.importorskip("jsonschema")
+    from vibatchium.mcp_server import TOOLS
+    schema = next(t for t in TOOLS if t[0] == "explore")[2]
+    for val in ("auto", "always", "never", True, False):
+        jsonschema.validate({"url": "https://x", "screenshot": val}, schema)
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate({"url": "https://x", "screenshot": "sometimes"}, schema)
+
+
+def test_mcp_explore_omitted_screenshot_forwards_no_key(monkeypatch):
+    """When the model omits screenshot, call_tool must NOT inject the schema
+    default — the key never reaches the daemon and the handler default ('auto')
+    is the single source of truth for text-first behavior. Pins the schema
+    default to the handler default so a one-sided edit can't silently diverge."""
+    from vibatchium import mcp_server as M
+    from vibatchium.mcp_server import TOOLS
+    rec = {}
+    monkeypatch.setattr(M, "daemon_call",
+                        lambda cmd, args=None, **kw: rec.update(args=args) or {"text": "ok"})
+    monkeypatch.setattr(M, "daemon_is_running", lambda: True)
+    monkeypatch.setattr(M, "_ACTIVE_CAPS", None)
+    asyncio.run(M.call_tool("explore", {"url": "https://x"}))
+    assert "screenshot" not in rec["args"]   # default applied by handler, not the wire
+    schema = next(t for t in TOOLS if t[0] == "explore")[2]
+    assert schema["properties"]["screenshot"]["default"] == "auto"   # == handler default
+
+
+def test_mcp_screenshot_returns_image_block_not_base64_text(monkeypatch):
+    """A base64 PNG must come back as a VIEWABLE MCP image block — never inlined
+    as base64 text, which would flood the model's context with useless tokens."""
+    import mcp.types as types
+    from vibatchium import mcp_server as M
+    b64 = "iVBORw0KGgoAAAANSUhEUgAA"  # stand-in base64 PNG
+    monkeypatch.setattr(M, "daemon_call",
+                        lambda cmd, args=None, **kw: {"text": "hello",
+                                                      "screenshot_b64": b64})
+    monkeypatch.setattr(M, "daemon_is_running", lambda: True)
+    monkeypatch.setattr(M, "_ACTIVE_CAPS", None)
+    blocks = asyncio.run(M.call_tool("explore",
+                                     {"url": "https://x", "screenshot": "always"}))
+    assert isinstance(blocks[0], types.TextContent)
+    assert b64 not in blocks[0].text, "base64 must NOT be inlined as text"
+    assert "hello" in blocks[0].text
+    imgs = [b for b in blocks if isinstance(b, types.ImageContent)]
+    assert len(imgs) == 1
+    assert imgs[0].data == b64 and imgs[0].mimeType == "image/png"
+
+
+def test_mcp_screenshot_verb_png_b64_becomes_image_block(monkeypatch):
+    """The standalone `screenshot` verb's png_b64 is also returned as an image."""
+    import mcp.types as types
+    from vibatchium import mcp_server as M
+    b64 = "QQQQ"
+    monkeypatch.setattr(M, "daemon_call", lambda cmd, args=None, **kw: {"png_b64": b64})
+    monkeypatch.setattr(M, "daemon_is_running", lambda: True)
+    monkeypatch.setattr(M, "_ACTIVE_CAPS", None)
+    blocks = asyncio.run(M.call_tool("screenshot", {}))
+    assert b64 not in blocks[0].text
+    imgs = [b for b in blocks if isinstance(b, types.ImageContent)]
+    assert len(imgs) == 1 and imgs[0].data == b64
+
+
+def test_mcp_non_image_result_is_single_text_block(monkeypatch):
+    """A plain result (no image field) stays a single text block at index 0 —
+    JSON-parsing callers must be unaffected by the image-block change."""
+    import json
+    import mcp.types as types
+    from vibatchium import mcp_server as M
+    monkeypatch.setattr(M, "daemon_call", lambda cmd, args=None, **kw: {"url": "u", "ok": True})
+    monkeypatch.setattr(M, "daemon_is_running", lambda: True)
+    monkeypatch.setattr(M, "_ACTIVE_CAPS", None)
+    blocks = asyncio.run(M.call_tool("url", {}))
+    assert len(blocks) == 1 and isinstance(blocks[0], types.TextContent)
+    assert json.loads(blocks[0].text) == {"url": "u", "ok": True}

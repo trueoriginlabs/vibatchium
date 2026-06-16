@@ -166,3 +166,20 @@ def test_explore_output_dir_still_writes_markdown(local_server, tmp_path):
     data = json.loads(r.stdout)
     assert "screenshot_b64" not in data
     assert data.get("markdown_path", "").endswith("explore.md")
+
+
+def test_explore_auto_screenshot_skips_text_page(local_server, tmp_path):
+    """0.7.0 --auto-screenshot is text-first: a text-rich page yields NO
+    screenshot (no base64, no cache file) — the token-saving agent default."""
+    import os as _os
+    env = {**_os.environ, "HOME": str(tmp_path)}
+    r = subprocess.run([_vibatchium_bin(),
+                       "--session", "codex_friction_auto_test",
+                       "explore", f"{local_server}/simple.html",
+                       "--skip-verify", "--auto-screenshot"],
+                      capture_output=True, text=True, timeout=30, env=env)
+    assert r.returncode == 0, f"stderr: {r.stderr}"
+    data = json.loads(r.stdout)
+    assert data.get("text")
+    assert "screenshot_b64" not in data
+    assert "screenshot_path" not in data

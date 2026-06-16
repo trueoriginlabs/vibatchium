@@ -72,7 +72,7 @@ def spawn_daemon(wait: float = 5.0) -> None:
 
 
 def call(cmd: str, args: dict[str, Any] | None = None, *,
-         session: str | None = None,
+         session: str | None = None, lease: str | None = None,
          auto_spawn: bool = True, timeout: float = 120.0) -> Any:
     """RPC call. If daemon isn't running and auto_spawn=True, spawn it first.
 
@@ -82,6 +82,10 @@ def call(cmd: str, args: dict[str, Any] | None = None, *,
       session: target session name. None = active session (server-side default).
                Sent as the special `_session` field — the daemon's dispatcher
                consumes it before invoking the handler.
+      lease: lease token to present (0.7.0). None = read VIBATCHIUM_LEASE from
+             this client's OWN env. Sent as the special `_lease` field. The
+             token is resolved CLIENT-side and never read daemon-side (the
+             daemon's env must not be a master token for every client).
       auto_spawn: spawn the daemon if it isn't running.
       timeout: socket read timeout.
     """
@@ -98,6 +102,12 @@ def call(cmd: str, args: dict[str, Any] | None = None, *,
         session = os.environ.get("VIBATCHIUM_SESSION") or None
     if session:
         payload_args["_session"] = session
+    # 0.7.0 lease token — client-side resolution only. The guard keeps default
+    # (no-lease) callers byte-identical to pre-0.7.0.
+    if lease is None:
+        lease = os.environ.get("VIBATCHIUM_LEASE") or None
+    if lease and "_lease" not in payload_args:
+        payload_args["_lease"] = lease
 
     s = _connect(timeout=timeout)
     try:

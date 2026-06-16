@@ -27,6 +27,7 @@ breaking handlers — `entry.session` would just point at a proxy object.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 import shutil
@@ -37,6 +38,7 @@ from pathlib import Path
 
 from patchright.async_api import Playwright, async_playwright
 
+from . import lease as _lease
 from .browser import BrowserSession, attach_session
 from .paths import (
     DEFAULT_SESSION_NAME,
@@ -46,6 +48,10 @@ from .paths import (
 )
 
 log = logging.getLogger("vibatchium.registry")
+
+# Sentinel so _launch_for can tell "caller passed proxy/geo (even None)" from
+# "caller wants a fresh disk read" (the relaunch path) — None is a valid value.
+_UNSET = object()
 
 
 # The contextvar that carries the current-call's session name through the
@@ -62,6 +68,21 @@ def get_max_sessions() -> int:
         return max(1, int(os.environ.get("VIBATCHIUM_MAX_SESSIONS", "4")))
     except ValueError:
         return 4
+
+
+def get_max_ephemeral() -> int:
+    """Off-budget one-shot lane cap (0.7.0), separate from the persistent
+    VIBATCHIUM_MAX_SESSIONS budget. Read on every call so it's testable.
+
+    Unlike get_max_sessions (min 1), this floors at 0 — setting
+    VIBATCHIUM_MAX_EPHEMERAL=0 HARD-DISABLES the lane, so `vb explore` without a
+    pinned session and `vb start --ephemeral` then raise SessionLimitError.
+    Default 2 bounds worst-case total Chromes to MAX_SESSIONS+MAX_EPHEMERAL.
+    """
+    try:
+        return max(0, int(os.environ.get("VIBATCHIUM_MAX_EPHEMERAL", "2")))
+    except ValueError:
+        return 2
 
 
 def _profile_last_active(path: Path) -> float | None:
@@ -175,9 +196,54 @@ class SessionEntry:
     # fresh session name per run. The 'default' session is NEVER deleted,
     # regardless of this flag (guarded in close()).
     ephemeral: bool = False
+    # 0.7.0 self-heal: how many times this session auto-recovered from a Chrome
+    # renderer crash / context death (page-revive OR full relaunch), and when.
+    # Surfaced via `vb status` + `vb session list --json` for operator debugging.
+    recovered: int = 0
+    last_recovered_at: float | None = None
+    # 0.7.0 lease: opt-in exclusive coordination. None = unleased (fully open,
+    # today's behavior). Otherwise {'owner','token','expires_at','acquired_at'}.
+    # Reaped lazily — see lease_active().
+    lease: dict | None = None
 
     def touch(self) -> None:
         self.last_used_at = time.time()
+
+    # ─── 0.7.0 lease helpers (advisory, TTL-bounded) ─────────────────────
+    def lease_active(self, now: float | None = None) -> dict | None:
+        """Return the live lease, lazily reaping an expired one. The ONLY place
+        a stale lease is cleared — called by the dispatch gates AND every
+        observability read (status / session_list / lease_info) so expiry
+        semantics never diverge. Idempotent; takes no lock."""
+        if self.lease is None:
+            return None
+        if _lease.is_expired(self.lease, now):
+            log.info("lease expired session=%s owner=%s", self.name,
+                     self.lease.get("owner"))
+            self.lease = None
+            return None
+        return self.lease
+
+    def lease_grant(self, owner: str, ttl_s, *, presented=None) -> dict:
+        """Grant, renew, or steal the lease.
+
+        A genuine same-holder RENEWAL (the caller presents the active token)
+        keeps the existing token + original acquired_at; only expires_at slides
+        forward. A STEAL (active lease, non-matching token) ROTATES the token —
+        so the prior holder is revoked and never learns the new secret. A fresh
+        grant on an unleased session mints a new token."""
+        now = time.time()
+        ttl = _lease.clamp_ttl(ttl_s)
+        active = self.lease_active(now)
+        renewal = active is not None and _lease._token_eq(presented, active["token"])
+        token = active["token"] if renewal else _lease.mint_token()
+        acquired = active["acquired_at"] if renewal else now
+        self.lease = {"owner": owner or "anonymous", "token": token,
+                      "acquired_at": acquired, "expires_at": now + ttl}
+        return dict(self.lease)
+
+    def lease_clear(self) -> None:
+        self.lease = None
 
 
 class SessionLimitError(RuntimeError):
@@ -207,6 +273,10 @@ class SessionRegistry:
         # in the background. start() pops from here if the warm session matches.
         self._warm_sessions: dict[str, BrowserSession] = {}
         self._warm_tasks: dict[str, asyncio.Task] = {}
+        # 0.7.0 ephemeral lane: monotonic counter for minting unique transient
+        # session names (`_ex-<pid>-<seq>`). Single-process daemon → a plain
+        # increment is race-free.
+        self._ephemeral_seq = 0
 
     async def _ensure_pw(self) -> Playwright:
         if self._pw is None:
@@ -257,7 +327,9 @@ class SessionRegistry:
         # in create() but opportunistic prewarms previously slipped past it.
         cap = get_max_sessions()
         in_flight = sum(1 for t in self._warm_tasks.values() if not t.done())
-        if len(self._entries) + len(self._warm_sessions) + in_flight >= cap:
+        # Prewarms are persistent named sessions — count only the persistent
+        # budget (ephemeral one-shot sessions are never pre-warmed).
+        if self.count_persistent() + len(self._warm_sessions) + in_flight >= cap:
             log.debug("skipping prewarm of %s — at VIBATCHIUM_MAX_SESSIONS=%d",
                       name, cap)
             return
@@ -318,6 +390,32 @@ class SessionRegistry:
     def list_running(self) -> list[str]:
         return sorted(self._entries.keys())
 
+    # ─── 0.7.0 cap relief: two-budget accounting ─────────────────────────
+    def count_persistent(self) -> int:
+        """Running sessions that count against VIBATCHIUM_MAX_SESSIONS."""
+        return sum(1 for e in self._entries.values() if not e.ephemeral)
+
+    def count_ephemeral(self) -> int:
+        """Running off-budget one-shot sessions (count against MAX_EPHEMERAL)."""
+        return sum(1 for e in self._entries.values() if e.ephemeral)
+
+    def budgets(self) -> dict:
+        """Both budgets + current usage — surfaced in status / session_list."""
+        return {
+            "persistent": {"used": self.count_persistent(), "cap": get_max_sessions()},
+            "ephemeral": {"used": self.count_ephemeral(), "cap": get_max_ephemeral()},
+        }
+
+    def mint_ephemeral_name(self) -> str:
+        """A unique transient session name (`_ex-<pid>-<seq>`). The leading
+        underscore is DELIBERATE: validate_name rejects it, so a minted name can
+        never collide with a user-created session — yet session_dir/start/close
+        don't validate, so it works end-to-end internally. The pid keeps it
+        distinct across daemon restarts sharing PROFILES_DIR; the seq within one
+        daemon. Single-process → the increment is race-free."""
+        self._ephemeral_seq += 1
+        return f"_ex-{os.getpid()}-{self._ephemeral_seq}"
+
     def warming_names(self) -> set[str]:
         """Names with a parked or in-flight pre-warm Chrome. These are NOT in
         `_entries` yet hold a live OS lock on their profile dir, so housekeeping
@@ -358,6 +456,12 @@ class SessionRegistry:
                     row["pages"] = len(entry.session.context.pages)
                 except Exception:  # noqa: BLE001
                     row["pages"] = None
+                # 0.7.0: additive observability keys (self-heal + cap relief +
+                # lease). All optional — pre-existing consumers ignore extras.
+                row["ephemeral"] = entry.ephemeral
+                row["recovered"] = entry.recovered
+                row["last_recovered_at"] = entry.last_recovered_at
+                row["lease"] = _lease.lease_public(entry.lease_active())
             out.append(row)
         return out
 
@@ -402,42 +506,37 @@ class SessionRegistry:
                 f"session {name!r} already running — "
                 f"use `vb --session {name} stop` first"
             )
-        cap = get_max_sessions()
-        if len(self._entries) >= cap:
-            raise SessionLimitError(
-                f"VIBATCHIUM_MAX_SESSIONS={cap} reached "
-                f"({len(self._entries)} sessions running). "
-                f"Close one with `vb session close <name>` or raise the cap."
-            )
+        # 0.7.0: two independent budgets. Ephemeral one-shot sessions never
+        # compete with persistent/production sessions for slots.
+        if ephemeral:
+            ecap = get_max_ephemeral()
+            used = self.count_ephemeral()
+            if ecap <= 0 or used >= ecap:
+                raise SessionLimitError(
+                    f"VIBATCHIUM_MAX_EPHEMERAL={ecap} reached "
+                    f"({used} one-shot sessions running). These auto-close on "
+                    f"completion; wait for one to finish or raise the cap."
+                )
+        else:
+            cap = get_max_sessions()
+            used = self.count_persistent()
+            if used >= cap:
+                raise SessionLimitError(
+                    f"VIBATCHIUM_MAX_SESSIONS={cap} reached "
+                    f"({used} persistent sessions running). Close one with "
+                    f"`vb session close <name>`, raise the cap, or run one-shot "
+                    f"work via `vb explore` (off-budget ephemeral lane)."
+                )
         pdir = profile_dir if profile_dir is not None else session_dir(name)
         pdir.mkdir(parents=True, exist_ok=True)
-        pw = await self._ensure_pw()
         from . import backends as _backends
-        # Wave 6.2a: resolve persisted per-session proxy (if any). A proxy
-        # configured via `vb proxy set` lives in <profile_dir>/proxy.json.
-        from ..proxy import load_session_proxy, parse as _parse_proxy
-        proxy_cfg = None
-        proxy_url = load_session_proxy(pdir)
-        if proxy_url:
-            try:
-                proxy_cfg = _parse_proxy(proxy_url)
-            except Exception as exc:  # noqa: BLE001
-                # Wave 7.5d: exception message from proxy.parse contains the
-                # raw URL, which may include `user:pass@host` credentials.
-                # Log only the exception class — don't leak creds into logs.
-                log.warning("ignoring malformed proxy for %s: %s",
-                            name, type(exc).__name__)
-        # 0.6.11: per-session timezone/locale coherence (geo.json). Applied at
-        # launch via CDP Emulation. When a proxy moves the egress IP but no geo
-        # is set, the host timezone betrays it — surface that tell rather than
-        # leak it silently.
-        from ..geo import load_session_geo
-        geo_cfg = load_session_geo(pdir)
-        if proxy_cfg is not None and geo_cfg is None:
-            log.warning(
-                "session %s has a proxy but no geo override — the host "
-                "timezone may not match the proxy's IP (a bot tell). "
-                "Set `vb geo set --country <cc>` to cohere.", name)
+        # Per-session proxy (proxy.json) + geo (geo.json). Loaded here so the
+        # warm-claim guard can refuse a pre-warm that was launched WITHOUT these
+        # overrides; passed through to _launch_for on the cold path to avoid a
+        # second disk read. _launch_for re-loads from disk when called WITHOUT
+        # them (the relaunch/self-heal path), so a mid-life `vb proxy set` is
+        # honored on recovery.
+        proxy_cfg, geo_cfg = self._load_proxy_geo(name, pdir)
         # Wave 6.1b: prefer a pre-warmed session if one is available for this
         # name AND the requested config matches (backend, headless, no proxy,
         # no geo). Proxy- or geo-configured sessions always launch fresh because
@@ -465,9 +564,9 @@ class SessionRegistry:
                     await _backends.close(warm)
                 except Exception:  # noqa: BLE001
                     pass
-            sess = await _backends.launch(backend, pdir, headless=headless,
-                                           pw=pw, proxy=proxy_cfg,
-                                           timezone_id=(geo_cfg or {}).get("timezone_id"))
+            sess = await self._launch_for(name, profile_dir=pdir,
+                                          headless=headless, backend=backend,
+                                          proxy_cfg=proxy_cfg, geo_cfg=geo_cfg)
         sess.flags = getattr(sess, "flags", {}) if hasattr(sess, "flags") else {}
         entry = SessionEntry(name=name, profile_dir=pdir, session=sess,
                              ephemeral=ephemeral)
@@ -477,6 +576,126 @@ class SessionRegistry:
         self._entries[name] = entry
         log.info("session created name=%s profile=%s mode=%s backend=%s",
                  name, pdir, sess.mode, backend)
+        return entry
+
+    def _load_proxy_geo(self, name: str, profile_dir: Path):
+        """Resolve the persisted per-session proxy (proxy.json) + geo (geo.json)
+        for a profile dir. Returns ``(proxy_cfg, geo_cfg)`` — either may be None.
+
+        Shared by create() (warm-claim guard + cold launch) and _launch_for's
+        relaunch path so the proxy/geo resolution + the proxy-without-geo
+        coherence warning live in ONE place.
+        """
+        from ..proxy import load_session_proxy, parse as _parse_proxy
+        proxy_cfg = None
+        proxy_url = load_session_proxy(profile_dir)
+        if proxy_url:
+            try:
+                proxy_cfg = _parse_proxy(proxy_url)
+            except Exception as exc:  # noqa: BLE001
+                # Wave 7.5d: proxy.parse's message can contain `user:pass@host`
+                # — log only the exception class, never the raw URL.
+                log.warning("ignoring malformed proxy for %s: %s",
+                            name, type(exc).__name__)
+        from ..geo import load_session_geo
+        geo_cfg = load_session_geo(profile_dir)
+        if proxy_cfg is not None and geo_cfg is None:
+            log.warning(
+                "session %s has a proxy but no geo override — the host "
+                "timezone may not match the proxy's IP (a bot tell). "
+                "Set `vb geo set --country <cc>` to cohere.", name)
+        return proxy_cfg, geo_cfg
+
+    async def _launch_for(self, name: str, *, profile_dir: Path,
+                          headless: bool, backend: str,
+                          proxy_cfg=_UNSET, geo_cfg=_UNSET) -> BrowserSession:
+        """Cold-launch a Chrome for a session with NO warm-claim — the single
+        launch seam shared by create()'s cold path and relaunch().
+
+        When proxy_cfg/geo_cfg are omitted (the relaunch/self-heal path) they
+        are RE-READ from disk so a mid-life `vb proxy set` / `vb geo set` is
+        honored on recovery. create() passes its already-loaded cfgs through to
+        avoid a redundant read.
+        """
+        pw = await self._ensure_pw()
+        from . import backends as _backends
+        if proxy_cfg is _UNSET or geo_cfg is _UNSET:
+            proxy_cfg, geo_cfg = self._load_proxy_geo(name, profile_dir)
+        return await _backends.launch(
+            backend, profile_dir, headless=headless, pw=pw, proxy=proxy_cfg,
+            timezone_id=(geo_cfg or {}).get("timezone_id"))
+
+    async def relaunch(self, name: str) -> SessionEntry:
+        """Tear down a dead/crashed Chrome and cold-launch a fresh one for the
+        SAME session, preserving the SessionEntry identity (so a held entry.lock,
+        entry.flags, lease, and recovered counter survive — only entry.session
+        is swapped).
+
+        Lock-ordering contract: the CALLER must hold entry.lock; relaunch must
+        NOT take registry.mutate_lock (create()/close() take mutate_lock and
+        never entry.lock — keeping the two orderings disjoint avoids deadlock).
+        """
+        entry = self._entries.get(name)
+        if entry is None:
+            raise RuntimeError(f"cannot relaunch unknown session {name!r}")
+        old = entry.session
+        if old.mode == "attach":
+            # We don't own a foreign Chrome — tearing it down would kill the
+            # user's real browser. Degrade to a clear, actionable error.
+            raise RuntimeError(
+                f"attach session {name!r} lost its browser — re-attach with "
+                f"`vb attach` (auto-relaunch only applies to launched sessions)")
+        from . import backends as _backends
+        from .browser import ensure_nav_guard
+        # Best-effort teardown; bound it so a hung close on a zombie-locked
+        # profile dir can't wedge the session worse than the original crash.
+        try:
+            await asyncio.wait_for(_backends.close(old), timeout=10)
+        except Exception:  # noqa: BLE001 — already dead / hung
+            pass
+        sess = await asyncio.wait_for(
+            self._launch_for(name, profile_dir=entry.profile_dir,
+                             headless=old.headless,
+                             backend=entry.flags.get("backend", "patchright")),
+            timeout=30)
+        # A concurrent session_close/session_delete (mutate_lock — disjoint from
+        # the entry.lock we hold) may have popped this entry during the
+        # multi-second launch above. Adopting sess into an orphaned entry would
+        # leak an untracked Chrome that keeps the profile SingletonLock for the
+        # daemon's lifetime (close_all/shutdown only iterate _entries). Re-check
+        # ownership; if lost, tear the fresh Chrome down and surface a clean
+        # error rather than orphan it. (No cross-lock acquisition — invariant
+        # preserved.)
+        if self._entries.get(name) is not entry:
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(_backends.close(sess), timeout=10)
+            raise RuntimeError(
+                f"session {name!r} was closed during self-heal relaunch; "
+                f"re-start it")
+        sess.flags = getattr(sess, "flags", {}) if hasattr(sess, "flags") else {}
+        # CRITICAL: carry the goal domain wall forward + re-arm the guard, or a
+        # crashed goal-pinned session would resume with NO domain restriction.
+        if old.nav_allowlist:
+            sess.nav_allowlist = old.nav_allowlist
+            await ensure_nav_guard(sess)
+        entry.session = sess
+        # Drop stale handles/snapshot — their execution contexts died with the
+        # old renderer.
+        for h in list(entry.handles.values()):
+            try:
+                await h.dispose()
+            except Exception:  # noqa: BLE001
+                pass
+        entry.handles.clear()
+        entry.handle_counter = 0
+        entry.snapshot = None
+        entry.prev_snapshot = None
+        entry.recovered += 1
+        entry.last_recovered_at = time.time()
+        entry.touch()
+        log.warning("self-heal: RELAUNCHED session %s (recovered=%d) "
+                    "headless=%s backend=%s", name, entry.recovered,
+                    old.headless, entry.flags.get("backend", "patchright"))
         return entry
 
     async def attach(self, name: str, cdp_url: str) -> SessionEntry:
@@ -490,7 +709,7 @@ class SessionRegistry:
         if name in self._entries:
             raise RuntimeError(f"session {name!r} already attached")
         cap = get_max_sessions()
-        if len(self._entries) >= cap:
+        if self.count_persistent() >= cap:
             raise SessionLimitError(f"VIBATCHIUM_MAX_SESSIONS={cap} reached")
         pw = await self._ensure_pw()
         sess = await attach_session(cdp_url, pw=pw)
@@ -539,7 +758,11 @@ class SessionRegistry:
         entry.handles.clear()
         from . import backends as _backends
         try:
-            await _backends.close(entry.session)
+            # Bound the teardown so a hung close on a zombie/SIGKILLed Chrome
+            # (whose profile lock is wedged) can't park the caller's connection
+            # coroutine indefinitely — the ephemeral-explore lane awaits this in
+            # its finally, and handle_conn has no server-side timeout.
+            await asyncio.wait_for(_backends.close(entry.session), timeout=10)
         except Exception as exc:  # noqa: BLE001
             log.warning("close_session(%s) failed: %s", name, exc)
         log.info("session closed name=%s", name)

@@ -11,6 +11,7 @@ from patchright.async_api import (
     BrowserContext,
     Page,
     Playwright,
+    TimeoutError as PlaywrightTimeoutError,
     async_playwright,
 )
 
@@ -90,6 +91,35 @@ async def coherent_headless_ua(pw: Playwright) -> str | None:
         return _HEADLESS_UA_CACHE
 
 
+# ─── 0.7.0 self-heal: renderer-crash detection ───────────────────────────
+#
+# A crashed Chrome renderer reports `page.is_closed() == False` (the page
+# object is alive; only its render process died), so message-matching the
+# raised exception is the only reliable tell. We match ANCHORED driver phrases,
+# never bare tokens like 'crashed' / 'closed': the driver embeds the navigated
+# URL verbatim in `goto` errors and the JS message verbatim in `eval` errors,
+# so a URL like `?q=crashed` or a JS 'WebSocket connection closed' must NOT be
+# misread as a renderer crash — for a non-retried verb that would silently swap
+# the user's live page for a blank one (real data loss). Timeouts are never
+# crashes (and carry the URL), so they're short-circuited.
+_CRASH_SIGNATURES = frozenset({
+    "page crashed",
+    "target crashed",
+    "target closed",
+    "target page, context or browser has been closed",
+    "browser has been closed",
+    "page has been closed",
+    "navigation failed because page crashed",
+    "connection closed while reading from the driver",  # browser process died
+})
+
+
+def is_crash_error(exc: BaseException) -> bool:
+    if isinstance(exc, PlaywrightTimeoutError):
+        return False
+    return any(s in str(exc).lower() for s in _CRASH_SIGNATURES)
+
+
 @dataclass
 class BrowserSession:
     """Holds the live Patchwright handles for the daemon's lifetime.
@@ -129,6 +159,12 @@ class BrowserSession:
     # navigation are blocked, not just the explicit `go` verb.
     nav_allowlist: set | None = None
     _nav_guard_installed: bool = False
+    # 0.7.0 self-heal: guards the fire-and-forget last-page-death reviver in
+    # _wire_page_tracking so concurrent close events don't spawn N new pages.
+    # _revive_task holds the in-flight reviver so the dispatch-level recovery
+    # can await it and reuse its fresh page instead of opening a second one.
+    _reviving: bool = False
+    _revive_task: object = None
 
     @property
     def target(self):
@@ -211,6 +247,10 @@ def _wire_page_tracking(session: BrowserSession) -> None:
                 if live:
                     session.page = live[-1]
                     log.info("active page closed — fell back to %s", session.page.url)
+                else:
+                    # Last page died with no siblings — open a fresh one so the
+                    # session stays usable instead of pointing at a dead Page.
+                    _schedule_revive(session)
             except Exception:  # noqa: BLE001
                 pass
         page.on("close", on_close)
@@ -224,10 +264,68 @@ def _wire_page_tracking(session: BrowserSession) -> None:
                     live = [x for x in session.context.pages if not x.is_closed()]
                     if live:
                         session.page = live[-1]
+                    else:
+                        _schedule_revive(session)
                 except Exception:  # noqa: BLE001
                     pass
             return on_close
         p.on("close", make_handler())
+
+
+async def revive_page(session: BrowserSession, *, force_new: bool = False):
+    """Return a usable page for the session.
+
+    ``force_new=True`` (the renderer-crash path) ALWAYS opens a fresh page,
+    because a crashed renderer's page reports ``is_closed() == False`` and
+    re-selecting it would retry straight back into the crash. Otherwise (the
+    graceful last-page-close path) it prefers a surviving live page and only
+    opens a new one if none remain.
+
+    Probing ``session.context.pages`` / calling ``new_page()`` raises if the
+    context or browser itself is dead — the dispatch recovery path catches that
+    and escalates to a full ``registry.relaunch``.
+    """
+    if not force_new:
+        live = [p for p in session.context.pages if not p.is_closed()]
+        if live:
+            session.page = live[-1]
+            session.frame_ref = None
+            return session.page
+    page = await session.context.new_page()  # raises if context/browser dead
+    session.page = page
+    session.frame_ref = None
+    return page
+
+
+def _schedule_revive(session: BrowserSession) -> None:
+    """Fire-and-forget last-page-death recovery from a sync close handler.
+
+    Guarded by ``session._reviving`` so a burst of close events opens exactly
+    one replacement page. Best-effort: any failure (e.g. context already dead)
+    is logged, not raised — the next session verb will trigger the dispatch-
+    level recovery if the session is genuinely gone.
+    """
+    if session._reviving:
+        return
+    session._reviving = True
+
+    async def _do():
+        try:
+            await revive_page(session, force_new=True)
+            log.info("active page died with no live siblings — opened a fresh page")
+        except Exception as exc:  # noqa: BLE001
+            log.warning("last-page revive failed: %s", exc)
+        finally:
+            session._reviving = False
+            session._revive_task = None
+
+    try:
+        # Stash the task so the dispatch-level recovery can await it and reuse
+        # the fresh page rather than racing it to a second new_page().
+        session._revive_task = asyncio.ensure_future(_do())
+    except RuntimeError:
+        # No running loop (shouldn't happen inside the daemon) — drop the guard.
+        session._reviving = False
 
 
 async def launch_session(profile_dir: Path, headless: bool = False,

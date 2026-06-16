@@ -14,7 +14,7 @@ vb setup                    # register MCP + an auto-discoverable skill so agent
 > **Coding agents (Codex / Cursor / Claude Code):** read [`AGENTS.md`](AGENTS.md) first — it has the one-call recipes (`explore`, `research`) and the env-discovery traps to skip.
 
 ```
-vb explore https://example.com                      # one-call: text + screenshot
+vb explore https://example.com                      # one-call: text-first (screenshot only as a fallback)
 vb research --target https://example.com \          # parallel fan-out, N intents
   --intent "pricing model" --intent "customers" --intent "tech stack"
 ```

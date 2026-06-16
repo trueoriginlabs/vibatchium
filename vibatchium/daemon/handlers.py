@@ -8,15 +8,17 @@ from __future__ import annotations
 import base64
 import logging
 import os
+import time
 from pathlib import Path
 
 from . import elements
+from . import lease as _lease
 from .paths import (
     DEFAULT_SESSION_NAME, PROFILES_DIR, get_active_session_name, list_session_names,
     secure_mkdir, secure_write, session_dir, set_active_session_name,
     validate_name,
 )
-from .registry import current_session_ctx
+from .registry import current_session_ctx, get_max_ephemeral, SessionLimitError
 
 log = logging.getLogger("vibatchium.handlers")
 
@@ -88,7 +90,11 @@ def _need_session(daemon):
         raise SessionNotStarted(f"no session {name!r} — run `vb start{suffix}` first")
     # Repair a stale session.page if the previously-active page has detached
     # (popup-then-close, navigation-cancelled, target-crashed). Pick the
-    # newest live page from the context as the fallback.
+    # newest live page from the context as the fallback. NOTE (0.7.0): a true
+    # renderer CRASH (page.is_closed()==False but the render process is dead)
+    # and last-page death are handled by the dispatch-level self-heal
+    # (server._run_session_verb_with_recovery + browser.revive_page/relaunch),
+    # not here — this sync helper only does the cheap live-sibling swap.
     s = daemon.session
     try:
         if s.page.is_closed():
@@ -380,8 +386,15 @@ def register_all(daemon) -> None:
         if d.registry.has(name):
             entry = d.registry.get(name)
             # Allow `start --ephemeral` to mark an already-running session for
-            # cleanup-on-close.
-            if want_ephemeral:
+            # cleanup-on-close — but a persistent→ephemeral reclassification must
+            # respect the ephemeral budget. Otherwise the flip lowers
+            # count_persistent() without closing a Chrome, and a later persistent
+            # start would push total live Chromes past MAX_SESSIONS+MAX_EPHEMERAL.
+            if want_ephemeral and not entry.ephemeral:
+                if d.registry.count_ephemeral() >= get_max_ephemeral():
+                    raise SessionLimitError(
+                        f"VIBATCHIUM_MAX_EPHEMERAL={get_max_ephemeral()} reached "
+                        f"— cannot reclassify {name!r} as ephemeral")
                 entry.ephemeral = True
             return {"already_started": True, "mode": entry.session.mode,
                     "session": name, "profile": str(entry.profile_dir),
@@ -442,6 +455,8 @@ def register_all(daemon) -> None:
         return {
             "active": get_active_session_name(),
             "sessions": d.registry.list_all(),
+            # 0.7.0: both budgets, so `vb session list` shows headroom.
+            "budgets": d.registry.budgets(),
         }
 
     @daemon.handler("session_use")
@@ -471,6 +486,75 @@ def register_all(daemon) -> None:
     async def _session_close_all(d, args):
         n = await d.registry.close_all()
         return {"closed": n}
+
+    # ─── 0.7.0: session leases (advisory, TTL-bounded) ───────────────────
+    @daemon.handler("session_lease")
+    async def _session_lease(d, args):
+        """Acquire (or renew) an exclusive advisory lease on a running session.
+
+        While leased, session-scoped verbs and the disruptive registry verbs
+        (stop / session_close / session_delete / proxy_* / geo_*) from a caller
+        that doesn't present the token are refused with a `busy` error. Renewing
+        as the current holder keeps the same token; `steal=true` overrides a
+        lease held by someone else. The token is returned ONCE — store it and
+        present it via `--lease-token` / VIBATCHIUM_LEASE.
+        """
+        name = validate_name(args.get("name") or current_session_ctx.get(),
+                             kind="session name")
+        entry = d.registry.get(name)
+        if entry is None:
+            raise RuntimeError(
+                f"no running session {name!r} to lease — start it first")
+        active = entry.lease_active()
+        presented = _lease.holder_token_from_args(args)
+        if (active is not None
+                and not _lease._token_eq(presented, active["token"])
+                and not args.get("steal")):
+            raise RuntimeError(_lease.busy_message(active, name))
+        granted = entry.lease_grant(args.get("owner") or "anonymous",
+                                    args.get("ttl_s", _lease.LEASE_DEFAULT_TTL_S),
+                                    presented=presented)
+        log.info("lease-granted session=%s owner=%s", name, granted["owner"])
+        return {"session": name, "token": granted["token"],
+                "owner": granted["owner"], "expires_at": granted["expires_at"],
+                "expires_in_s": max(0, int(granted["expires_at"] - time.time()))}
+
+    @daemon.handler("session_release")
+    async def _session_release(d, args):
+        """Release a lease. The holder presents the token; `force=true` breaks
+        any lease without it (operator override)."""
+        name = validate_name(args.get("name") or current_session_ctx.get(),
+                             kind="session name")
+        entry = d.registry.get(name)
+        if entry is None:
+            return {"released": False, "session": name,
+                    "reason": "no such running session"}
+        active = entry.lease_active()
+        if active is None:
+            return {"released": False, "session": name, "reason": "not leased"}
+        presented = _lease.holder_token_from_args(args)
+        if (not _lease._token_eq(presented, active["token"])
+                and not args.get("force")):
+            raise RuntimeError(
+                f"session {name!r} lease is held by {active['owner']!r}; present "
+                f"the token or pass --force to break it")
+        entry.lease_clear()
+        log.info("lease-released session=%s owner=%s force=%s",
+                 name, active["owner"], bool(args.get("force")))
+        return {"released": True, "session": name, "owner": active["owner"]}
+
+    @daemon.handler("session_lease_info")
+    async def _session_lease_info(d, args):
+        """Report the lease state for a session (never includes the token)."""
+        name = validate_name(args.get("name") or current_session_ctx.get(),
+                             kind="session name")
+        entry = d.registry.get(name)
+        if entry is None:
+            return {"session": name, "running": False,
+                    "leased": False, "lease": None}
+        pub = _lease.lease_public(entry.lease_active())
+        return {"session": name, "running": True,
+                "leased": pub is not None, "lease": pub}
 
     # ─── Wave 6.3a: credential vault + TOTP ────────────────────────────
 
@@ -1102,6 +1186,12 @@ def register_all(daemon) -> None:
             "pid": os.getpid(),
             "version": __version__,
             "running_sessions": d.registry.list_running(),
+            # 0.7.0 self-heal: how many times THIS session auto-recovered from a
+            # Chrome renderer crash, and when (epoch seconds, None if never).
+            "recovered": entry.recovered if entry else 0,
+            "last_recovered_at": entry.last_recovered_at if entry else None,
+            # 0.7.0 cap relief: persistent + ephemeral budget usage.
+            "budgets": d.registry.budgets(),
         }
 
     # ─── Wave 7.7.5: high-level "just works" verbs ───────────────────────
@@ -1111,27 +1201,33 @@ def register_all(daemon) -> None:
         """One-call "go look at this URL and tell me what's there."
 
         Does: verify_url (DNS pre-check) → auto-start session if needed
-        → go → extract text + screenshot → optionally close session.
-        Closes the most common "I just want to look at a page" workflow
-        into a single MCP call instead of 4-6.
+        → go → extract text → optionally a fallback screenshot → optionally
+        close session. Closes the most common "I just want to look at a page"
+        workflow into a single MCP call instead of 4-6.
+
+        TEXT-FIRST: the page text is the payload. A screenshot is captured only
+        as a FALLBACK when the text path can't deliver — never by default — so
+        the common case stays fast and doesn't flood the caller with base64.
 
         Args:
-          url           (str)  target URL — required
-          intent        (str)  optional natural-language description of
-                               what to look for (not used in v0, future
-                               hook for `act` integration)
-          keep_open     (bool) leave session open for follow-up calls
-                               (default: false — auto-close after extract)
-          screenshot    (bool) include a base64 PNG of the landing page
-                               (default: true)
-          full_page     (bool) full-page screenshot vs viewport
-                               (default: true)
-          skip_verify   (bool) skip the verify_url DNS pre-check
-                               (default: false; turn on for trusted URLs)
+          url            (str)  target URL — required
+          intent         (str)  optional natural-language description of
+                                what to look for (not used in v0, future
+                                hook for `act` integration)
+          keep_open      (bool) leave session open for follow-up calls
+                                (default: false — auto-close after extract)
+          screenshot     (str)  "auto" (default) | "always"/true | "never"/false.
+                                auto = capture ONLY when the page yields no
+                                usable text (canvas/image/blank SPA/render fail).
+          full_page      (bool) full-page screenshot vs viewport, when one is
+                                captured (default: false — viewport is cheaper)
+          min_text_chars (int)  the auto-fallback threshold (default: 64)
+          skip_verify    (bool) skip the verify_url DNS pre-check
+                                (default: false; turn on for trusted URLs)
 
         Returns:
-          {url, title, status, text, walled?, screenshot_b64?, session,
-           closed (bool), elapsed_ms}
+          {url, title, status, text, walled?, screenshot_b64?, screenshot_reason?,
+           session, closed (bool), elapsed_ms}
         """
         import time as _time
         t0 = _time.time()
@@ -1139,8 +1235,24 @@ def register_all(daemon) -> None:
         if not isinstance(url, str) or not url:
             raise ValueError("explore requires `url`")
         keep_open = bool(args.get("keep_open", False))
-        want_screenshot = bool(args.get("screenshot", True))
-        full_page = bool(args.get("full_page", True))
+        # 0.7.0: text-first. A screenshot is a FALLBACK, not the default — the
+        # common "look at this page" call returns text only (fast + cheap, no
+        # base64 flooding the agent's context).
+        #   screenshot: "auto" (default) | "always"/true | "never"/false
+        #     auto   → capture ONLY when the page yields no usable text
+        #              (canvas / image / blank SPA / render failure). Reuses the
+        #              same empty-render signal `go` already computes.
+        #     always → always capture (the pre-0.7.0 behavior; opt-in now).
+        #     never  → never capture, even as a fallback.
+        _shot = args.get("screenshot", "auto")
+        if isinstance(_shot, bool):
+            shot_mode = "always" if _shot else "never"
+        else:
+            shot_mode = str(_shot).strip().lower()
+            if shot_mode not in ("auto", "always", "never"):
+                shot_mode = "auto"
+        full_page = bool(args.get("full_page", False))   # viewport = cheaper
+        min_text_chars = int(args.get("min_text_chars", 64))
         skip_verify = bool(args.get("skip_verify", False))
         # DNS pre-check unless skipped — saves 30s on dead-DNS guesses
         if not skip_verify:
@@ -1151,43 +1263,129 @@ def register_all(daemon) -> None:
                     "error": v.get("error"),
                     "elapsed_ms": int((_time.time() - t0) * 1000),
                 }
-        # Navigate (auto-start happens inside _go thanks to 7.7.5)
-        go_res = await d._handlers["go"](d, {"url": url})
-        # Extract text
-        text_res = await d._handlers["text"](d, {})
-        text = text_res.get("text", "") if isinstance(text_res, dict) else str(text_res)
-        out = {
-            "url": go_res.get("url", url),
-            "title": go_res.get("title"),
-            "status": go_res.get("status"),
-            "text": text,
-            "session": current_session_ctx.get(),
-        }
-        if go_res.get("walled"):
-            out["walled"] = go_res["walled"]
-            out["advice"] = go_res.get("advice")
-        # Skills surfaced during the inner `go` (opt-in via VIBATCHIUM_SKILLS).
-        if go_res.get("skills"):
-            out["skills"] = go_res["skills"]
-        # Screenshot
-        if want_screenshot:
-            try:
-                shot = await d._handlers["screenshot"](
-                    d, {"full_page": full_page})
-                if isinstance(shot, dict) and shot.get("png_b64"):
-                    out["screenshot_b64"] = shot["png_b64"]
-            except Exception as exc:  # noqa: BLE001
-                out["screenshot_error"] = f"{type(exc).__name__}: {exc}"
-        # Optional auto-close
-        out["closed"] = False
-        if not keep_open:
-            try:
-                await d._handlers["stop"](d, {})
-                out["closed"] = True
-            except Exception:  # noqa: BLE001
-                pass
-        out["elapsed_ms"] = int((_time.time() - t0) * 1000)
-        return out
+        # 0.7.0: the inner go → text → screenshot sequence, run under whatever
+        # session the contextvar currently names.
+        async def _run_body():
+            go_res = await d._handlers["go"](d, {"url": url})
+            text_res = await d._handlers["text"](d, {})
+            text = (text_res.get("text", "") if isinstance(text_res, dict)
+                    else str(text_res))
+            body = {
+                "url": go_res.get("url", url),
+                "title": go_res.get("title"),
+                "status": go_res.get("status"),
+                "text": text,
+                "session": current_session_ctx.get(),
+            }
+            if go_res.get("walled"):
+                body["walled"] = go_res["walled"]
+                body["advice"] = go_res.get("advice")
+            # Skills surfaced during the inner `go` (opt-in via VIBATCHIUM_SKILLS).
+            if go_res.get("skills"):
+                body["skills"] = go_res["skills"]
+            # Decide whether the text path "couldn't" deliver — fall back to a
+            # screenshot only when there's no usable text to read, OR the page is
+            # a challenge/login wall (where the pixels are the whole point and the
+            # boilerplate copy can exceed the text threshold).
+            text_len = len(text.strip())
+            if shot_mode == "always":
+                shot_reason = "requested"
+            elif shot_mode == "auto" and text_len < min_text_chars:
+                shot_reason = (f"text-fallback: page yielded {text_len} chars "
+                               f"(< {min_text_chars})")
+            elif shot_mode == "auto" and go_res.get("walled"):
+                shot_reason = "walled-fallback: page is challenge/login-walled"
+            else:
+                shot_reason = None
+            if shot_reason:
+                try:
+                    shot = await d._handlers["screenshot"](
+                        d, {"full_page": full_page})
+                    if isinstance(shot, dict) and shot.get("png_b64"):
+                        body["screenshot_b64"] = shot["png_b64"]
+                        body["screenshot_reason"] = shot_reason
+                except Exception as exc:  # noqa: BLE001
+                    body["screenshot_error"] = f"{type(exc).__name__}: {exc}"
+            return body
+
+        # BACKWARD-COMPAT: an explicit `--session` pins the legacy path verbatim
+        # — explore runs on, and (unless keep_open) closes, the NAMED session,
+        # exactly what the existing explore tests assert. Only the no-pin case
+        # gets the off-budget ephemeral lane.
+        explicit = current_session_ctx.get() != DEFAULT_SESSION_NAME
+        if explicit:
+            # explore is UNLOCKED, so dispatch's lease gate never ran. Enforce it
+            # here on the explicit-session path: a non-holder must not navigate or
+            # tear down a leased session via explore. (The no-pin lane below mints
+            # its own never-leased session, so it needs no gate.)
+            _pin = current_session_ctx.get()
+            _pe = d.registry.get(_pin)
+            if _pe is not None:
+                _active = _pe.lease_active()
+                if _active is not None:
+                    _ok, _reason = _lease.check_access(
+                        _active, _lease.holder_token_from_args(args), _pin)
+                    if not _ok:
+                        raise RuntimeError(_reason)
+            out = await _run_body()
+            out["closed"] = False
+            if not keep_open:
+                try:
+                    await d._handlers["stop"](d, {})  # keys off the contextvar
+                    out["closed"] = True
+                except Exception:  # noqa: BLE001
+                    pass
+            out["elapsed_ms"] = int((_time.time() - t0) * 1000)
+            return out
+
+        # OFF-BUDGET LANE (0.7.0): no pinned session → mint a transient,
+        # uniquely-named ephemeral session so one-shot exploration never
+        # competes with persistent/production sessions for a slot and never
+        # leaves state on `default`.
+        minted = d.registry.mint_ephemeral_name()
+        tok = current_session_ctx.set(minted)
+        try:
+            # EXPLICIT ephemeral start — `go`'s auto-start passes NO ephemeral
+            # flag, so it would create a PERSISTENT, on-budget, never-deleted
+            # session. Wrap the cap-check→insert in mutate_lock: explore is
+            # UNLOCKED and calls start() in-process (bypassing dispatch's
+            # mutate_lock), so without this N concurrent no-pin explores would
+            # all pass the ephemeral cap check and overshoot VIBATCHIUM_MAX_EPHEMERAL.
+            async with d.registry.mutate_lock:
+                await d._handlers["start"](d, {"ephemeral": True,
+                                               "headless": resolve_headless({})})
+            out = await _run_body()
+            out["lane"] = "ephemeral"
+            # The minted session is unaddressable after this call (the contextvar
+            # resets on return and the `_ex-` name is rejected by validate_name),
+            # so keep_open is meaningless here — ALWAYS reclaim the off-budget
+            # slot + profile, or a keep_open=True caller would leak the lane.
+            await d.registry.close(minted)
+            out["closed"] = True
+            if keep_open:
+                out["keep_open_ignored"] = True
+            out["elapsed_ms"] = int((_time.time() - t0) * 1000)
+            return out
+        finally:
+            # Free the slot + profile even if start/go/text raised mid-flight.
+            if d.registry.has(minted):
+                # entry was inserted — close() pops it + rmtree's the ephemeral
+                # profile (idempotent: has()==False after the normal-path close).
+                try:
+                    await d.registry.close(minted)
+                except Exception:  # noqa: BLE001
+                    pass
+            else:
+                # start() may have mkdir'd the `_ex-` profile then failed to
+                # launch (entry never inserted) — best-effort remove the orphaned
+                # dir (it's unreclaimable via validate_name). delete_profile_dir
+                # refuses 'default'/running names and no-ops if absent; `minted`
+                # is unique-per-call so it can never hit a real user profile.
+                try:
+                    await d.registry.delete_profile_dir(minted)
+                except Exception:  # noqa: BLE001
+                    pass
+            current_session_ctx.reset(tok)
 
     @daemon.handler("shutdown")
     async def _shutdown(d, args):

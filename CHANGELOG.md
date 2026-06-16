@@ -4,6 +4,76 @@ All notable changes to vibatchium are documented here. Versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Until 1.0,
 minor bumps may include breaking changes; we'll always call them out here.
 
+## [0.7.0] — 2026-06-16
+
+A coordinated reliability pass: the daemon now **self-heals** a crashed Chrome,
+**leases** stop concurrent clients from clobbering a shared page, and an
+**off-budget ephemeral lane** keeps one-shot `explore` from competing with
+pinned production sessions. Motivated by a real incident where an ad-hoc scrape
+collided with a cron-driven bot on the shared daemon.
+
+### Added — self-healing renderer (Chrome crash auto-recovery)
+- Transparent recovery from Chrome `Page crashed` / `Target crashed` and
+  last-page death. The session dispatch path now revives a fresh page when only
+  the renderer died (the crashed page reports `is_closed()==False`, so we always
+  open a clean `context.new_page()` rather than retry into the crash) or
+  relaunches the dead context — reusing the **same** profile/headless/backend and
+  **re-reading** `proxy.json` + `geo.json` from disk, with the goal nav-allowlist
+  carried forward and the nav-guard re-armed.
+- Read/navigation verbs auto-retry once; **mutating** verbs (`click`/`fill`/`type`/
+  `press`/`upload`/`eval` and all plugin verbs) recover the session but return
+  `{ok:false, recovered:true}` so a side-effect is never double-applied.
+- Per-session `recovered` count + `last_recovered_at` surfaced via `vb status`
+  and `vb session list --json`. Master kill-switch `VIBATCHIUM_SELF_HEAL=0`
+  re-raises the original crash (loud-fail). Attach-mode sessions surface a
+  `re-attach` hint instead of tearing down a foreign Chrome.
+
+### Added — exclusive session lease (opt-in, TTL-bounded coordination)
+- New `vb session lease NAME [--ttl 60] [--owner X] [--steal]`,
+  `vb session release NAME [--token T] [--force]`, `vb session lease-info NAME`.
+  A non-holder gets a clean **busy** error instead of silently clobbering a
+  shared Chrome page. Holders re-present the token via `--lease-token` /
+  `VIBATCHIUM_LEASE` (read **client-side only** — never daemon-side).
+- Advisory + lazy-TTL (default 60s, max 3600s self-heals a forgotten lease); the
+  token is never logged or echoed in status/list/info. Enforced at the dispatch
+  boundary **before** the per-session lock (a denied caller returns instantly,
+  never blocks behind the holder). `session_close_all` / `shutdown` / `clean`
+  are deliberately **not** gated. Also exposed over MCP (token threaded per-call,
+  never via env).
+
+### Added — cap relief: off-budget ephemeral one-shot lane
+- New `VIBATCHIUM_MAX_EPHEMERAL` (default 2, min 0 to hard-disable). `vb explore`
+  with **no** pinned `--session` now runs on a transient off-budget ephemeral
+  session (`_ex-<pid>-<seq>`), so one-shot lookups never compete with
+  persistent/production sessions even at full `VIBATCHIUM_MAX_SESSIONS`.
+  `vb start --ephemeral` is off-budget too. `vb status` / `vb session list`
+  report both budgets; `SessionLimitError` now names which budget is full.
+- **Behavior change:** `vb explore URL` without `--session` no longer touches
+  `default` — read `out['session']` (the minted name) and pass `--keep-open` if
+  you need the page to persist. `vb explore` **with** an explicit `--session` is
+  unchanged.
+
+### Changed — `explore` is text-first; screenshots are a fallback, not a default
+- **The MCP `explore` tool no longer screenshots by default.** Agents reported
+  that every `explore` returned a full-page base64 PNG inlined as text —
+  slow to capture and tens of thousands of useless tokens per call (it wasn't
+  even a viewable image block). `explore` now extracts **text** and captures a
+  screenshot **only as a fallback** when the extracted text is shorter than
+  `min_text_chars` (default 64 — canvas/image/blank SPA/render failure) or the
+  page is challenge/login walled. `screenshot` is now `"auto"` (default) |
+  `"always"` | `"never"` (booleans still accepted on every surface); the MCP
+  `explore` tool exposes both `min_text_chars` and `screenshot` so the threshold
+  is tunable per call; `full_page` now defaults to `false` (viewport is cheaper).
+- **Screenshots come back as a viewable MCP image block, never base64 text.**
+  When `explore` (or the standalone `screenshot` verb) does return a PNG, it's
+  an `ImageContent` block — actually viewable and ~1–2K vision tokens instead of
+  100K+ of unviewable base64. The JSON text block (with a `screenshot_reason`)
+  stays at index 0, so JSON-parsing callers are unaffected.
+- **CLI default is unchanged** (`vb explore` still captures a screenshot, spilled
+  to a cache file — it never burned tokens, and it deliberately keeps **full-page**
+  capture since file output has no token cost; the MCP/handler default is viewport).
+  New `vb explore --auto-screenshot` opts the CLI into the text-first fallback.
+
 ## [0.6.11] — 2026-06-10
 
 ### Added — timezone coherence (`vb geo`)

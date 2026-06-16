@@ -18,7 +18,7 @@ After `setup`, any agent session in any cwd sees vibatchium as a registered MCP 
 # In this repo the binary is .venv/bin/vb. With pipx install it's on $PATH.
 VB=/home/mono/projects/vibatchium/.venv/bin/vb    # or just `vibatchium`
 
-$VB explore https://example.com                       # one-call: text + screenshot, auto-closes
+$VB explore https://example.com                       # one-call: text-first, auto-closes (screenshot only as a fallback)
 $VB research --target https://example.com \           # parallel fan-out
   --intent "..." --intent "..." --output-dir ./out
 $VB verify_url --url https://maybe-dead.example       # ~50ms DNS pre-check
@@ -83,7 +83,7 @@ what you know about the element:
 
 ## Output
 
-- `explore` → JSON to stdout `{url, title, text, screenshot_path, status, elapsed_ms, closed}`. Screenshot written to `~/.cache/vibatchium/explores/` by default (no base64 in stdout). `-o <dir>` writes to a chosen dir + markdown summary. `--inline-screenshot` returns base64 inline (the old default).
+- `explore` → JSON to stdout `{url, title, text, screenshot_path?, screenshot_reason?, status, elapsed_ms, closed}`. **Text-first.** The MCP tool captures a screenshot *only* as a fallback when the page yields no usable text or is walled (`screenshot` = `auto`|`always`|`never`, `min_text_chars` tunes the auto threshold); when it does, the PNG comes back as a viewable image block, not base64. The CLI still screenshots by default, written to `~/.cache/vibatchium/explores/` (no base64 in stdout); `--auto-screenshot` makes the CLI text-first too, `-o <dir>` writes a chosen dir + markdown summary, `--inline-screenshot` returns base64 inline.
 - `research` → per-thread markdown + landing screenshots + `index.md` in `--output-dir`.
 - `screenshot` → PNG via `--path`. `text`/`html`/`content` → stdout.
 
@@ -106,12 +106,52 @@ work, reuse a *bounded* pool of names (e.g. `work-0..3`) or pass
 (never touches `default`; auto-disabled for goal-owned sessions). Run
 `$VB clean` periodically to reclaim what accumulated.
 
+## Reliability (0.7.0) — self-heal, leases, off-budget explore
+
+**Self-healing renderer.** A Chrome `Page crashed` / `Target crashed` no longer
+wedges a session until a manual restart. The daemon revives a fresh page (or
+relaunches the dead context, reusing the same profile/proxy/geo and re-arming
+any goal nav-allowlist) and retries the verb once. Read/navigation verbs retry
+transparently; **mutating** verbs (`click`/`fill`/`type`/`press`/`upload`/`eval`,
+all plugin verbs) recover the session but return `{ok:false, recovered:true}` so
+a side-effect is never double-applied — re-issue the command. `vb status` and
+`vb session list --json` carry a per-session `recovered` count. Disable with
+`VIBATCHIUM_SELF_HEAL=0` (crash fails loudly instead).
+
+**Session leases** coordinate concurrent clients sharing one session name. A
+holder takes an advisory, TTL-bounded lease; non-holders get a clean `busy`
+error instead of silently clobbering the page:
+
+```bash
+$VB session lease work --ttl 120 --owner my-scrape   # prints a token
+$VB --lease-token <token> --session work go https://…
+$VB session release work --token <token>             # or --force to break it
+```
+
+The lease is advisory (it gates session verbs + the disruptive registry verbs —
+stop/close/delete/proxy/geo — but NOT `session_close_all`/`shutdown`/`clean`).
+The token is resolved client-side (`--lease-token` / `VIBATCHIUM_LEASE`) and
+never read daemon-side. Over MCP it's threaded per-call as the `lease` arg.
+
+**Off-budget `explore`.** `vb explore URL` *without* `--session` now runs on a
+throwaway ephemeral session (`_ex-<pid>-<seq>`) counted against a **separate**
+`VIBATCHIUM_MAX_EPHEMERAL` budget — so one-shot lookups never compete with your
+pinned/production sessions for a `VIBATCHIUM_MAX_SESSIONS` slot, and never touch
+`default`. On this no-`--session` lane `--keep-open` is **ignored** (response carries
+`keep_open_ignored: true`): the minted `_ex-` name is unaddressable and the slot is
+always reclaimed on return. To keep a page open for follow-up calls, pin an explicit
+`--session` — `explore` *with* a `--session` is unchanged. Worst-case live
+Chromes = `MAX_SESSIONS + MAX_EPHEMERAL` (+ any warms).
+
 ## Env overrides
 
 ```bash
 VIBATCHIUM_DEFAULT_HEADLESS=1   # force headless even at an interactive TTY
 VIBATCHIUM_DEFAULT_HEADED=1     # opt a whole daemon back into headed windows
-VIBATCHIUM_MAX_SESSIONS=8       # raise 4-session default for big fan-outs
+VIBATCHIUM_MAX_SESSIONS=8       # raise 4-session persistent default for big fan-outs
+VIBATCHIUM_MAX_EPHEMERAL=2      # off-budget one-shot lane cap (0 disables explore's lane)
+VIBATCHIUM_SELF_HEAL=0          # disable Chrome crash auto-recovery (fail loudly)
+VIBATCHIUM_LEASE=<token>        # client-side lease token presented on every call
 VIBATCHIUM_LOG_VERBS=1          # per-verb DEBUG audit trail
 VIBATCHIUM_DEFAULT_SAFETY=wrap  # auto-flag prompt-injection in scraped content
 VIBATCHIUM_SKILLS=1             # surface per-host skill notes on go/explore (opt-in)

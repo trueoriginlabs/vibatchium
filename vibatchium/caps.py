@@ -17,6 +17,7 @@ CAP_BUCKETS: dict[str, set[str]] = {
                  "explore"},
     "session":  {"session_new", "session_list", "session_use", "session_switch",
                  "session_close", "session_close_all", "session_delete",
+                 "session_lease", "session_release", "session_lease_info",
                  "profile_list", "profile_new", "profile_use", "profile_delete",
                  "clean"},
     "nav":      {"go", "back", "forward", "reload", "url", "title",

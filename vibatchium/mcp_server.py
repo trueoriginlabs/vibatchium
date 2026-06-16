@@ -86,13 +86,22 @@ TOOLS: list[tuple[str, str, dict, str, Any]] = [
       "required": ["on"]},
      "set_log_verbs", None),
     ("explore",
-     "ONE-CALL 'look at this URL'. Does verify_url → auto-start session if needed (headless) → go → extract text + screenshot → close session. Replaces the start/go/text/stop sequence for the 80% case of 'just show me what's on this page'. Use this instead of separate start/go/text calls unless you specifically need multi-step interaction in one session.",
+     "ONE-CALL 'look at this URL', TEXT-FIRST. Does verify_url → auto-start session if needed (headless) → go → extract text. It does NOT screenshot by default: read and navigate with the returned text/selectors, and a screenshot is captured only as a FALLBACK when the page yields no usable text (canvas/image/blank SPA). This is the 80% case of 'just show me what's on this page' — use it instead of separate start/go/text calls unless you need multi-step interaction. Pass screenshot='always' to force a screenshot, 'never' to suppress even the fallback; when one is captured it comes back as a viewable image, not base64 text. Without an explicit session it runs on an OFF-BUDGET transient ephemeral session (0.7.0) — it never competes with persistent sessions for a slot and is auto-deleted afterward, so it won't touch your 'default' session.",
      {"type": "object",
       "properties": {"url": _str("Target URL — required."),
                      "intent": _str("Optional natural-language description (reserved for future)."),
                      "keep_open": _bool("Leave session open for follow-up calls.", False),
-                     "screenshot": _bool("Include a base64 PNG of the landing page.", True),
-                     "full_page": _bool("Full-page vs viewport screenshot.", True),
+                     "screenshot": {"anyOf": [{"type": "string", "enum": ["auto", "always", "never"]},
+                                              {"type": "boolean"}],
+                                    "default": "auto",
+                                    "description": "Screenshot policy. 'auto' (default): capture "
+                                    "ONLY if the page returns no usable text (or is challenge/login "
+                                    "walled). 'always' (or true): force a screenshot. 'never' (or "
+                                    "false): suppress even the fallback. When captured it is returned "
+                                    "as a viewable image block, not base64 text."},
+                     "full_page": _bool("Full-page vs viewport screenshot, when one is captured.", False),
+                     "min_text_chars": _int("Auto-mode fallback threshold: capture a screenshot if "
+                                            "the page's extracted text is shorter than this.", 64),
                      "skip_verify": _bool("Skip DNS pre-check (trusted URLs only).", False)},
       "required": ["url"]},
      "explore", None),
@@ -219,7 +228,7 @@ TOOLS: list[tuple[str, str, dict, str, Any]] = [
                      "state": _str("visible|hidden|enabled|disabled|checked|editable")},
       "required": ["target", "state"]},
      "is", None),
-    ("screenshot", "Capture a screenshot. Returns base64 PNG if no path given.",
+    ("screenshot", "Capture a screenshot. With no path it returns a viewable image (not base64 text); with a path it saves the PNG and returns the path. Prefer reading the page text/selectors first — only screenshot when you actually need the pixels.",
      {"type": "object",
       "properties": {"path": _str("Output file path."),
                      "full_page": _bool("Full page (not just viewport).")}},
@@ -434,6 +443,30 @@ TOOLS: list[tuple[str, str, dict, str, Any]] = [
      {"type": "object", "properties": {"name": _str("Session name.")},
       "required": ["name"]},
      "session_delete", None),
+    # ─── 0.7.0: session leases ──────────────────────────────────────────
+    ("session_lease",
+     "Acquire/renew an exclusive advisory lease on a running session (0.7.0). "
+     "Returns a token; present it as the `lease` arg on subsequent calls so "
+     "other clients get a 'busy' error instead of clobbering the shared page.",
+     {"type": "object", "properties": {
+         "name": _str("Session name (default: current session)."),
+         "ttl_s": _int("Lease seconds (default 60, max 3600).", 60),
+         "owner": _str("Holder label shown in the busy message."),
+         "steal": _bool("Take over a lease held by someone else.", False),
+     }},
+     "session_lease", None),
+    ("session_release",
+     "Release a session lease — present the token via the `lease` arg, or "
+     "force=true to break it (operator override).",
+     {"type": "object", "properties": {
+         "name": _str("Session name (default: current session)."),
+         "force": _bool("Break the lease without the token.", False),
+     }},
+     "session_release", None),
+    ("session_lease_info",
+     "Report the lease state for a session (never returns the token).",
+     {"type": "object", "properties": {"name": _str("Session name.")}},
+     "session_lease_info", None),
     ("clean",
      "Housekeeping — reclaim disk from stale profile dirs, leftover Chrome lock "
      "files, regenerable caches, and the daemon log. DRY-RUN by default; pass "
@@ -901,6 +934,10 @@ def _augment_schema_with_session(schema: dict) -> dict:
     props.setdefault("session", _str(
         "Optional session name to target (omit for the active session)."
     ))
+    props.setdefault("lease", _str(
+        "Optional lease token to present if the target session is leased "
+        "(0.7.0). Threaded per-call; never read from the server's env."
+    ))
     new["properties"] = props
     return new
 
@@ -1046,17 +1083,47 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.Content]
     # rather than threaded through args (the daemon's dispatcher consumes
     # `_session` from args, but the client.call wrapper handles that translation).
     session = args.pop("session", None)
+    # 0.7.0: thread the lease token per-call (NOT via env — this MCP process is
+    # shared, so the daemon must never treat any process env as a master token).
+    lease = args.pop("lease", None)
 
     # Auto-spawn the daemon if it isn't running.
     if not daemon_is_running():
         spawn_daemon()
 
     try:
-        result = await asyncio.to_thread(daemon_call, cmd, args, session=session)
+        result = await asyncio.to_thread(daemon_call, cmd, args,
+                                         session=session, lease=lease)
     except Exception as exc:  # noqa: BLE001
         return _err(f"error: {type(exc).__name__}: {exc}")
 
-    return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+    return _result_to_content(result)
+
+
+def _result_to_content(result: Any) -> list[types.Content]:
+    """Serialize a daemon result for MCP.
+
+    A base64 PNG (``explore``'s ``screenshot_b64`` or the standalone
+    ``screenshot`` verb's ``png_b64``) is returned as a VIEWABLE image block —
+    never inlined as base64 *text*, which would flood the model's context with
+    tens of thousands of useless, unviewable tokens. The text block (with any
+    ``screenshot_reason``) stays at index 0 so JSON-parsing callers are
+    unaffected; the image, if any, is appended after it.
+    """
+    img_b64 = None
+    if isinstance(result, dict):
+        for key in ("screenshot_b64", "png_b64"):
+            val = result.get(key)
+            if isinstance(val, str) and val:
+                img_b64 = result.pop(key)
+                break
+    blocks: list[types.Content] = [
+        types.TextContent(type="text", text=json.dumps(result, indent=2))
+    ]
+    if img_b64:
+        blocks.append(types.ImageContent(
+            type="image", data=img_b64, mimeType="image/png"))
+    return blocks
 
 
 async def main() -> None:

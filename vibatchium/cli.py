@@ -157,9 +157,14 @@ class VibatchiumGroup(click.Group):
 @click.option("--session", "session_name", default=None,
               help="Target session name (also via VIBATCHIUM_SESSION env). "
                    "Defaults to the active session on disk → 'default'.")
+@click.option("--lease-token", "lease_token", default=None,
+              help="Lease token to present on every call (also via "
+                   "VIBATCHIUM_LEASE env). Required to operate a session you "
+                   "leased from another shell; see `vb session lease`.")
 @click.version_option(__version__, "--version")
 @click.pass_context
-def cli(ctx: click.Context, json_mode: bool, session_name: str | None) -> None:
+def cli(ctx: click.Context, json_mode: bool, session_name: str | None,
+        lease_token: str | None) -> None:
     """Vibatchium — agentic browser CLI (Patchwright stealth + Vibium ergonomics).
 
     Multi-session: `vb --session work click @e3` addresses the 'work'
@@ -175,6 +180,11 @@ def cli(ctx: click.Context, json_mode: bool, session_name: str | None) -> None:
     if session_name:
         _os.environ["VIBATCHIUM_SESSION"] = session_name
     ctx.obj["session"] = session_name or _os.environ.get("VIBATCHIUM_SESSION")
+    # 0.7.0: a lease token presented on the command line is exported so
+    # client.call() picks it up (client-side only — the daemon never reads it).
+    if lease_token:
+        _os.environ["VIBATCHIUM_LEASE"] = lease_token
+    ctx.obj["lease_token"] = lease_token or _os.environ.get("VIBATCHIUM_LEASE")
 
 
 # ─── lifecycle ─────────────────────────────────────────────────────────────
@@ -355,7 +365,19 @@ def session_list_cmd(ctx):
         marker = "*" if s["name"] == res["active"] else " "
         running = "[running]" if s["running"] else "[stopped]"
         url = f" url={s.get('url')}" if s.get("url") else ""
-        click.echo(f"{marker} {s['name']:24s} {running}{url}")
+        tags = ""
+        if s.get("ephemeral"):
+            tags += " [ephemeral]"
+        if s.get("lease"):
+            tags += f" [leased by {s['lease'].get('owner')}]"
+        if s.get("recovered"):
+            tags += f" [recovered {s['recovered']}x]"
+        click.echo(f"{marker} {s['name']:24s} {running}{url}{tags}")
+    b = res.get("budgets")
+    if b:
+        click.echo(
+            f"  budgets: persistent {b['persistent']['used']}/{b['persistent']['cap']}"
+            f"  ephemeral {b['ephemeral']['used']}/{b['ephemeral']['cap']}")
 
 
 @session.command("use")
@@ -396,6 +418,62 @@ def session_close(ctx, name, close_all):
 def session_delete(ctx, name):
     """Delete the on-disk profile dir (cannot delete active or 'default')."""
     _emit(call("session_delete", {"name": name}), ctx.obj["json"])
+
+
+@session.command("lease")
+@click.argument("name", required=False)
+@click.option("--ttl", "ttl_s", type=int, default=60,
+              help="Lease duration in seconds (default 60, max 3600).")
+@click.option("--owner", default=None, help="Who is holding it (for the busy message).")
+@click.option("--steal", is_flag=True, help="Take over a lease held by someone else.")
+@click.pass_context
+def session_lease(ctx, name, ttl_s, owner, steal):
+    """Acquire/renew an exclusive lease on a session; prints the token.
+
+    While leased, other shells must present the token (--lease-token / the
+    VIBATCHIUM_LEASE env) to operate the session, or they get a clean 'busy'
+    error. Renew as the holder to extend; the token stays the same.
+    """
+    name = name or ctx.obj.get("session")
+    args = {"ttl_s": ttl_s, "steal": steal}
+    if name:
+        args["name"] = name
+    if owner:
+        args["owner"] = owner
+    res = call("session_lease", args)
+    if not ctx.obj["json"]:
+        click.echo(f"leased {res['session']} for {res['expires_in_s']}s "
+                   f"(owner={res['owner']})")
+        click.echo(f"token: {res['token']}")
+        click.echo(f"  present it with:  vb --lease-token {res['token']} "
+                   f"--session {res['session']} <verb>")
+        return
+    _emit(res, True)
+
+
+@session.command("release")
+@click.argument("name", required=False)
+@click.option("--token", default=None, help="The lease token (or rely on VIBATCHIUM_LEASE).")
+@click.option("--force", is_flag=True, help="Break the lease without the token (operator override).")
+@click.pass_context
+def session_release(ctx, name, token, force):
+    """Release a session lease (holder presents the token; --force breaks it)."""
+    name = name or ctx.obj.get("session")
+    args = {"force": force}
+    if name:
+        args["name"] = name
+    res = call("session_release", args, lease=token)
+    _emit(res, ctx.obj["json"])
+
+
+@session.command("lease-info")
+@click.argument("name", required=False)
+@click.pass_context
+def session_lease_info(ctx, name):
+    """Show the lease state for a session (never prints the token)."""
+    name = name or ctx.obj.get("session")
+    res = call("session_lease_info", {"name": name} if name else {})
+    _emit(res, ctx.obj["json"])
 
 
 def _parse_age_seconds(text: str) -> float:
@@ -679,10 +757,15 @@ def stop(ctx):
               help="Optional natural-language description (reserved for future).")
 @click.option("--keep-open", is_flag=True,
               help="Leave session running after extracting; default is auto-close.")
-@click.option("--no-screenshot", "screenshot", flag_value=False, default=True,
-              help="Skip the base64 screenshot to save time and stdout bytes.")
+@click.option("--screenshot/--no-screenshot", "screenshot_on", default=True,
+              help="Capture a landing-page screenshot (default: on; written to a "
+                   "cache file, not inlined into stdout). --no-screenshot for text only.")
+@click.option("--auto-screenshot", "auto_screenshot", is_flag=True,
+              help="Text-first: screenshot only as a fallback when the page yields no "
+                   "usable text. This is the MCP/agent default. Takes precedence over "
+                   "--screenshot/--no-screenshot if both are given.")
 @click.option("--no-full-page", "full_page", flag_value=False, default=True,
-              help="Viewport-only screenshot instead of full-page.")
+              help="Viewport-only screenshot instead of full-page (when one is taken).")
 @click.option("--skip-verify", is_flag=True,
               help="Skip the DNS pre-check (trusted URLs only).")
 @click.option("-o", "--output-dir", default=None,
@@ -693,11 +776,13 @@ def stop(ctx):
                    "and returns a `screenshot_path` instead — avoids flooding agent "
                    "stdout with thousands of lines of base64.")
 @click.pass_context
-def explore(ctx, url, intent, keep_open, screenshot, full_page, skip_verify,
-            output_dir, inline_screenshot):
-    """ONE-CALL "look at this URL". The canonical "I just want to see what's
-    on this page" workflow — does verify_url → auto-start headless session
-    → go → extract text + screenshot → close.
+def explore(ctx, url, intent, keep_open, screenshot_on, auto_screenshot,
+            full_page, skip_verify, output_dir, inline_screenshot):
+    """ONE-CALL "look at this URL", text-first. The canonical "I just want to
+    see what's on this page" workflow — does verify_url → auto-start headless
+    session → go → extract text → close. A screenshot is captured only as a
+    fallback when the page has no usable text (override with --screenshot /
+    --no-screenshot).
 
     Replaces the start/go/text/stop sequence for the 80% case. Use this
     instead of separate primitives unless you need multi-step interaction.
@@ -713,6 +798,9 @@ def explore(ctx, url, intent, keep_open, screenshot, full_page, skip_verify,
     from hashlib import md5 as _md5
     from pathlib import Path as _P
     from .daemon.paths import CACHE_DIR, secure_mkdir, secure_write
+    # --auto-screenshot → text-first fallback; else the CLI default keeps a
+    # screenshot on (spilled to a file below), and --no-screenshot suppresses it.
+    screenshot = "auto" if auto_screenshot else ("always" if screenshot_on else "never")
     args = {"url": url, "keep_open": keep_open,
             "screenshot": screenshot, "full_page": full_page,
             "skip_verify": skip_verify}
@@ -916,6 +1004,13 @@ def status(ctx):
                 f"⚠ daemon is running {result['daemon_version']} but the CLI is "
                 f"{__version__} — run `vb update` (or `vb shutdown`) so the next "
                 f"command loads the new version.", err=True)
+        # 0.7.0: surface self-heal activity for the active session.
+        if not ctx.obj["json"] and result.get("recovered"):
+            import time as _t
+            la = result.get("last_recovered_at")
+            when = _t.strftime("%H:%M:%S", _t.localtime(la)) if la else "?"
+            click.echo(f"self-heal: recovered {result['recovered']}x "
+                       f"(last {when})", err=True)
     _emit(result, ctx.obj["json"])
 
 

@@ -27,10 +27,12 @@ import logging
 import os
 import signal
 import sys
+import time
 from typing import Any
 from collections.abc import Awaitable, Callable
 
 from . import handlers, handlers_extra
+from . import lease as _lease
 from ..caps import resolve_caps as _resolve_caps, verb_in_caps
 from .paths import DEFAULT_SESSION_NAME, LOG_PATH, PID_PATH, SOCK_PATH, get_active_session_name
 from .registry import SessionEntry, SessionRegistry, current_session_ctx
@@ -94,6 +96,9 @@ def _redact_for_log(cmd: str, args: dict) -> dict:
         for k in url_fields:
             if isinstance(out.get(k), str):
                 out[k] = mask_userinfo(out[k])
+    # 0.7.0: a lease token can ride ANY verb as args['_lease'] — never log it.
+    if "_lease" in out:
+        out["_lease"] = "<redacted>"
     return out
 
 
@@ -143,9 +148,32 @@ class Daemon:
         "proxy_set", "proxy_clear", "proxy_info",
         # 0.6.11: timezone/locale coherence — profile-dir config, no session.
         "geo_set", "geo_clear", "geo_info",
+        # 0.7.0: session leases (registry-class — they mutate the entry's lease
+        # field under the contextvar; no per-session page lock needed).
+        "session_lease", "session_release", "session_lease_info",
         "checkpoint_list", "checkpoint_delete",
         # Wave 6.3a: secrets are not session-scoped
         "secret_init", "secret_set", "secret_list", "secret_delete", "secret_totp",
+    })
+
+    # 0.7.0 self-heal: verbs safe to auto-retry ONCE after a renderer-crash
+    # recovery — navigation + pure reads only. A mutating verb may have
+    # committed a side-effect server-side before the renderer died, so it is
+    # recovered but NOT retried (the caller re-issues it).
+    RETRY_SAFE_VERBS = frozenset({
+        "go", "reload", "back", "forward",      # navigation (didn't commit on crash)
+        "text", "html", "pdf",                  # pure reads (NOT `content` = set_content)
+        "screenshot", "map", "observe",         # read-only page analysis
+        "url", "title", "frames",
+    })
+
+    # 0.7.0 lease: registry verbs that DISRUPT a leased session (tear it down or
+    # reconfigure it) — a non-holder is refused these while a lease is active.
+    # session_close_all / shutdown / clean are deliberately ABSENT: those are
+    # operator sledgehammers and must always work.
+    LEASE_GUARDED_REGISTRY_VERBS = frozenset({
+        "stop", "session_close", "session_delete",
+        "proxy_set", "proxy_clear", "geo_set", "geo_clear",
     })
 
     def __init__(self) -> None:
@@ -372,6 +400,23 @@ class Daemon:
         tok = current_session_ctx.set(session_name)
         try:
             if lock_class == "registry":
+                # 0.7.0 lease gate: refuse the DISRUPTIVE registry verbs (those
+                # that tear down or reconfigure a session) from a non-holder
+                # while a lease is active. Non-disruptive registry verbs
+                # (session_new/list/use, secrets, the lease verbs themselves)
+                # are never gated.
+                if cmd in self.LEASE_GUARDED_REGISTRY_VERBS:
+                    target = (args.get("name") or session_name
+                              if cmd in ("session_close", "session_delete")
+                              else session_name)
+                    g_entry = self.registry.get(target)
+                    if g_entry is not None:
+                        active = g_entry.lease_active()
+                        if active is not None:
+                            ok_lease, reason = _lease.check_access(
+                                active, _lease.holder_token_from_args(args), target)
+                            if not ok_lease:
+                                return {"id": req_id, "ok": False, "error": reason}
                 # Registry mutation — serialized by the registry's mutate_lock
                 # so concurrent session_new / start can't race on the dict.
                 async with self.registry.mutate_lock:
@@ -417,8 +462,34 @@ class Daemon:
                                          f"({goal_caps}) on session "
                                          f"{session_name!r}",
                             }
-                    async with entry.lock:
-                        result = await self._handlers[cmd](self, args)
+                    # 0.7.0 exclusive-lease gate — a PURE read with no await
+                    # before the early return, placed BEFORE `async with
+                    # entry.lock` so a denied caller returns instantly instead
+                    # of blocking on the very lock the holder is using (the
+                    # whole point of a clean "busy" error).
+                    active = entry.lease_active()
+                    if active is not None:
+                        ok_lease, reason = _lease.check_access(
+                            active, _lease.holder_token_from_args(args),
+                            session_name)
+                        if not ok_lease:
+                            log.info("lease-denied session=%s cmd=%s owner=%s",
+                                     session_name, cmd, active["owner"])
+                            return {"id": req_id, "ok": False, "error": reason}
+                    # 0.7.0 self-heal: run the verb under the per-session lock
+                    # with transparent Chrome renderer-crash recovery.
+                    result = await self._run_session_verb_with_recovery(
+                        cmd, args, entry, session_name)
+            # 0.7.0 self-heal: a mutating verb that crashed was RECOVERED but
+            # deliberately not retried — surface it as a top-level failure (with
+            # the recovered flag) so the caller re-issues, rather than ok:true
+            # wrapping a nested error. No existing handler returns a top-level
+            # `recovered` key, so this shape is unambiguous.
+            if (isinstance(result, dict) and result.get("recovered") is True
+                    and result.get("ok") is False):
+                return {"id": req_id, "ok": False, "recovered": True,
+                        "error": result.get("error",
+                                            "session recovered after a crash")}
             # Wave 6.3c: prompt-injection middleware. Off by default; per-session
             # flag controls activation. Mutates content fields in-place.
             entry = self.registry.get(session_name)
@@ -439,6 +510,83 @@ class Daemon:
             return {"id": req_id, "ok": False, "error": f"{type(exc).__name__}: {exc}"}
         finally:
             current_session_ctx.reset(tok)
+
+    async def _run_session_verb_with_recovery(self, cmd, args, entry, name):
+        """Run a session-scoped verb under ``entry.lock`` with transparent
+        Chrome renderer-crash recovery.
+
+        On a crash signature: revive the page (tier-1, context still alive) or
+        relaunch the dead context (tier-2), then retry ONCE iff the verb is in
+        ``RETRY_SAFE_VERBS``; otherwise recover the session but return a
+        structured ``{ok:False, recovered:True}`` re-issue error so a mutating
+        verb's side-effect is never double-applied. Recovery runs while holding
+        ``entry.lock`` so no interleaving verb can touch a half-recovered
+        context; ``registry.relaunch`` deliberately does NOT take the registry
+        mutate_lock (disjoint lock orderings → no deadlock).
+
+        Kill-switch: ``VIBATCHIUM_SELF_HEAL=0`` disables recovery entirely and
+        re-raises the original crash (today's wedge behavior, for operators who
+        want a crash to fail loudly and stop a bot).
+        """
+        handler = self._handlers[cmd]
+        if os.environ.get("VIBATCHIUM_SELF_HEAL", "1").lower() in (
+                "0", "false", "no", "off"):
+            async with entry.lock:
+                return await handler(self, args)
+        from .browser import is_crash_error, revive_page
+        async with entry.lock:
+            try:
+                return await handler(self, args)
+            except Exception as exc:  # noqa: BLE001
+                if not is_crash_error(exc):
+                    raise
+                log.warning("self-heal: crash on %s (session=%s): %s — recovering",
+                            cmd, name, type(exc).__name__)
+                # Tier 1: context alive → fresh page. Tier 2: context/browser
+                # dead → full relaunch.
+                try:
+                    inflight = getattr(entry.session, "_revive_task", None)
+                    if inflight is not None:
+                        # The context.on_close reviver is already opening a fresh
+                        # page for an actually-CLOSED page — let it finish and
+                        # reuse that page instead of racing it to a second one.
+                        with contextlib.suppress(Exception):
+                            await inflight
+                        live = [p for p in entry.session.context.pages
+                                if not p.is_closed()]
+                        if live:
+                            entry.session.page = live[-1]
+                            entry.session.frame_ref = None
+                        else:
+                            await revive_page(entry.session, force_new=True)
+                    else:
+                        # Renderer crash: the page reports is_closed()==False but
+                        # is dead, so a FRESH page is mandatory — reusing it would
+                        # retry straight back into the crash.
+                        await revive_page(entry.session, force_new=True)
+                    entry.recovered += 1
+                    entry.last_recovered_at = time.time()
+                    entry.snapshot = None
+                    entry.prev_snapshot = None
+                except Exception:  # noqa: BLE001
+                    await self.registry.relaunch(name)  # bumps its own counter
+                # Idempotency gate: only re-run side-effect-free verbs.
+                if cmd not in self.RETRY_SAFE_VERBS:
+                    return {"ok": False, "recovered": True,
+                            "error": (f"session {name!r} recovered after a "
+                                      f"renderer crash during {cmd!r}; re-issue "
+                                      f"the command")}
+                try:
+                    return await handler(self, args)  # retry ONCE
+                except Exception as exc2:  # noqa: BLE001
+                    if is_crash_error(exc2):
+                        raise RuntimeError(
+                            f"session {name!r} crashed again immediately after "
+                            f"auto-recovery (relaunch #{entry.recovered}); the "
+                            f"page may be crash-looping — inspect or reset with "
+                            f"`vb session close {name}` then re-`vb start`"
+                        ) from exc2
+                    raise
 
     # ─── socket plumbing ─────────────────────────────────────────────────
 
