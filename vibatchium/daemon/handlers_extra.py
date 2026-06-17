@@ -676,6 +676,134 @@ def register_extra(daemon) -> None:
             return {"path": path, "events": len(events)}
         return {"events": events}
 
+    # ─── authenticated out-of-browser fetch lane ─────────────────────────
+    #
+    # 0.9.0 (competitive-landscape lesson): a curl_cffi HTTP request that reuses
+    # the LIVE session's identity (cookies + proxy + UA + a Chrome JA3/HTTP2
+    # impersonation target) WITHOUT a renderer or JS. For JSON/API/static
+    # endpoints behind a login you already established in the browser — fast and
+    # fingerprint-correct at the TLS+HTTP2 layer. HARD LIMIT: no JavaScript, so
+    # it does NOT defeat a DataDome/Kasada/Turnstile JS challenge — fall back to
+    # the real browser for those. Optional dep (`vibatchium[fetch]`), import-
+    # guarded like the nodriver backend. Lives in its own `fetch` cap bucket
+    # (authenticated arbitrary-URL egress is higher blast-radius than browsing).
+    @daemon.handler("fetch")
+    async def _fetch(d, args):
+        s = _session(d)
+        url = args.get("url")
+        if not isinstance(url, str) or not url:
+            raise ValueError("fetch requires `url` (str)")
+        if not _re_local.match(r"^https?://", url, _re_local.I):
+            raise ValueError("fetch only supports http(s) URLs")
+        from .. import fetch as _f
+
+        # SSRF guard (fails fast, before requiring the optional dep): refuse
+        # loopback/link-local/private/reserved targets (incl. the cloud metadata
+        # endpoint) unless the caller explicitly opts in. The `fetch` cap already
+        # gates WHO can call this, but a cap-holder shouldn't get the daemon
+        # host's internal network for free. NOTE: validates the INITIAL target
+        # only; a public URL that redirects to an internal host is not re-checked
+        # (set allow_redirects=false to be strict).
+        from urllib.parse import urlsplit as _urlsplit
+        if not args.get("allow_internal"):
+            host = _urlsplit(url).hostname
+            if host and _f.host_is_internal(host):
+                raise ValueError(
+                    f"fetch refuses an internal/loopback/link-local target ({host}) "
+                    "— SSRF guard; pass allow_internal=true to override"
+                )
+
+        try:
+            import curl_cffi.requests as _cc
+        except ImportError as e:
+            raise RuntimeError(
+                "fetch requires `pip install vibatchium[fetch]` (curl_cffi) — "
+                "the authenticated TLS-impersonating HTTP lane"
+            ) from e
+        from ..proxy import load_session_proxy, parse as _proxy_parse
+        from .browser import coherent_headless_ua
+
+        # Identity reads happen here, under the per-session lock, so cookies/UA
+        # are coherent with the live context.
+        ck = await s.context.cookies()
+        try:
+            ua = await s.page.evaluate("navigator.userAgent")
+        except Exception:  # noqa: BLE001
+            ua = await coherent_headless_ua(s.pw)
+        proxies = None
+        if getattr(s, "profile_dir", None) is not None:
+            try:
+                purl = load_session_proxy(s.profile_dir)
+                proxies = _f.proxy_cfg_to_curl(_proxy_parse(purl)) if purl else None
+            except Exception:  # noqa: BLE001 — proxy read/parse failure → direct
+                proxies = None
+
+        impersonate = _f.pick_impersonate(ua, args.get("impersonate"))
+        headers = {}
+        if ua:
+            headers["User-Agent"] = ua
+        if isinstance(args.get("headers"), dict):
+            headers.update(args["headers"])
+        method = str(args.get("method", "GET")).upper()
+        timeout_ms = int(args.get("timeout_ms", 30_000))
+        max_body = int(args.get("max_body", 5_000_000))
+
+        kw: dict = {
+            "impersonate": impersonate,
+            "timeout": timeout_ms / 1000.0,
+            "allow_redirects": bool(args.get("allow_redirects", True)),
+        }
+        if headers:
+            kw["headers"] = headers
+        if args.get("cookies", True):
+            cookies = _f.cookies_for_url(ck, url)
+            if cookies:
+                kw["cookies"] = cookies
+        if proxies:
+            kw["proxies"] = proxies
+        if isinstance(args.get("params"), dict):
+            kw["params"] = args["params"]
+        if args.get("json") is not None:
+            kw["json"] = args["json"]
+        if args.get("data") is not None:
+            kw["data"] = args["data"]
+
+        t0 = time.monotonic()
+        async with _cc.AsyncSession() as sess:
+            try:
+                resp = await sess.request(method, url, **kw)
+            except Exception as e:  # noqa: BLE001
+                # If the AUTO-picked impersonate token isn't supported by this
+                # curl_cffi build, degrade once to the latest-alias rather than
+                # failing — the token list can drift from the floating dep.
+                if (not args.get("impersonate")
+                        and impersonate != _f._LATEST_ALIAS
+                        and "impersonate" in str(e).lower()):
+                    impersonate = _f._LATEST_ALIAS
+                    kw["impersonate"] = impersonate
+                    resp = await sess.request(method, url, **kw)
+                else:
+                    raise
+        elapsed_ms = int((time.monotonic() - t0) * 1000)
+
+        body, truncated, is_text = _f.truncate_body(resp.content, max_body)
+        out = {
+            "url": str(resp.url),
+            "status": resp.status_code,
+            "ok": 200 <= resp.status_code < 400,
+            "headers": dict(resp.headers),
+            "impersonate": impersonate,
+            "elapsed_ms": elapsed_ms,
+            "via": "curl_cffi",
+            # browser→fetch is one-way: Set-Cookie on THIS response is NOT
+            # written back into the session. Re-navigate in the browser to persist.
+            "cookie_sync": "one-way (browser→fetch); response Set-Cookie not written back",
+        }
+        out["body" if is_text else "body_b64"] = body
+        if truncated:
+            out["truncated"] = True
+        return out
+
     # ─── console + browser-log capture ───────────────────────────────────
     #
     # 0.8.0 (Vibium lesson), with a STEALTH CAVEAT the static design missed:

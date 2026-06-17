@@ -142,6 +142,17 @@ TOOLS: list[tuple[str, str, dict, str, Any]] = [
     ("html", "Get HTML (whole page or a target — @eN, @text:Foo, @label:Email, CSS, etc.).",
      {"type": "object", "properties": {"target": _str("Optional @eN / @text: / @label: / CSS.")}},
      "html", None),
+    ("extract",
+     "Clean, LLM-ready Markdown of the page (or a target subtree) — boilerplate "
+     "(nav/footer/aside/scripts) stripped, headings/links/lists/code preserved. "
+     "A drop-in for Crawl4AI/Firecrawl-style scraping on the AUTHENTICATED pages "
+     "those stateless tools can't reach. Returns markdown TEXT (never a base64 "
+     "screenshot), capped by max_chars to stay token-frugal.",
+     {"type": "object", "properties": {
+         "target": _str("Optional @eN / @text: / @label: / CSS to scope extraction to a subtree."),
+         "max_chars": _int("Cap the returned markdown length (truncates beyond it).", 40_000),
+     }},
+     "extract", None),
     ("attr", "Get an HTML attribute value from an element.",
      {"type": "object", "properties": {
          "target": _str("@eN / @text: / @label: / CSS."),
@@ -398,6 +409,33 @@ TOOLS: list[tuple[str, str, dict, str, Any]] = [
     ("network_dump", "Dump captured network events (optionally to a file).",
      {"type": "object", "properties": {"path": _str("Optional output JSON path.")}},
      "network_dump", None),
+    ("fetch",
+     "Authenticated HTTP fetch that REUSES this session's cookies + proxy + UA "
+     "and impersonates the nearest curl_cffi-supported Chrome JA3/HTTP2 "
+     "fingerprint at or below the live Chrome major — NO renderer, NO "
+     "JavaScript. For JSON/XHR/static endpoints behind a login you already "
+     "established in the browser: full speed, no Chrome cost. It defeats the "
+     "static TLS/HTTP2 fingerprint gate ONLY — a DataDome/Kasada/Turnstile JS "
+     "challenge will fail, so fall back to `go`. Cookies flow browser→fetch "
+     "ONE-WAY (response Set-Cookie is NOT written back to the session). Needs "
+     "`pip install vibatchium[fetch]`; gated behind the `fetch` cap (off by "
+     "default). Internal/loopback/link-local targets are refused unless "
+     "allow_internal=true (SSRF guard).",
+     {"type": "object", "properties": {
+         "url": _str("Target URL (http/https) — required."),
+         "method": _str("HTTP method (default GET)."),
+         "headers": {"type": "object", "description": "Extra request headers (merged over the session UA)."},
+         "params": {"type": "object", "description": "Query-string params."},
+         "json": {"type": "object", "description": "JSON request body (sets Content-Type)."},
+         "data": _str("Raw request body (form/text)."),
+         "impersonate": _str("Override the curl_cffi impersonate target (default: matches the live Chrome)."),
+         "cookies": _bool("Forward the session's cookies for this URL.", True),
+         "allow_redirects": _bool("Follow redirects.", True),
+         "allow_internal": _bool("Permit loopback/link-local/private targets (SSRF guard off).", False),
+         "timeout_ms": _int("Request timeout in ms.", 30_000),
+         "max_body": _int("Cap the response body bytes read.", 5_000_000),
+     }, "required": ["url"]},
+     "fetch", None),
     ("console_start",
      "Capture browser log entries (CSP/network/security warnings — what an anti-bot wall complains about), and optionally page console.* + uncaught errors. Via an opt-in CDP session (Patchright keeps console domains off for stealth); console_stop reverts it.",
      {"type": "object",

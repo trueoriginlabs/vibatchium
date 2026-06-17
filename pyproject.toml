@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "vibatchium"
-version = "0.8.0"
+version = "0.9.0"
 description = "Patchwright stealth + Vibium-style LLM-friendly CLI for agentic browser automation."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -35,11 +35,11 @@ dependencies = [
 annotate = ["pillow>=10.0,<12.0"]
 # Claude observe→act LLM backend (heuristic backend is always available).
 llm = ["anthropic>=0.40,<1.0"]
-# Humanized mouse trajectories — defeats Brotector / DataDome aggressive.
-# CDP-Patches is not on PyPI; the published wheel cannot list a git+https
-# direct dependency. Users who want stealth-mouse install it separately:
-#   pip install vibatchium
-#   pip install git+https://github.com/Kaliiiiiiiiii-Vinyzu/CDP-Patches.git@main
+# 0.9.0: authenticated out-of-browser HTTP lane. curl_cffi (lexiforest fork,
+# MIT) impersonates a Chrome JA3/HTTP2 fingerprint, so the `fetch` verb reuses a
+# session's cookies+proxy to hit JSON/API endpoints behind a login without a
+# renderer. No JS — static-fingerprint gate only. MIT is permissive (no copyleft).
+fetch = ["curl_cffi>=0.7,<1.0"]
 # Wave 5.4: nodriver backend for the hardest Cloudflare gates. AGPL-3.0
 # (copyleft); commercial integrators should consult licensing.
 nodriver = ["nodriver>=0.50.0,<1.0"]
@@ -53,7 +53,7 @@ secrets = ["pynacl>=1.5,<2.0", "keyring>=24.0,<26.0"]
 # (Docker / hosted mode / language-agnostic agents). FastAPI + uvicorn.
 rest = ["fastapi>=0.110,<2.0", "uvicorn[standard]>=0.27,<1.0"]
 # Convenience meta-extras
-# `all` = every advertised feature except GPL/AGPL extras (stealth-mouse, nodriver).
+# `all` = every advertised feature except the GPL/AGPL `nodriver` backend.
 # Matches the README install guidance — keep these in sync.
 all = [
     "pillow>=10.0,<12.0",        # annotate
@@ -63,6 +63,7 @@ all = [
     "keyring>=24.0,<26.0",       # secrets vault key storage
     "fastapi>=0.110,<2.0",       # rest shim
     "uvicorn[standard]>=0.27,<1.0",  # rest shim
+    "curl_cffi>=0.7,<1.0",       # fetch lane (MIT — permissive)
 ]
 dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "pytest-timeout>=2.3", "ruff>=0.6.0"]
 

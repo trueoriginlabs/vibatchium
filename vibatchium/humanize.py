@@ -6,8 +6,16 @@ because:
   1. Bad humanization is worse than none (perfectly-symmetric Bezier curves
      are more detectable than a straight line).
   2. Existing tests assume instantaneous clicks; default-on would slow CI.
-  3. Defenders that fingerprint mouse behavior (DataDome, PerimeterX) are
-     opt-in worth-it targets, not always-on.
+  3. Defenders that fingerprint mouse *behavior* — trajectory shape and
+     inter-event timing (DataDome, PerimeterX) — are opt-in worth-it targets,
+     not always-on.
+
+SCOPE (be honest): this improves trajectory + timing biometrics only. It still
+dispatches through `page.mouse`/`page.keyboard` over CDP `Input.*`, so every
+injected event keeps the CDP coordinate signature (`pageX==screenX`) and lacks
+the `CoalescedEvents` real hardware produces. It does NOT close that per-event
+signature — for walls that fingerprint it, the answer is attach-mode against a
+real headful Chrome (see README "Honest limits"), not synthetic input.
 
 Pure functions (no Playwright dependency) — the orchestration in
 `_mouse` handler awaits these in a coroutine that drives Playwright APIs.

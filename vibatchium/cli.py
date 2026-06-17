@@ -1095,6 +1095,57 @@ def html(ctx, selector):
     _emit(call("html", args), ctx.obj["json"], "html")
 
 
+@cli.command()
+@click.argument("selector", required=False)
+@click.option("--max-chars", type=int, default=40000, show_default=True,
+              help="Cap the returned markdown length.")
+@click.pass_context
+def extract(ctx, selector, max_chars):
+    """LLM-ready Markdown of the page (or a selector subtree)."""
+    args = {"max_chars": max_chars}
+    if selector:
+        args["selector"] = selector
+    _emit(call("extract", args), ctx.obj["json"], "markdown")
+
+
+@cli.command()
+@click.argument("url")
+@click.option("--method", default="GET", show_default=True, help="HTTP method.")
+@click.option("--header", "headers", multiple=True, metavar="K:V",
+              help="Extra request header (repeatable).")
+@click.option("--data", default=None, help="Raw request body.")
+@click.option("--impersonate", default=None,
+              help="Override the curl_cffi impersonate target (default: live Chrome).")
+@click.option("--no-cookies", is_flag=True, help="Don't forward the session's cookies.")
+@click.option("--allow-internal", is_flag=True,
+              help="Permit loopback/link-local/private targets (SSRF guard off).")
+@click.option("--timeout-ms", type=int, default=30000, show_default=True)
+@click.pass_context
+def fetch(ctx, url, method, headers, data, impersonate, no_cookies, allow_internal, timeout_ms):
+    """Authenticated HTTP fetch reusing the session's cookies+proxy+UA (curl_cffi).
+
+    No renderer, no JS — for JSON/API/static endpoints behind a login. Needs
+    `pip install vibatchium[fetch]`.
+    """
+    args = {"url": url, "method": method, "timeout_ms": timeout_ms}
+    hdrs = {}
+    for h in headers:
+        if ":" in h:
+            k, v = h.split(":", 1)
+            hdrs[k.strip()] = v.strip()
+    if hdrs:
+        args["headers"] = hdrs
+    if data is not None:
+        args["data"] = data
+    if impersonate:
+        args["impersonate"] = impersonate
+    if no_cookies:
+        args["cookies"] = False
+    if allow_internal:
+        args["allow_internal"] = True
+    _emit(call("fetch", args), ctx.obj["json"], None)
+
+
 @cli.command(name="eval")
 @click.argument("expr", required=False)
 @click.option("--stdin", is_flag=True, help="Read expression from stdin.")

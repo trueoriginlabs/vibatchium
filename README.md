@@ -19,7 +19,7 @@ vb research --target https://example.com \          # parallel fan-out, N intent
   --intent "pricing model" --intent "customers" --intent "tech stack"
 ```
 
-**Status:** active development, alpha. 606 tests green. 31/31 on bot.sannysoft.com. Cleared HackerOne Cloudflare cold-launch. Apache-2.0 (GPL/AGPL only via opt-in extras).
+**Status:** active development, alpha. 606 tests green. 31/31 on bot.sannysoft.com. Cleared HackerOne Cloudflare cold-launch. Apache-2.0 (AGPL only via the opt-in `nodriver` extra).
 
 ## Updating
 
@@ -91,6 +91,28 @@ Active-session resolution: `--session FLAG` → `$VIBATCHIUM_SESSION` env → `~
 
 **REST capability gating**: `vb serve --caps=core,nav,input,vision` restricts the HTTP surface the same way `mcp --caps` does. Without it, REST grants local-code-equivalent access (eval + secret_* + file-writing verbs all exposed) — safe for localhost dev, **not** for hosted/multi-tenant.
 
+## Stealth tiers — what clears what
+
+Stealth is a ladder, not a boolean. Pick the lowest tier that clears your target
+(higher tiers cost more setup / a visible browser / a manual login). vibatchium
+does **not** claim cold-launch defeat of behavioral walls — those need a real
+human-driven session, and attach-mode is the honest answer.
+
+| Tier | How | Clears | Doesn't clear |
+|---|---|---|---|
+| **Standard** (default) | headless cold launch, real `channel=chrome`, de-Headless'd UA | Cloudflare IUAM / managed challenge, `bot.sannysoft` 31/31, JS-runtime fingerprinting | aggressive Turnstile, DataDome/Kasada, anything behind a login |
+| **Hardened** | retry `--headed`; `vb humanize on`; `--backend nodriver` (`pip install vibatchium[nodriver]`, AGPL) for the hardest Cloudflare gates | aggressive Cloudflare/Turnstile, GPU/screen tells that headless leaves | behavioral biometrics, DataDome/Kasada sensor-fusion |
+| **Attach** | `vb attach` to a Chrome **you** launched and logged into | DataDome / Kasada / HUMAN behavioral walls, and any authenticated session — your real fingerprint + cookies | nothing here is automated cold; it needs the human login first |
+
+Escalation ladder when a wall trips: **headless → `--headed` → `humanize on` →
+`--backend nodriver` → attach-mode after a manual login.** Patchright's CDP-layer
+patches apply in *all* tiers, including attach (`connect_over_cdp`).
+
+> The `fetch` verb is an orthogonal fast-path, not a tier: once you're past a
+> wall in the browser, `vb fetch` reuses that session's cookies+proxy to hit
+> JSON/API endpoints at TLS-fingerprint-correct speed — but it runs no JS, so it
+> can't *clear* a JS challenge itself.
+
 ## Attach mode — the practical Cloudflare workaround
 
 For DataDome / Kasada / hardened auth that walls cold-launch automation:
@@ -116,8 +138,10 @@ For the REST shim: without `--caps`, the bearer token grants every verb includin
 - **Vision spend cap is process-wide.** N fan-out agents share one daily/lifetime budget.
 - **Init scripts don't work on patchright backend.** `chrome.runtime` stays `undefined` — accepted trade for stealth wins.
 - **Login walls (X, LinkedIn) require attach mode.** Cold-launch fan-out can't defeat sites requiring authenticated sessions.
+- **Synthetic input has a CDP coordinate signature.** Every `click`/`type`/`hover`/`scroll` rides Playwright over CDP `Input.dispatchMouseEvent`/`dispatchKeyEvent` (`pageX==screenX`, no `CoalescedEvents`). Patchright patches the JS-context leaks, not the Input domain, and `humanize on` improves trajectory/timing realism but does **not** change the per-event signature. Behavioral walls that fingerprint it (DataDome/Kasada/HUMAN) want **attach-mode against a real headful Chrome you drive** — OS-level synthetic input (CDP-Patches) is headful + active-tab only and doesn't fit a headless, N-parallel daemon.
+- **`fetch` is a static-fingerprint lane, not a browser.** The curl_cffi `fetch` verb matches Chrome's JA3/HTTP2 but runs no JavaScript — it clears TLS-fingerprint gates, not DataDome/Kasada/Turnstile JS challenges. Fall back to `go` for those.
 - **Single daemon = single point of failure.** No HA built in.
 
 ## License
 
-Apache-2.0 (core). Optional extras pull their own licenses: `nodriver` (AGPL-3.0). CDP-Patches (GPL-3.0) installs separately (not a pip extra — PyPI forbids `git+https://` deps): `pip install git+https://github.com/Kaliiiiiiiiii-Vinyzu/CDP-Patches.git@main`. Never required for the base install.
+Apache-2.0 core. Every default-install extra is permissive too — the `fetch` lane's curl_cffi is **MIT**. The only copyleft option is the opt-in `nodriver` backend (AGPL-3.0) — consult licensing before integrating it commercially. Nothing GPL/AGPL ships in the base install or `[all]`.

@@ -1663,6 +1663,43 @@ def register_all(daemon) -> None:
         s = _need_session(d)
         return {"html": await s.page.content()}
 
+    @daemon.handler("extract")
+    async def _extract(d, args):
+        """LLM-ready Markdown of the page (or a target subtree).
+
+        0.9.0: a drop-in for Crawl4AI/Firecrawl-style scraping on the
+        AUTHENTICATED pages those stateless tools can't reach. Returns clean
+        markdown text (boilerplate stripped) — never a base64 screenshot — so it
+        stays token-frugal. `max_chars` caps the output (default 40000).
+        """
+        from ..extract import html_to_markdown
+        sel = args.get("target") or args.get("selector")
+        if sel:
+            loc = _resolve_target(d, sel)
+            raw_html = await loc.inner_html()
+            url = None
+        else:
+            s = _need_session(d)
+            raw_html = await s.page.content()
+            url = s.page.url
+        md = html_to_markdown(raw_html)
+        max_chars = int(args.get("max_chars", 40_000))
+        truncated = False
+        if max_chars and len(md) > max_chars:
+            md = md[:max_chars]
+            truncated = True
+        out = {"markdown": md, "chars": len(md)}
+        if url is not None:
+            out["url"] = url
+            s = _need_session(d)
+            try:
+                out["title"] = await s.page.title()
+            except Exception:  # noqa: BLE001
+                pass
+        if truncated:
+            out["truncated"] = True
+        return out
+
     @daemon.handler("eval")
     async def _eval(d, args):
         s = _need_session(d)

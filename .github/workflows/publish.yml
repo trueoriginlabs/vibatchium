@@ -10,7 +10,40 @@ permissions:
   id-token: write
 
 jobs:
+  # 0.9.0: stealth gate — a tagged release must NOT ship if the Runtime.enable
+  # leak / stealth posture has regressed. Runs the same probes as CI but blocks
+  # the build/publish, not just a PR.
+  stealth-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - name: Install system deps (Xvfb + Chrome runtime)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -yq xvfb libnss3 libatk-bridge2.0-0 libdrm2 \
+            libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 \
+            libgbm1 libxss1 libasound2t64 || sudo apt-get install -yq libasound2
+      - name: Install vibatchium + extras
+        run: |
+          python -m pip install -U pip
+          pip install -e ".[all]"
+          pip install pytest pytest-asyncio pytest-timeout
+      - name: Install patchright Chrome
+        run: |
+          patchright install chrome
+          patchright install-deps chrome || true
+      - name: Run stealth gate
+        env:
+          PYTHONUNBUFFERED: "1"
+        run: |
+          xvfb-run -a -s "-screen 0 1920x1080x24" python -m pytest \
+            tests/test_stealth_drift_gate.py tests/test_wave7_stealth_gate.py \
+            -v --tb=short --timeout=120
+
   build:
+    needs: stealth-gate
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

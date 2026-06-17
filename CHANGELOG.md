@@ -4,6 +4,90 @@ All notable changes to vibatchium are documented here. Versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Until 1.0,
 minor bumps may include breaking changes; we'll always call them out here.
 
+## [0.9.0] — 2026-06-17
+
+Hardening + reach distilled from a competitive-landscape scan of the whole
+browser-automation field (stealth libs, AI agent frameworks, MCP servers, cloud
+infra, scrapers, computer-use agents). The throughline: stealth is the one
+capability the field punts to a paid cloud, and vibatchium's open lane is
+**stateful, login-walled, self-hosted** stealth. This release defends that moat
+(CI gate) and extends its reach (authenticated fetch + LLM-ready extract),
+while declining the commodity races and detectability theater.
+
+### Added — `fetch`: authenticated out-of-browser HTTP lane (`fetch` cap)
+- New `fetch` verb: a `curl_cffi` HTTP request that **reuses the live session's
+  cookies + proxy + User-Agent** and impersonates the nearest supported Chrome
+  JA3 / HTTP2 fingerprint at or below the live major (the freshest token if the
+  live Chrome is newer than any supported target) — **no renderer, no
+  JavaScript**. For JSON / XHR / static endpoints behind a login you already
+  established in the browser: full speed, no full-Chrome cost. Anti-bot gates
+  score TLS/JA3 *before* JS runs, and a plain `requests` call is killed at that
+  layer; this clears it.
+- **Hard boundary:** static-fingerprint gate only. A DataDome / Kasada /
+  Turnstile JS challenge will fail — fall back to `go`. Documented in *Honest limits*.
+- **Cookies are one-way** (browser→fetch): a `Set-Cookie` on the fetch response
+  is **not** written back to the session; the response carries a `cookie_sync`
+  note saying so.
+- **Security:** its own `fetch` cap bucket (NOT in `lean`) — authenticated
+  arbitrary-URL egress is higher blast-radius than browsing, so operators grant
+  it explicitly (`--caps fetch`). `headers` / `json` / `data` args are redacted
+  from logs; the proxy URL and cookie values never hit logs; cookie→URL matching
+  is eTLD-conservative (a bare-label cookie can't leak across a TLD).
+- Optional dependency: `pip install vibatchium[fetch]` (curl_cffi, **MIT** —
+  permissive; included in `[all]`). Import-guarded like the `nodriver` backend.
+- **SSRF guard:** loopback / link-local / private / reserved targets (incl. the
+  cloud metadata endpoint `169.254.169.254`) are refused unless `allow_internal`
+  is set. Validates the initial target; use `allow_redirects=false` to be strict
+  against redirect-based SSRF.
+
+### Added — `extract`: LLM-ready Markdown (`content` cap, in `lean`)
+- New `extract` verb: clean, RAG-ready **Markdown** of the page (or a `target`
+  subtree) — boilerplate (nav/footer/aside/scripts) stripped, headings / links /
+  lists / code preserved. A drop-in for Crawl4AI / Firecrawl-style scraping on
+  the **authenticated** pages those stateless tools can't reach.
+- Returns markdown **text** (never a base64 screenshot) and caps length via
+  `max_chars` (default 40000) — token-frugal by construction.
+- **Zero new dependency:** a stdlib `html.parser` converter, so `extract` works
+  on a bare install and stays in the lean MCP surface.
+
+### Added — stealth CI gate (Patchright drift tripwire + release gate)
+- New `tests/test_stealth_drift_gate.py`: a **version drift tripwire**. Patchright's
+  `Runtime.enable` patch is the whole stealth foundation and the dep floats
+  `>=1.59,<2.0`, so a `uv lock --upgrade` or fresh `pip install` could bump it
+  with zero symptom. The test pins a vetted `(major, minor)` set; any bump trips
+  it ON PURPOSE, forcing a human to re-run the full posture suite against the new
+  Patchright before shipping.
+- **Release gate:** `publish.yml` now runs the stealth suite
+  (`test_stealth_drift_gate.py` + the existing `test_wave7_stealth_gate.py`
+  behavioral posture pins) **before** build / publish — a broken or unvetted
+  Patchright can no longer ship on a tag.
+- *(A bespoke JS `Runtime.enable` getter-trap probe was prototyped and dropped:
+  it couldn't be positively verified to fire in CI — i.e. it risked passing
+  vacuously — and a green gate that can't detect what it guards is worse than
+  none. The behavioral posture stays covered by the wave7 gate.)*
+
+### Changed / Fixed — honest stealth docs (CDP input signature)
+- *Honest limits* now states that synthetic input (`click`/`type`/`hover`/
+  `scroll`) rides CDP `Input.*` with a `pageX==screenX` signature and no
+  `CoalescedEvents`; `humanize on` improves trajectory/timing but does **not**
+  change the per-event signature. The answer for behavioral walls is attach-mode
+  against a real headful Chrome — consistent with the deliberate 0.6.10
+  `--stealth-mouse` removal. `humanize.py`'s docstring no longer over-claims.
+- **Removed stale doc drift:** the README License section and the `pyproject.toml`
+  comment block told users to `pip install` archived GPL-3.0 **CDP-Patches** —
+  nothing has consumed it since 0.6.10. Removed; the core and `[all]` are now
+  fully permissive (Apache-2.0 core + curl_cffi's MIT) — only the opt-in
+  `nodriver` backend is AGPL.
+
+### Added — strategy guardrails
+- New `CONTRIBUTING.md` records the deliberate **do-NOT** decisions (no WebDriver
+  BiDi, no JS-injection stealth shims, never force-enable `Runtime`/`Console`, no
+  CAPTCHA-solving as a core feature, don't chase proxy-volume / general-agent
+  commodity races) so a future refactor doesn't "fix" them.
+- README gains a **Stealth tiers** table (what clears Cloudflare cold vs. what
+  needs headed / `nodriver` / attach-mode) — legible stealth instead of a bare
+  sannysoft headline.
+
 ## [0.8.0] — 2026-06-17
 
 Lessons distilled from a deep-dive into **Vibium** (the LLM-friendly browser

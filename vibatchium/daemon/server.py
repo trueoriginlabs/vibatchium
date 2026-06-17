@@ -55,6 +55,7 @@ _REDACTED_ARG_FIELDS: dict[str, set[str]] = {
     "eval_handle":       {"expr"},
     "handle_eval":       {"expr"},
     "route_add":         {"body", "headers"},  # mock body + headers may carry auth
+    "fetch":             {"headers", "json", "data", "params"},  # may carry Authorization / login payloads / API keys
     # NOTE: secret_init has no sensitive *args* — only prefer/force/print_key.
     # The generated key (`key_b64`) is in the *response*, gated behind
     # `print_key`, and responses are never logged through this path. A redaction
@@ -72,6 +73,7 @@ _URL_ARG_FIELDS: dict[str, set[str]] = {
     "go":         {"url"},
     "verify_url": {"url"},
     "wait_url":   {"pattern"},
+    "fetch":      {"url"},   # may embed user:pass@host basic-auth
 }
 
 
@@ -162,7 +164,7 @@ class Daemon:
     # recovered but NOT retried (the caller re-issues it).
     RETRY_SAFE_VERBS = frozenset({
         "go", "reload", "back", "forward",      # navigation (didn't commit on crash)
-        "text", "html", "pdf",                  # pure reads (NOT `content` = set_content)
+        "text", "html", "extract", "pdf",       # pure reads (NOT `content` = set_content)
         "screenshot", "map", "observe",         # read-only page analysis
         "url", "title", "frames",
         "console_dump",                          # reads the in-memory ring buffer

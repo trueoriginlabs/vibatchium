@@ -24,7 +24,8 @@ CAP_BUCKETS: dict[str, set[str]] = {
                  "wait_url", "wait_load", "wait_fn",
                  "wait_selector", "wait_ref",
                  "verify_url"},
-    "content":  {"text", "html", "eval", "attr", "value", "content", "count", "find"},
+    "content":  {"text", "html", "extract", "eval", "attr", "value", "content",
+                 "count", "find"},
     "input":    {"click", "fill", "type", "hover", "press", "keys",
                  "check", "uncheck", "scroll", "is_state", "mouse", "upload",
                  "dblclick", "focus", "select",
@@ -52,6 +53,13 @@ CAP_BUCKETS: dict[str, set[str]] = {
                  "handle_dispose", "handle_dispose_all"},
     "agent":    {"observe", "act", "dismiss_banners", "expect"},
     "stealth":  {"fingerprint"},
+    # 0.9.0: `fetch` is a curl_cffi authenticated HTTP lane that reuses the
+    # session's cookies — categorically higher blast-radius than browsing
+    # (authenticated arbitrary-URL egress / SSRF reach), so it gets its OWN
+    # bucket, separate from `network` (request-capture/route/proxy config), and
+    # is deliberately ABSENT from LEAN_CAPS — a power-user escape hatch, not part
+    # of the common agent loop. Operators grant it explicitly (`--caps fetch`).
+    "fetch":    {"fetch"},
     "liveview": {"liveview_start", "liveview_stop", "liveview_url"},
     "secrets":  {"secret_init", "secret_set", "secret_list", "secret_delete",
                  "secret_totp", "wait_email_code"},
