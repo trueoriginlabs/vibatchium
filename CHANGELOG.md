@@ -4,6 +4,48 @@ All notable changes to vibatchium are documented here. Versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Until 1.0,
 minor bumps may include breaking changes; we'll always call them out here.
 
+## [0.9.1] — 2026-06-17
+
+Daemon-singleton + idle reaper (reliability fix) — closes the daemon-leak that let non-isolated
+`vb` calls accumulate orphaned daemons (each parenting Chromes) until the box
+OOM-thrashed. Root cause: the old "is a daemon already here?" check probed the
+socket by connecting, with **no timeout** — under memory pressure a live-but-slow
+daemon read as dead, so a new daemon unlinked its socket and bound a fresh one,
+**orphaning** the old daemon (still alive, still holding Chromes, unreachable,
+never reaped). Self-reinforcing: thrash → slow daemon → orphan → more thrash.
+
+### Added — race-free daemon singleton
+- A daemon now holds an exclusive `fcntl.flock` on `daemon.lock` for its whole
+  life, acquired **before** binding the socket. Two daemons can never both bind,
+  so the supersede-and-orphan path is structurally impossible. If the lock is
+  held, the new process exits cleanly (rc=2) instead of fighting for the socket.
+- A new daemon also refuses to supersede an existing **live** daemon (even a
+  pre-0.9.1 one without the lock): a *bounded* connect replaces the old
+  unbounded probe — a live daemon is left alone, only a truly dead socket is
+  reclaimed.
+- `spawn_daemon`/`daemon_is_running` hardened: the liveness probe retries with a
+  tolerant timeout (was a single 0.5s connect → false "down" under load), and a
+  spawn that loses the singleton race (rc=2) is treated as success, not an error.
+
+### Added — opt-in idle reaper
+- `VIBATCHIUM_DAEMON_IDLE_TIMEOUT` (seconds; default `0` = **disabled**): when set,
+  a daemon with **zero** sessions / warm-pool entries for that long self-shuts
+  down — so a stray daemon spawned by a one-off `vb status` doesn't linger. Gated
+  on `registry.is_idle()`, so a daemon with **any** open session (incl.
+  attach-mode / bot sessions) is never reaped. Disabled by default so long-lived
+  bot daemons are never surprise-killed; recommended for dogfood / isolated daemons.
+
+### Added — `vb daemon list`
+- Read-only diagnostic: enumerates `vibatchium.daemon.server` processes and flags
+  the live socket-owner vs possible orphans (with their RSS). Spawns nothing,
+  kills nothing. Note: "orphan?" is relative to the current `XDG_RUNTIME_DIR`'s
+  socket — a daemon on a different runtime dir (another project's live bots) is
+  **not** an orphan here, so verify before killing.
+
+> Preventive, not retroactive: shipping this does not clean up daemons that
+> already leaked under the old code — kill those once (or let the idle reaper get
+> the empty ones if you enable it). It stops new leaks from forming.
+
 ## [0.9.0] — 2026-06-17
 
 Hardening + reach distilled from a competitive-landscape scan of the whole

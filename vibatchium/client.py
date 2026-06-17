@@ -33,15 +33,21 @@ def _connect(timeout: float = 2.0) -> socket.socket:
     return s
 
 
-def daemon_is_running() -> bool:
+def daemon_is_running(timeout: float = 1.5, attempts: int = 2) -> bool:
+    # 0.9.1: a momentarily-busy daemon (memory pressure, GC pause) must not be
+    # misread as "not running" — that used to trigger a duplicate spawn. Retry
+    # with a tolerant timeout before concluding it's down.
     if not SOCK_PATH.exists():
         return False
-    try:
-        s = _connect(timeout=0.5)
-        s.close()
-        return True
-    except DaemonNotRunning:
-        return False
+    for i in range(attempts):
+        try:
+            s = _connect(timeout=timeout)
+            s.close()
+            return True
+        except DaemonNotRunning:
+            if i + 1 < attempts:
+                time.sleep(0.2)
+    return False
 
 
 def spawn_daemon(wait: float = 5.0) -> None:
@@ -65,8 +71,12 @@ def spawn_daemon(wait: float = 5.0) -> None:
     while time.time() < deadline:
         if daemon_is_running():
             return
-        if proc.poll() is not None:
-            raise DaemonError(f"daemon exited immediately (rc={proc.returncode})")
+        rc = proc.poll()
+        if rc is not None and rc != 2:
+            raise DaemonError(f"daemon exited immediately (rc={rc})")
+        # rc == 2 (0.9.1 singleton): our spawn lost the race / found an incumbent
+        # daemon already holding the lock — that's success, not failure. Keep
+        # polling until the incumbent's socket answers (or the deadline).
         time.sleep(0.1)
     raise DaemonError(f"daemon did not come up within {wait}s")
 

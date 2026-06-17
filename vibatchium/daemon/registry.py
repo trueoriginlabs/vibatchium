@@ -342,6 +342,20 @@ class SessionRegistry:
             self._pw = None
             log.info("stopped shared Playwright driver (no sessions)")
 
+    def is_idle(self) -> bool:
+        """0.9.1: True when the daemon holds NO live sessions, NO warm-pooled
+        sessions, and NO in-flight warm tasks — i.e. it's a candidate for the
+        idle reaper. A daemon with any session (incl. attach-mode / bot sessions)
+        is never idle, so the reaper can't touch a working daemon."""
+        # An in-flight create()/close()/delete() holds mutate_lock and may not
+        # have written _entries yet (Chrome still launching) — a cold start would
+        # otherwise look idle and get reaped mid-launch. Never report idle then.
+        if self.mutate_lock.locked():
+            return False
+        if self._entries or self._warm_sessions:
+            return False
+        return not any(not t.done() for t in self._warm_tasks.values())
+
     # ─── Wave 6.1b: warmup ──────────────────────────────────────────────
 
     async def warmup(self) -> None:

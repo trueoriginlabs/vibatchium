@@ -3036,6 +3036,77 @@ def daemon_start(max_sessions, log_verbs, default_safety, default_headless):
     click.echo("daemon started", err=True)
 
 
+@daemon_cmd.command(name="list")
+@click.pass_context
+def daemon_list(ctx):
+    """List vibatchium daemons; flag the live one (socket owner) vs orphans.
+
+    Read-only — scans /proc, spawns nothing, kills nothing. 'orphan?' is
+    relative to THIS XDG_RUNTIME_DIR's socket: a daemon on a different runtime
+    dir (e.g. another project's live bots) is NOT an orphan of this socket, so
+    verify before killing anything.
+    """
+    import glob
+    from .client import daemon_is_running
+    from .daemon.paths import PID_PATH, SOCK_PATH
+
+    sock_live = daemon_is_running()
+    live_pid = None
+    if sock_live:
+        try:
+            live_pid = int(PID_PATH.read_text().strip())
+        except (OSError, ValueError):
+            pass
+    page = os.sysconf("SC_PAGE_SIZE")
+    rows = []
+    for cmdline_path in glob.glob("/proc/[0-9]*/cmdline"):
+        try:
+            with open(cmdline_path, "rb") as f:
+                cmd = f.read().replace(b"\x00", b" ").decode("utf-8", "replace").strip()
+        except OSError:
+            continue
+        if "vibatchium.daemon.server" not in cmd:
+            continue
+        pid = int(cmdline_path.split("/")[2])
+        rss_mb = None
+        try:
+            with open(f"/proc/{pid}/statm") as f:
+                rss_mb = round(int(f.read().split()[1]) * page / 1024 / 1024, 1)
+        except (OSError, ValueError, IndexError):
+            pass
+        live = pid == live_pid
+        if live:
+            status = "live (socket owner)"
+        elif sock_live and live_pid is None:
+            status = "running? (pidfile unreadable — owner unknown)"
+        else:
+            status = "orphan?"
+        rows.append({"pid": pid, "rss_mb": rss_mb, "live": live,
+                     "status": status, "cmd": cmd})
+    rows.sort(key=lambda r: (not r["live"], r["pid"]))
+    if ctx.obj["json"]:
+        click.echo(json.dumps(
+            {"socket": str(SOCK_PATH), "live_pid": live_pid, "daemons": rows}, indent=2))
+        return
+    click.echo(f"socket: {SOCK_PATH}")
+    click.echo(f"live_pid: {live_pid if live_pid else '(none reachable)'}")
+    for r in rows:
+        click.echo(f"  pid {r['pid']:<8} {r['status']:<20} "
+                   f"rss {r['rss_mb'] if r['rss_mb'] is not None else '?'}MB")
+    # Only suggest kills when the live owner is actually known — otherwise the
+    # socket-owning daemon could be mislabeled an orphan.
+    if sock_live and live_pid is None:
+        click.echo("\nSocket is live but the pidfile is unreadable — can't identify "
+                   "the owner; not suggesting any kills.")
+        return
+    orphans = [r["pid"] for r in rows if r["status"] == "orphan?"]
+    if orphans:
+        click.echo(f"\n{len(orphans)} possible orphan(s) of this socket: "
+                   f"{' '.join(map(str, orphans))}")
+        click.echo("Verify each is yours (same XDG_RUNTIME_DIR) before `kill`-ing — "
+                   "a daemon on another runtime dir is NOT an orphan here.")
+
+
 # ─── Wave 7.7.2: MCP-style underscored verb aliases ────────────────────
 #
 # CLI uses `session new` (space), MCP uses `session_new` (underscore).

@@ -111,6 +111,9 @@ ACTIVE_SESSION_PATH = CONFIG_DIR / "active-session"
 
 SOCK_PATH = CACHE_DIR / "daemon.sock"
 PID_PATH = CACHE_DIR / "daemon.pid"
+# 0.9.1: a daemon holds an exclusive flock on this file for its whole life —
+# the race-free singleton guarantee (one daemon per XDG runtime dir / socket).
+LOCK_PATH = CACHE_DIR / "daemon.lock"
 LOG_PATH = CACHE_DIR / "daemon.log"
 DEFAULT_PROFILE_DIR = PROFILES_DIR / "default"
 DEFAULT_PROFILE_DIR.mkdir(parents=True, exist_ok=True)

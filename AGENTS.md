@@ -161,7 +161,15 @@ VIBATCHIUM_DEFAULT_SAFETY=wrap  # auto-flag prompt-injection in scraped content
 VIBATCHIUM_SKILLS=1             # surface per-host skill notes on go/explore (opt-in)
 VIBATCHIUM_PLUGINS=0            # disable plugin discovery at daemon startup
 VIBATCHIUM_AUTO_INSTALL=0       # disable one-time Chrome auto-install on first launch (offline/CI)
+VIBATCHIUM_DAEMON_IDLE_TIMEOUT=0  # seconds; >0 self-shuts an idle (0-session) daemon; 0/unset = disabled (default)
 ```
+
+> **One daemon per `XDG_RUNTIME_DIR`.** As of 0.9.1 a daemon holds an exclusive
+> `flock` for life, so duplicate/non-isolated `vb` calls can't spawn a second
+> daemon that orphans the first. `vb daemon list` shows the live socket-owner vs
+> any orphans (read-only; "orphan?" is relative to the current `XDG_RUNTIME_DIR`).
+> Enable `VIBATCHIUM_DAEMON_IDLE_TIMEOUT` on dogfood/isolated daemons so a stray
+> one-shot daemon self-reaps; leave it off (default) for long-lived bot daemons.
 
 **MCP tool surface (0.8.0).** `vb mcp` exposes the **lean** profile (~80 verbs — the 80%-case: browse, extract, interact, screenshot, tabs, multi-session, the agent loop incl. `explore`/`expect`) by default, not all ~150. Pass `vb mcp --caps=full` (or `all`) for everything, or a custom bucket CSV. The long tail (network, devtools incl. `console_*`, secrets, goals, storage, **and plugin `x.*` verbs**) is one re-registration away — note the lean default also hides dotted plugin verbs, so pass `--caps=full` or `--caps=lean,plugins` if an agent needs them over MCP.
 

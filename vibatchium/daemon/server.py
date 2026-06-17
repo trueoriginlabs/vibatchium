@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import fcntl
 import json
 import logging
 import os
@@ -34,7 +35,10 @@ from collections.abc import Awaitable, Callable
 from . import handlers, handlers_extra
 from . import lease as _lease
 from ..caps import resolve_caps as _resolve_caps, verb_in_caps
-from .paths import DEFAULT_SESSION_NAME, LOG_PATH, PID_PATH, SOCK_PATH, get_active_session_name
+from .paths import (
+    DEFAULT_SESSION_NAME, LOCK_PATH, LOG_PATH, PID_PATH, SOCK_PATH,
+    get_active_session_name,
+)
 from .registry import SessionEntry, SessionRegistry, current_session_ctx
 
 log = logging.getLogger("vibatchium.server")
@@ -102,6 +106,30 @@ def _redact_for_log(cmd: str, args: dict) -> dict:
     if "_lease" in out:
         out["_lease"] = "<redacted>"
     return out
+
+
+def _pidfile_daemon_alive() -> bool:
+    """0.9.1: True if PID_PATH names a live vibatchium daemon process. A
+    latency-independent liveness signal used when the socket connect-probe times
+    out (a live-but-slow incumbent under memory pressure must not be orphaned)."""
+    try:
+        pid = int(PID_PATH.read_text().strip())
+    except (OSError, ValueError):
+        return False
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True            # exists (owned by another user) — assume alive
+    # Guard against PID reuse: confirm it's actually a vibatchium daemon.
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as fh:
+            return b"vibatchium.daemon.server" in fh.read()
+    except OSError:
+        return True            # pid is alive but cmdline unreadable — be safe
 
 
 class Daemon:
@@ -183,6 +211,10 @@ class Daemon:
         self.registry = SessionRegistry()
         self._handlers: dict[str, Callable[[Daemon, dict], Awaitable[Any]]] = {}
         self._stopping = asyncio.Event()
+        # 0.9.1 singleton + idle reaper: the held flock fd (None until acquired)
+        # and a monotonic activity stamp the reaper uses to decide idleness.
+        self._lock_fd: int | None = None
+        self._last_activity: float = time.monotonic()
         # ─── plugin state (see vibatchium/plugins/) ──────────────────────
         # _verb_meta: name → VerbSpec for every add_verb-registered verb.
         # _verb_lock_class: name → "session"|"registry"|"unlocked" override
@@ -371,6 +403,7 @@ class Daemon:
         req_id = req.get("id", "")
         cmd = req.get("cmd")
         args = req.get("args") or {}
+        self._last_activity = time.monotonic()   # 0.9.1: feeds the idle reaper
         # Extract + consume the session selector; default to active session.
         session_name = args.pop("_session", None) or get_active_session_name()
         if cmd not in self._handlers:
@@ -611,16 +644,97 @@ class Daemon:
                 writer.close()
                 await writer.wait_closed()
 
+    def _acquire_singleton_lock(self) -> bool:
+        """0.9.1: take the exclusive daemon lock (held for the process lifetime).
+        Returns False if another daemon already holds it. This is the race-free
+        replacement for the old connect-probe — two daemons can never both bind
+        the socket, so the supersede-and-orphan leak is structurally impossible."""
+        fd = os.open(str(LOCK_PATH), os.O_CREAT | os.O_RDWR, 0o600)
+        # Non-inheritable (Python's default, asserted explicitly): the lock fd
+        # must NOT leak into a child Chrome via exec, or an orphaned Chrome could
+        # keep the flock held after the daemon dies and block the next daemon.
+        os.set_inheritable(fd, False)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            os.close(fd)
+            return False
+        self._lock_fd = fd
+        with contextlib.suppress(OSError):
+            os.ftruncate(fd, 0)
+            os.write(fd, str(os.getpid()).encode())
+        return True
+
+    def _release_singleton_lock(self) -> None:
+        if self._lock_fd is not None:
+            with contextlib.suppress(OSError):
+                fcntl.flock(self._lock_fd, fcntl.LOCK_UN)
+                os.close(self._lock_fd)
+            self._lock_fd = None
+            # DELIBERATELY do NOT unlink LOCK_PATH. flock binds to the inode, not
+            # the path — removing the file would let daemon B flock the soon-to-be
+            # -unlinked inode while daemon C O_CREATs a NEW inode at the same path
+            # and flocks that uncontended, so both "win" the singleton. A
+            # persistent empty lockfile (pidfile model) keeps flock single-inode;
+            # _acquire_singleton_lock O_CREAT-reuses it and rewrites the pid.
+
+    async def _idle_reaper(self) -> None:
+        """0.9.1 (opt-in): self-shutdown after VIBATCHIUM_DAEMON_IDLE_TIMEOUT
+        seconds with ZERO sessions/warm. Disabled by default (0/unset) so the
+        long-lived bot daemon is never surprise-killed; recommended for dogfood /
+        isolated daemons. Gated on registry.is_idle(), so a daemon with any open
+        session (incl. attach-mode) is never reaped."""
+        try:
+            timeout = float(os.environ.get("VIBATCHIUM_DAEMON_IDLE_TIMEOUT", "0") or 0)
+        except ValueError:
+            timeout = 0.0
+        if timeout <= 0:
+            return
+        poll = min(30.0, max(5.0, timeout / 4))
+        while not self._stopping.is_set():
+            await asyncio.sleep(poll)
+            if not self.registry.is_idle():
+                # observed busy → restart the idle clock, so the grace window is
+                # measured from when the daemon last had work (covers a long verb
+                # AND the warm-pool-drain path that never hits dispatch()).
+                self._last_activity = time.monotonic()
+                continue
+            idle_for = time.monotonic() - self._last_activity
+            if idle_for >= timeout:
+                log.info("idle reaper: 0 sessions for %.0fs (>= %.0fs) — self-shutdown",
+                         idle_for, timeout)
+                self._stopping.set()
+                return
+
     async def run(self) -> None:
+        # 0.9.1: race-free singleton — hold an exclusive flock for life.
+        if not self._acquire_singleton_lock():
+            print(f"[vibatchium] another daemon already holds {LOCK_PATH} — "
+                  f"not starting a second", file=sys.stderr)
+            sys.exit(2)
+        # We own the lock, but a pre-0.9.1 daemon (no flock) might still be
+        # serving the socket — never supersede a LIVE daemon, regardless of its
+        # code version. A bounded connect decides; on a TIMEOUT (a live-but-slow
+        # daemon under memory pressure — exactly the leak scenario), fall back to
+        # the pidfile so we don't orphan it. Only reclaim a genuinely dead socket.
         if SOCK_PATH.exists():
+            incumbent_alive = False
             try:
-                _, w = await asyncio.open_unix_connection(str(SOCK_PATH))
+                _, w = await asyncio.wait_for(
+                    asyncio.open_unix_connection(str(SOCK_PATH)), timeout=2.0)
                 w.close()
                 await w.wait_closed()
-                print(f"[vibatchium] daemon already running at {SOCK_PATH}", file=sys.stderr)
-                sys.exit(2)
+                incumbent_alive = True
+            except TimeoutError:
+                incumbent_alive = _pidfile_daemon_alive()
             except (OSError, ConnectionRefusedError):
-                SOCK_PATH.unlink(missing_ok=True)
+                incumbent_alive = False
+            if incumbent_alive:
+                print(f"[vibatchium] daemon already serving at {SOCK_PATH} — "
+                      f"not superseding it", file=sys.stderr)
+                self._release_singleton_lock()
+                sys.exit(2)
+            SOCK_PATH.unlink(missing_ok=True)
 
         server = await asyncio.start_unix_server(self.handle_conn, path=str(SOCK_PATH))
         os.chmod(SOCK_PATH, 0o600)
@@ -639,13 +753,20 @@ class Daemon:
         async with server:
             stopper = asyncio.create_task(self._stopping.wait())
             serving = asyncio.create_task(server.serve_forever())
-            done, pending = await asyncio.wait(
-                {stopper, serving}, return_when=asyncio.FIRST_COMPLETED
-            )
-            for t in pending:
-                t.cancel()
-                with contextlib.suppress(asyncio.CancelledError, Exception):
-                    await t
+            # The reaper runs alongside but is NOT itself a completion trigger:
+            # when it decides to reap it sets `_stopping`, which `stopper`
+            # observes. (A disabled reaper returns immediately — that must NOT
+            # end the daemon, so it's kept out of the wait set.)
+            reaper = asyncio.create_task(self._idle_reaper())
+            try:
+                await asyncio.wait(
+                    {stopper, serving}, return_when=asyncio.FIRST_COMPLETED
+                )
+            finally:
+                for t in (stopper, serving, reaper):
+                    t.cancel()
+                    with contextlib.suppress(asyncio.CancelledError, Exception):
+                        await t
 
         await self.shutdown()
 
@@ -665,6 +786,11 @@ class Daemon:
             SOCK_PATH.unlink()
         with contextlib.suppress(Exception):
             PID_PATH.unlink()
+        # 0.9.1: release the flock LAST (after sock/pid are gone) so the next
+        # daemon takes over cleanly. The lockfile itself is intentionally never
+        # unlinked — flock is inode-bound, so a stable path keeps it the
+        # authoritative single-inode gate.
+        self._release_singleton_lock()
 
 
 def main() -> None:
