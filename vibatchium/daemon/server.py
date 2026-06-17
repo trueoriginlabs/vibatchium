@@ -165,6 +165,7 @@ class Daemon:
         "text", "html", "pdf",                  # pure reads (NOT `content` = set_content)
         "screenshot", "map", "observe",         # read-only page analysis
         "url", "title", "frames",
+        "console_dump",                          # reads the in-memory ring buffer
     })
 
     # 0.7.0 lease: registry verbs that DISRUPT a leased session (tear it down or

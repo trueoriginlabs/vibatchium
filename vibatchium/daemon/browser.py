@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 from dataclasses import dataclass, field
@@ -150,6 +151,13 @@ class BrowserSession:
     dialog_policy: dict = field(default_factory=lambda: {"action": "dismiss"})
     downloads: list = field(default_factory=list)
     network: dict = field(default_factory=lambda: {"capturing": False, "events": [], "max": 500})
+    # 0.8.0 (Vibium lesson): browser console + log capture via a CDP session.
+    # Patchright suppresses page.on('console')/('pageerror') for stealth (the
+    # Runtime/Log CDP domains are detection vectors), so capture goes through an
+    # explicit, opt-in CDP session that console_stop detaches (reverting it).
+    console: dict = field(default_factory=lambda: {
+        "capturing": False, "events": [], "max": 500, "levels": "all",
+        "include_page_console": False, "_cdp": None})
     # Wave 5: when False, this session does NOT own its Playwright driver
     # subprocess — the daemon does (shared). close_session won't `.stop()` it.
     owns_pw: bool = True
@@ -449,6 +457,16 @@ async def attach_session(cdp_url: str, *, pw: Playwright | None = None) -> Brows
 
 async def close_session(session: BrowserSession) -> None:
     log.info("closing session mode=%s owns_pw=%s", session.mode, session.owns_pw)
+    # 0.8.0: explicitly detach a live console-capture CDP session so its
+    # Log/Runtime domains are reverted. Matters most in ATTACH mode, where we
+    # neither context.close() nor pw.stop() the user's foreign Chrome — without
+    # this, an include_page_console capture would leave Runtime enabled on it.
+    cdp = (session.console or {}).get("_cdp")
+    if cdp is not None:
+        with contextlib.suppress(Exception):
+            await cdp.detach()
+        session.console["_cdp"] = None
+        session.console["capturing"] = False
     try:
         if session.mode == "launch":
             await session.context.close()

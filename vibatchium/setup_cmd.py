@@ -67,7 +67,9 @@ def _doc_block(binary: str) -> str:
 # storage, dialogs…) one re-registration away via `--caps=all`. Keep every name
 # here a real bucket in `caps.py` (test_setup_lean_caps_are_valid_buckets guards
 # against typos that would make `vb mcp --caps=…` fail at registration time).
-LEAN_CAPS = "core,nav,content,input,element,agent,vision,session,pages"
+# 0.8.0: the canonical value lives in caps.py (so the direct `vb mcp` default
+# and what setup registers stay identical); re-exported here for callers/tests.
+from .caps import LEAN_CAPS  # noqa: E402
 
 # A Claude Code Skill installed at ~/.claude/skills/vibatchium/SKILL.md. Its
 # `description` is the trigger the host matches to AUTO-invoke vb without the

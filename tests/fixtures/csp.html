@@ -1,0 +1,14 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="img-src 'none'">
+  <title>CSP Fixture</title>
+</head>
+<body>
+  <p>This page sets a Content-Security-Policy that blocks images, then loads a
+  blocked image so the browser emits a security log entry — the kind of
+  browser-level warning the default (Log-only) console capture surfaces.</p>
+  <img src="http://blocked.invalid/x.png" alt="blocked">
+</body>
+</html>

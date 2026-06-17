@@ -53,6 +53,54 @@ log = logging.getLogger("vibatchium.registry")
 # "caller wants a fresh disk read" (the relaunch path) — None is a valid value.
 _UNSET = object()
 
+# 0.8.0 (Vibium lesson): one-time, opt-out Chrome auto-install on the first
+# cold launch that fails because the browser binary is missing. Module-level so
+# it fires AT MOST ONCE per daemon lifetime — a genuinely un-installable Chrome
+# must not re-trigger a multi-minute `patchright install chrome` on every retry
+# and every self-heal relaunch.
+_chrome_install_attempted = False
+_MISSING_CHROME_SIGNATURES = (
+    "executable doesn't exist",
+    "playwright install",
+    "patchright install",
+    "install chrome",
+    "download new browsers",
+)
+
+
+async def _maybe_autoinstall_chrome(exc: BaseException) -> bool:
+    """Return True (caller should retry the launch) iff a one-time Chrome
+    auto-install just ran in response to a missing-executable launch error.
+    Opt out with VIBATCHIUM_AUTO_INSTALL=0 (for sandboxed / offline CI)."""
+    global _chrome_install_attempted
+    if _chrome_install_attempted:
+        return False
+    if os.environ.get("VIBATCHIUM_AUTO_INSTALL", "1").lower() in ("0", "false", "no", "off"):
+        return False
+    msg = str(exc).lower()
+    if not any(sig in msg for sig in _MISSING_CHROME_SIGNATURES):
+        return False
+    # Claim the one-shot BEFORE awaiting so concurrent cold starts don't each
+    # spawn an install.
+    _chrome_install_attempted = True
+    log.warning("Chrome not installed — running one-time `patchright install "
+                "chrome` (may take ~30-60s; set VIBATCHIUM_AUTO_INSTALL=0 to "
+                "disable). One-shot per daemon.")
+    import subprocess
+    import sys
+    try:
+        # Bind to THIS interpreter's patchright (guaranteed importable) rather
+        # than a bare `patchright` on PATH — robust under systemd's minimal PATH.
+        await asyncio.to_thread(
+            subprocess.run, [sys.executable, "-m", "patchright", "install", "chrome"],
+            check=True, capture_output=True, timeout=600)
+        log.info("Chrome installed; retrying launch.")
+        return True
+    except Exception as iexc:  # noqa: BLE001
+        log.warning("auto-install of Chrome failed (%s) — run `vb install` "
+                    "manually.", type(iexc).__name__)
+        return False
+
 
 # The contextvar that carries the current-call's session name through the
 # async task. Set by the dispatcher before invoking a handler; read by the
@@ -608,7 +656,8 @@ class SessionRegistry:
 
     async def _launch_for(self, name: str, *, profile_dir: Path,
                           headless: bool, backend: str,
-                          proxy_cfg=_UNSET, geo_cfg=_UNSET) -> BrowserSession:
+                          proxy_cfg=_UNSET, geo_cfg=_UNSET,
+                          allow_install: bool = True) -> BrowserSession:
         """Cold-launch a Chrome for a session with NO warm-claim — the single
         launch seam shared by create()'s cold path and relaunch().
 
@@ -621,9 +670,25 @@ class SessionRegistry:
         from . import backends as _backends
         if proxy_cfg is _UNSET or geo_cfg is _UNSET:
             proxy_cfg, geo_cfg = self._load_proxy_geo(name, profile_dir)
-        return await _backends.launch(
-            backend, profile_dir, headless=headless, pw=pw, proxy=proxy_cfg,
-            timezone_id=(geo_cfg or {}).get("timezone_id"))
+
+        async def _do_launch():
+            return await _backends.launch(
+                backend, profile_dir, headless=headless, pw=pw, proxy=proxy_cfg,
+                timezone_id=(geo_cfg or {}).get("timezone_id"))
+
+        try:
+            return await _do_launch()
+        except Exception as exc:  # noqa: BLE001
+            # 0.8.0: a missing Chrome binary is the #1 onboarding failure. Try a
+            # one-time auto-install, then retry the launch exactly once. Any
+            # other launch error (or a second failure) propagates unchanged.
+            # NOT on the self-heal relaunch path (allow_install=False): that runs
+            # under a wait_for(30) that would always cancel the ~minutes install
+            # and burn the one-shot flag — and a missing binary mid-life is not a
+            # cold-start onboarding case anyway.
+            if not allow_install or not await _maybe_autoinstall_chrome(exc):
+                raise
+            return await _do_launch()
 
     async def relaunch(self, name: str) -> SessionEntry:
         """Tear down a dead/crashed Chrome and cold-launch a fresh one for the
@@ -656,7 +721,8 @@ class SessionRegistry:
         sess = await asyncio.wait_for(
             self._launch_for(name, profile_dir=entry.profile_dir,
                              headless=old.headless,
-                             backend=entry.flags.get("backend", "patchright")),
+                             backend=entry.flags.get("backend", "patchright"),
+                             allow_install=False),  # see _launch_for: no install under wait_for(30)
             timeout=30)
         # A concurrent session_close/session_delete (mutate_lock — disjoint from
         # the entry.lock we hold) may have popped this entry during the

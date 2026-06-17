@@ -47,9 +47,10 @@ CAP_BUCKETS: dict[str, set[str]] = {
                  "vision_stats", "vision_clear_cache",
                  "vision_budget"},
     "devtools": {"record_start", "record_stop",
+                 "console_start", "console_stop", "console_dump",
                  "eval_handle", "handle_eval", "handle_list",
                  "handle_dispose", "handle_dispose_all"},
-    "agent":    {"observe", "act", "dismiss_banners"},
+    "agent":    {"observe", "act", "dismiss_banners", "expect"},
     "stealth":  {"fingerprint"},
     "liveview": {"liveview_start", "liveview_stop", "liveview_url"},
     "secrets":  {"secret_init", "secret_set", "secret_list", "secret_delete",
@@ -71,6 +72,19 @@ CAP_BUCKETS: dict[str, set[str]] = {
 # to know what to do when nothing else matches.
 ALWAYS_EXPOSED: set[str] = {"status"}
 
+# 0.8.0 (Vibium lesson): named cap PROFILES. `vb mcp` defaults to the `lean`
+# profile — the ~80-verb 80%-case agent surface (browse, extract, interact,
+# screenshot, switch tabs, run parallel sessions, the agent loop) — instead of
+# dumping all ~150 tools into the model's context and taxing tool-selection.
+# `--caps=full` (or `all`) restores everything. This is the SAME set `vb setup`
+# already registers, kept here as the single source of truth so the direct
+# `vb mcp` default cannot drift from what setup installs.
+LEAN_CAPS = "core,nav,content,input,element,agent,vision,session,pages"
+CAP_PROFILES: dict[str, set[str] | None] = {
+    "lean": set(LEAN_CAPS.split(",")),
+    "full": None,   # explicit no-filter (every verb) — alias of `all`
+}
+
 
 class CapsError(ValueError):
     pass
@@ -85,13 +99,25 @@ def resolve_caps(caps_spec: str | None) -> set[str] | None:
     parts = {p.strip().lower() for p in caps_spec.split(",") if p.strip()}
     if not parts or "all" in parts:
         return None
-    bad = parts - set(CAP_BUCKETS.keys())
+    # Expand named profiles (lean/full) into buckets; 'full' (like 'all') is a
+    # no-filter sentinel. Profiles may be mixed with bare bucket names.
+    expanded: set[str] = set()
+    for p in parts:
+        if p in CAP_PROFILES:
+            prof = CAP_PROFILES[p]
+            if prof is None:        # 'full' → no filter
+                return None
+            expanded |= prof
+        else:
+            expanded.add(p)
+    bad = expanded - set(CAP_BUCKETS.keys())
     if bad:
         raise CapsError(
             f"unknown capability bucket(s): {sorted(bad)}. "
-            f"Available: {sorted(CAP_BUCKETS.keys())}"
+            f"Available: {sorted(CAP_BUCKETS.keys())} "
+            f"(or a profile: {sorted(CAP_PROFILES.keys())}, or 'all')"
         )
-    return parts
+    return expanded
 
 
 def verb_in_caps(verb: str, caps: set[str] | None) -> bool:

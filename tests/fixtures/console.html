@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Console Fixture</title></head>
+<body>
+  <h1>console capture fixture</h1>
+  <p>This page intentionally writes to the browser console and throws an
+  uncaught error so the console-capture handler can be exercised end to end
+  without waiting on the SPA-hydration timeout.</p>
+  <script>
+    console.log('hello-log');
+    console.warn('warn-msg');
+    console.error('err-msg');
+    setTimeout(function () { throw new Error('boom-pageerror'); }, 10);
+  </script>
+</body>
+</html>

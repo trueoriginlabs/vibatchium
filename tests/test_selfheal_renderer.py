@@ -21,6 +21,20 @@ from vibatchium.client import call, DaemonError
 from vibatchium.daemon.browser import is_crash_error
 
 
+@pytest.fixture(autouse=True)
+def _restore_plugins_env():
+    """`_make_daemon_entry` sets VIBATCHIUM_PLUGINS=0 on os.environ directly to
+    stop the in-process Daemon() from cold-loading plugins. Snapshot + restore
+    it so the leak can't disable plugin discovery in a later test (e.g.
+    test_integration_daemon) when this module runs first."""
+    prev = os.environ.get("VIBATCHIUM_PLUGINS")
+    yield
+    if prev is None:
+        os.environ.pop("VIBATCHIUM_PLUGINS", None)
+    else:
+        os.environ["VIBATCHIUM_PLUGINS"] = prev
+
+
 # ─── PURE: crash-signature detection ─────────────────────────────────────
 def test_is_crash_error_matches_signatures():
     crashy = [

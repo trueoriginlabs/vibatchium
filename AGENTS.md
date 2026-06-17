@@ -6,7 +6,7 @@ If you're a coding agent (Codex, Cursor, Claude Code) and a user said "use vibat
 
 ```bash
 pipx install git+https://github.com/trueoriginlabs/vibatchium
-patchright install chrome
+patchright install chrome   # optional preflight — the first launch auto-installs Chrome if missing
 vb setup            # wire vibatchium into Codex / Claude Code / Cursor (idempotent)
 ```
 
@@ -156,7 +156,10 @@ VIBATCHIUM_LOG_VERBS=1          # per-verb DEBUG audit trail
 VIBATCHIUM_DEFAULT_SAFETY=wrap  # auto-flag prompt-injection in scraped content
 VIBATCHIUM_SKILLS=1             # surface per-host skill notes on go/explore (opt-in)
 VIBATCHIUM_PLUGINS=0            # disable plugin discovery at daemon startup
+VIBATCHIUM_AUTO_INSTALL=0       # disable one-time Chrome auto-install on first launch (offline/CI)
 ```
+
+**MCP tool surface (0.8.0).** `vb mcp` exposes the **lean** profile (~80 verbs — the 80%-case: browse, extract, interact, screenshot, tabs, multi-session, the agent loop incl. `explore`/`expect`) by default, not all ~150. Pass `vb mcp --caps=full` (or `all`) for everything, or a custom bucket CSV. The long tail (network, devtools incl. `console_*`, secrets, goals, storage, **and plugin `x.*` verbs**) is one re-registration away — note the lean default also hides dotted plugin verbs, so pass `--caps=full` or `--caps=lean,plugins` if an agent needs them over MCP.
 
 ## Plugins — extend the verb surface
 

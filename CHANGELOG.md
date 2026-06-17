@@ -4,6 +4,60 @@ All notable changes to vibatchium are documented here. Versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Until 1.0,
 minor bumps may include breaking changes; we'll always call them out here.
 
+## [0.8.0] — 2026-06-17
+
+Lessons distilled from a deep-dive into **Vibium** (the LLM-friendly browser
+that inspired vibatchium's verb surface) — taking what fits the stealth-first
+niche, declining what doesn't (no WebDriver-BiDi migration: that would forfeit
+Patchright's CDP-path-specific stealth patches).
+
+### Added — browser console + log capture (with a stealth caveat)
+- New `console_start` / `console_stop` / `console_dump` (`devtools` cap bucket):
+  a bounded ring buffer of browser log entries + (optionally) page console,
+  filterable by level (`all` | `warn` | `error`); file dumps `0600`.
+- **Stealth note (a finding the static design missed):** Patchright deliberately
+  keeps the CDP console domains **off** — `page.on('console')` captures nothing —
+  because enabling them is a bot-detection vector. So capture goes through an
+  opt-in CDP session that `console_stop` detaches:
+  - **`Log.entryAdded` (on by default)** — browser-level CSP / network / security
+    / deprecation warnings. Low-detectability and the genuinely stealth-relevant
+    signal: anti-bot walls surface their complaints here, so this answers "why
+    did this wall start failing?". Bound to the active page at start.
+  - **page `console.*` + uncaught errors (opt-in `include_page_console=true`)** —
+    enables CDP `Runtime`, the known "Runtime leak" detection vector, so it
+    raises the detection surface while active. For diagnostics, not stealth runs.
+
+### Added — `expect` one-call verification gate
+- New `expect` verb (`agent` cap bucket): composes element-state (`visible`/
+  `hidden`/`attached`/`detached`) / page-text / URL waits **plus a native
+  Cloudflare/DataDome challenge-wall check (by page title)** into a single
+  `{passed, failures[]}` verdict, with an auto screenshot on failure. Assert
+  "did my action land / did I get challenge-walled" in one call instead of
+  stitching `wait`/`text`/`url`/`screenshot`. Every check is optional. (A bare
+  `/login` redirect is title-undetectable — use `url_contains` for that.)
+
+### Changed — `vb mcp` defaults to a lean tool surface
+- **`vb mcp` now exposes the `lean` profile (~80 verbs) by default instead of all
+  ~150.** Flooding an agent with 150 tools taxes tool-selection and burns context
+  — the same class of waste as the 0.7.0 default-screenshot fix. This is the SAME
+  surface `vb setup` already registered; the profile now lives in `caps.py` as the
+  single source of truth (`CAP_PROFILES`, `LEAN_CAPS`) so the direct `vb mcp`
+  default can't drift from what setup installs. **Pass `--caps=full` (or `all`) to
+  restore every tool;** `--caps=lean` is the explicit alias. `python -m
+  vibatchium.mcp_server` defaults to lean too. **Note:** the lean surface also
+  hides dotted **plugin verbs** (`x.*`) — pass `--caps=full` or
+  `--caps=lean,plugins` if an agent needs them over MCP. The REST `serve` surface
+  is unchanged (full by default).
+
+### Changed — zero-step onboarding: auto-install Chrome on first launch
+- The first cold launch that fails because Chrome isn't installed now runs a
+  **one-time** `patchright install chrome` and retries — so `vb start` / `explore`
+  / the MCP tools work without a separate `vb install` step. Fires at most once
+  per daemon lifetime (a broken Chrome can't re-trigger a multi-minute install on
+  every retry / self-heal relaunch) and serialized so a cold-start fan-out can't
+  race N installs. Opt out with `VIBATCHIUM_AUTO_INSTALL=0` (sandboxed / offline
+  CI); `vb install` stays as explicit preflight.
+
 ## [0.7.0] — 2026-06-16
 
 A coordinated reliability pass: the daemon now **self-heals** a crashed Chrome,

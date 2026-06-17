@@ -86,7 +86,7 @@ Active-session resolution: `--session FLAG` → `$VIBATCHIUM_SESSION` env → `~
 
 | Mode | Surface | Auth |
 |---|---|---|
-| `vb mcp` | stdio JSON-RPC; `--caps=...` gates the bucket set | n/a (stdio) |
+| `vb mcp` | stdio JSON-RPC; defaults to the **lean** ~80-verb profile (`--caps=full`/`all` for the full surface; `--caps=...` for a custom bucket set) | n/a (stdio) |
 | `vb serve` | FastAPI on `127.0.0.1:8000`; every verb at `POST /v1/<verb>`; WebSocket live-view at `/v1/stream/<session>` | bearer token (`~/.cache/vibatchium/rest-token`, mode 0600) |
 
 **REST capability gating**: `vb serve --caps=core,nav,input,vision` restricts the HTTP surface the same way `mcp --caps` does. Without it, REST grants local-code-equivalent access (eval + secret_* + file-writing verbs all exposed) — safe for localhost dev, **not** for hosted/multi-tenant.

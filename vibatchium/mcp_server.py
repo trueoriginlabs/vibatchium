@@ -1,6 +1,8 @@
 """Vibatchium MCP server — exposes the daemon's verbs as MCP tools over stdio.
 
-Wire-up: `claude mcp add vibatchium python -m vibatchium.mcp_server`.
+Wire-up: `claude mcp add vibatchium python -m vibatchium.mcp_server` (prefer
+`vb setup`). 0.8.0: this entrypoint defaults to the `lean` tool profile (~80
+verbs) like `vb mcp`; set caps explicitly (`--caps full`) for the full surface.
 
 The MCP server talks to the SAME daemon that the CLI uses. A browser session
 started by `vb start` (or `vb attach`) is immediately accessible to
@@ -105,6 +107,19 @@ TOOLS: list[tuple[str, str, dict, str, Any]] = [
                      "skip_verify": _bool("Skip DNS pre-check (trusted URLs only).", False)},
       "required": ["url"]},
      "explore", None),
+    ("expect",
+     "ONE-CALL verification gate. Assert the page reached an expected state — composes element-state / page-text / URL checks plus a native challenge-wall check into a single {passed, failures[]} verdict. Use after an action to confirm it landed (or that you got soft-blocked) instead of stitching wait/text/url/screenshot calls. Every check is optional.",
+     {"type": "object",
+      "properties": {"target": _str("Element to assert — @eN / @text: / @label: / CSS."),
+                     "state": _str("Expected element state (default 'visible'): visible|hidden|attached|detached."),
+                     "text_contains": _str("Page text must contain this substring."),
+                     "url_contains": _str("Current URL must contain this substring."),
+                     "allow_walled": _bool("If false (default), a detected Cloudflare/DataDome challenge wall is a failure.", False),
+                     "timeout_ms": _int("Per-wait budget.", 10_000),
+                     "screenshot": {"type": "string", "enum": ["auto", "always", "never"],
+                                    "default": "auto",
+                                    "description": "auto = capture only on failure (evidence); always; never."}}},
+     "expect", None),
     ("go", "Navigate to a URL.",
      {"type": "object",
       "properties": {"url": _str("Target URL."),
@@ -383,6 +398,25 @@ TOOLS: list[tuple[str, str, dict, str, Any]] = [
     ("network_dump", "Dump captured network events (optionally to a file).",
      {"type": "object", "properties": {"path": _str("Optional output JSON path.")}},
      "network_dump", None),
+    ("console_start",
+     "Capture browser log entries (CSP/network/security warnings — what an anti-bot wall complains about), and optionally page console.* + uncaught errors. Via an opt-in CDP session (Patchright keeps console domains off for stealth); console_stop reverts it.",
+     {"type": "object",
+      "properties": {"max": _int("Ring buffer size.", 500),
+                     "levels": {"type": "string", "enum": ["all", "warn", "error"],
+                                "default": "all",
+                                "description": "all | warn (warning+error) | error only."},
+                     "include_page_console": _bool(
+                         "Also capture page console.* + uncaught errors. Enables CDP "
+                         "Runtime (a detection vector) — leave off for stealth-critical work.",
+                         False)}},
+     "console_start", None),
+    ("console_stop", "Stop console/page-error capture.",
+     {"type": "object", "properties": {}}, "console_stop", None),
+    ("console_dump", "Dump captured console + pageerror events (optionally errors-only, or to a file).",
+     {"type": "object",
+      "properties": {"errors_only": _bool("Only return error-severity entries.", False),
+                     "path": _str("Optional output JSON path (written 0600).")}},
+     "console_dump", None),
     ("screenshot_annotate", "Screenshot with @eN bounding-box overlays (vision-LLM friendly).",
      {"type": "object",
       "properties": {"path": _str("Output PNG path."),
@@ -1143,9 +1177,13 @@ async def main() -> None:
 
 
 def _entrypoint(caps: str | None = None) -> None:
-    """Run the MCP server (stdio). `caps` is a comma-separated list of
-    capability buckets to expose; None = expose all."""
+    """Run the MCP server (stdio). `caps` is a comma-separated capability list.
+    0.8.0: an unset/empty `caps` defaults to the `lean` profile (matching
+    `vb mcp` and `python -m vibatchium.mcp_server`); pass `full`/`all` for every
+    tool."""
     global _ACTIVE_CAPS
+    if not caps:
+        caps = "lean"
     _ACTIVE_CAPS = _resolve_caps(caps)
     asyncio.run(main())
 

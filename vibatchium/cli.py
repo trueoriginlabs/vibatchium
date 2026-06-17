@@ -2560,14 +2560,23 @@ def fingerprint(ctx, target, url, extract, settle_ms):
 
 @cli.command()
 @click.option("--caps", default=None,
-              help="Comma-separated capability list to expose "
-                   "(default: all). Available: core,session,nav,content,input,"
-                   "element,pages,storage,network,dialogs,overrides,vision,"
-                   "devtools,agent. Example: `--caps=core,session,nav,input,agent` "
-                   "exposes only the basics (cuts prompt-token tax for LLMs).")
+              help="Comma-separated capability list to expose. Default: the "
+                   "`lean` profile (~80-verb 80%-case surface) — pass `--caps=full` "
+                   "(or `all`) to expose every tool. Buckets: core,session,nav,"
+                   "content,input,element,pages,storage,network,dialogs,overrides,"
+                   "vision,devtools,agent,… Example: `--caps=core,nav,input,agent`.")
 def mcp(caps):
-    """Run the MCP server (stdio JSON-RPC) — wires every CLI verb as an MCP tool."""
+    """Run the MCP server (stdio JSON-RPC) — wires the CLI verbs as MCP tools.
+
+    Defaults to the lean tool surface so agents aren't flooded with ~150 tools;
+    `--caps=full` restores the complete surface.
+    """
     from .mcp_server import _entrypoint
+    # 0.8.0 (Vibium lesson): lean-by-default. An explicit --caps (incl. `full`/
+    # `all`) always wins; unset OR empty is steered to the lean profile (the
+    # _entrypoint default also enforces this for `python -m vibatchium.mcp_server`).
+    if not caps:
+        caps = "lean"
     try:
         _entrypoint(caps=caps)
     except ValueError as exc:

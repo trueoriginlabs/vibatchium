@@ -1196,6 +1196,97 @@ def register_all(daemon) -> None:
 
     # ─── Wave 7.7.5: high-level "just works" verbs ───────────────────────
 
+    @daemon.handler("expect")
+    async def _expect(d, args):
+        """0.8.0 (Vibium lesson): a one-call verification GATE.
+
+        Composes the existing wait / state / text / url primitives — plus a
+        native Cloudflare/DataDome challenge-wall check (by page title) — into a
+        single {passed, failures[]} verdict, so an agent can assert "did my
+        action land / did I get challenge-walled" without stitching 4-5 calls.
+        Every leg is OPTIONAL; only the ones you pass are checked.
+
+        Args:
+          target/ref     (str)  element to assert — @eN / @text: / @label: / CSS
+          state          (str)  expected element state (default 'visible' when a
+                                target is given): visible|hidden|attached|detached
+                                (the states Playwright's wait_for supports)
+          text_contains  (str)  page text must contain this substring
+          url_contains   (str)  current URL must contain this substring
+          allow_walled   (bool) if false (default), a detected challenge wall is a failure
+          timeout_ms     (int)  per-wait budget (default 10000)
+          screenshot     (str)  auto (default: capture on failure) | always | never
+
+        Returns:
+          {passed, failures:[{check, expected, actual}], walled?, url,
+           screenshot_b64?, screenshot_reason?}
+        """
+        s = _need_session(d)
+        timeout = int(args.get("timeout_ms", 10_000))
+        failures: list[dict] = []
+
+        target = args.get("target") or args.get("ref")
+        if target:
+            state = args.get("state", "visible")
+            try:
+                loc = _resolve_target(d, target)
+                await loc.wait_for(state=state, timeout=timeout)
+            except Exception as exc:  # noqa: BLE001
+                failures.append({"check": "element_state", "expected": f"{target} {state}",
+                                 "actual": f"{type(exc).__name__}"})
+
+        want_text = args.get("text_contains")
+        if want_text:
+            try:
+                tr = await d._handlers["text"](d, {})
+                page_text = tr.get("text", "") if isinstance(tr, dict) else str(tr)
+            except Exception as exc:  # noqa: BLE001
+                failures.append({"check": "text_contains", "expected": want_text,
+                                 "actual": f"read-failed: {type(exc).__name__}"})
+            else:
+                if want_text not in page_text:
+                    failures.append({"check": "text_contains", "expected": want_text,
+                                     "actual": "not present"})
+
+        want_url = args.get("url_contains")
+        cur_url = s.page.url
+        if want_url and want_url not in cur_url:
+            failures.append({"check": "url_contains", "expected": want_url,
+                             "actual": cur_url})
+
+        # Native stealth signal: a Cloudflare/DataDome challenge wall (by title).
+        # NOTE: this is title-based challenge detection, not generic login-wall
+        # detection — a /login redirect won't match; use url_contains for that.
+        from . import backends as _backends
+        wall = None
+        try:
+            wall = _backends.is_walled(await s.page.title(), None)
+        except Exception:  # noqa: BLE001
+            wall = None
+        allow_walled = bool(args.get("allow_walled", False))
+        if wall and not allow_walled:
+            failures.append({"check": "not_walled", "expected": "no wall",
+                             "actual": f"{wall}-walled"})
+
+        passed = not failures
+        out = {"passed": passed, "failures": failures, "url": cur_url}
+        if wall:
+            out["walled"] = wall
+
+        shot_mode = str(args.get("screenshot", "auto")).strip().lower()
+        if isinstance(args.get("screenshot"), bool):
+            shot_mode = "always" if args["screenshot"] else "never"
+        take = shot_mode == "always" or (shot_mode == "auto" and not passed)
+        if take:
+            try:
+                shot = await d._handlers["screenshot"](d, {"full_page": False})
+                if isinstance(shot, dict) and shot.get("png_b64"):
+                    out["screenshot_b64"] = shot["png_b64"]
+                    out["screenshot_reason"] = "requested" if passed else "failure-evidence"
+            except Exception as exc:  # noqa: BLE001
+                out["screenshot_error"] = f"{type(exc).__name__}: {exc}"
+        return out
+
     @daemon.handler("explore")
     async def _explore(d, args):
         """One-call "go look at this URL and tell me what's there."

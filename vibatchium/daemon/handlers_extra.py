@@ -676,6 +676,143 @@ def register_extra(daemon) -> None:
             return {"path": path, "events": len(events)}
         return {"events": events}
 
+    # ─── console + browser-log capture ───────────────────────────────────
+    #
+    # 0.8.0 (Vibium lesson), with a STEALTH CAVEAT the static design missed:
+    # Patchright deliberately keeps the CDP Runtime/Log domains OFF (enabling
+    # them is a bot-detection vector), so plain page.on('console')/('pageerror')
+    # capture NOTHING. We capture via an explicit, opt-in CDP session that
+    # console_stop detaches (reverting the change):
+    #   • Log.entryAdded (ALWAYS) — browser-level warnings: CSP/network/security
+    #     /deprecation. This is the low-detectability, stealth-RELEVANT signal —
+    #     anti-bot walls surface their complaints here, so it answers "why did
+    #     this wall start failing?". Bound to ONE page (the active one at start);
+    #     re-run start after a tab swap to follow a new page.
+    #   • Runtime.consoleAPICalled / exceptionThrown (OPT-IN via
+    #     include_page_console=true) — page console.* + uncaught errors. This
+    #     enables Runtime.enable, the KNOWN "Runtime leak" detection vector, so
+    #     it raises the detection surface while active. Use for diagnostics, not
+    #     during stealth-critical scraping.
+
+    _CONSOLE_LEVELS = {
+        "all": None,                              # capture every level
+        "warn": {"warning", "error"},             # _norm folds warn->warning
+        "error": {"error"},
+    }
+
+    @daemon.handler("console_start")
+    async def _console_start(d, args):
+        """Capture browser log entries (+ optionally page console / errors).
+
+        Args:
+          max:    ring buffer size (default 500)
+          levels: "all" (default) | "warn" (warning+error) | "error"
+          include_page_console: also capture page console.* + uncaught errors
+            (default False — enabling it turns on CDP Runtime, a detection
+            vector; leave off for stealth-critical work).
+        """
+        s = _session(d)
+        # Re-running while capturing RESTARTS on the CURRENT page — this is how
+        # you re-bind after a tab swap / self-heal page change, or change args.
+        # Detach the prior CDP session first so Log/Runtime domains don't stack.
+        old = s.console.get("_cdp")
+        if old is not None:
+            try:
+                await old.detach()
+            except Exception:  # noqa: BLE001
+                pass
+            s.console["_cdp"] = None
+        s.console["capturing"] = False
+        s.console["events"] = []
+        s.console["max"] = int(args.get("max", 500))
+        levels = str(args.get("levels", "all")).strip().lower()
+        if levels not in _CONSOLE_LEVELS:
+            levels = "all"
+        s.console["levels"] = levels
+        include_page = bool(args.get("include_page_console", False))
+        allow = _CONSOLE_LEVELS[levels]            # None = no level filter
+
+        def _push(ev):
+            if allow is not None and ev.get("level") not in allow:
+                return
+            evs = s.console["events"]
+            if len(evs) >= s.console["max"]:
+                evs.pop(0)
+            evs.append(ev)
+
+        def _norm(level):
+            lv = (level or "").lower()
+            return "warning" if lv in ("warn", "warning") else lv
+
+        def on_log(params):
+            e = params.get("entry", {}) or {}
+            _push({"kind": "log", "level": _norm(e.get("level")),
+                   "source": e.get("source"), "text": e.get("text", ""),
+                   "url": e.get("url"), "line": e.get("lineNumber"),
+                   "ts": time.time()})
+
+        def on_console_api(params):
+            args_ = params.get("args", []) or []
+            parts = [str(a.get("value", a.get("description", "")))
+                     for a in args_]
+            _push({"kind": "console", "level": _norm(params.get("type")),
+                   "text": " ".join(p for p in parts if p),
+                   "ts": time.time()})
+
+        def on_exception(params):
+            det = params.get("exceptionDetails", {}) or {}
+            exc = det.get("exception", {}) or {}
+            text = exc.get("description") or det.get("text") or "uncaught error"
+            _push({"kind": "pageerror", "level": "error",
+                   "text": text, "ts": time.time()})
+
+        cdp = await s.context.new_cdp_session(s.page)
+        cdp.on("Log.entryAdded", on_log)
+        await cdp.send("Log.enable")
+        if include_page:
+            cdp.on("Runtime.consoleAPICalled", on_console_api)
+            cdp.on("Runtime.exceptionThrown", on_exception)
+            await cdp.send("Runtime.enable")
+        s.console["_cdp"] = cdp
+        s.console["include_page_console"] = include_page
+        s.console["capturing"] = True
+        return {"capturing": True, "max": s.console["max"], "levels": levels,
+                "include_page_console": include_page}
+
+    @daemon.handler("console_stop")
+    async def _console_stop(d, args):
+        s = _session(d)
+        if not s.console.get("capturing"):
+            return {"capturing": False}
+        cdp = s.console.get("_cdp")
+        if cdp is not None:
+            # detach() disables the Log/Runtime domains too — reverting the
+            # stealth cost, not just unsubscribing our handlers.
+            try:
+                await cdp.detach()
+            except Exception:  # noqa: BLE001
+                pass
+        s.console["_cdp"] = None
+        s.console["capturing"] = False
+        return {"capturing": False, "events": len(s.console.get("events", []))}
+
+    @daemon.handler("console_dump")
+    async def _console_dump(d, args):
+        """Return captured console/pageerror events (newest-last), or write them
+        0600 to `path`. `errors_only` narrows to error-severity entries."""
+        s = _session(d)
+        events = list(s.console.get("events", []))
+        if args.get("errors_only"):
+            events = [e for e in events if e.get("level") == "error"]
+        path = args.get("path")
+        if path:
+            # Console text can echo URLs/tokens printed by the page — 0600 like
+            # the network/HAR dumps, never inherit umask.
+            from .paths import secure_write as _sw
+            _sw(Path(path), _json.dumps(events, indent=2))
+            return {"path": path, "events": len(events)}
+        return {"events": events}
+
     # ─── HAR export (full network capture format) ────────────────────────
 
     @daemon.handler("har_start")
