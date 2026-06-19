@@ -592,14 +592,49 @@ def register_extra(daemon) -> None:
             `headers` dict. Use sparingly — headers can be 5-30 KB per
             request on modern sites. Required for downstream code that
             needs rate-limit-* or set-cookie inspection.
+          capture_response_bodies: when True, response events get a `text`
+            (utf-8) or `b64` (binary) field carrying the response body, capped
+            at max_body. The body is fetched asynchronously AFTER the response
+            event fires, so it lands in the event dict slightly later —
+            network_dump drains in-flight body fetches before it returns. PAIR
+            WITH url_filter (e.g. a GraphQL op name) so you buffer only the one
+            body you want, not every asset. This is the race-free way to
+            recover an id/token from the response of an action you trigger via
+            a SEPARATE rpc (e.g. a submit click): arm capture, fire the click,
+            dump. Unlike `wait_response` it does NOT hold the session lock while
+            waiting, so it can be armed-then-triggered on the same session.
+            Capture binds the page live at start and — like the rest of network
+            capture — does NOT re-attach across a tab/page swap, so arm it on
+            the page the action's XHR fires on (same-page).
+          max_body: per-body cap in bytes (default 262144).
         """
         s = _session(d)
         if s.network.get("capturing"):
             return {"capturing": True, "already_on": True}
         s.network["events"].clear()
+        s.network["_body_tasks"] = []
         s.network["max"] = int(args.get("max", 500))
         url_filter = args.get("url_filter")
         capture_headers = bool(args.get("capture_response_headers", False))
+        capture_bodies = bool(args.get("capture_response_bodies", False))
+        max_body = int(args.get("max_body", 262_144))
+
+        async def _grab_body(resp, ev):
+            # resp.body() is async but the response listener is sync, so we
+            # schedule this and let network_dump/network_stop drain it.
+            try:
+                body = await resp.body()
+                if len(body) > max_body:
+                    body = body[:max_body]
+                    ev["truncated"] = True
+                try:
+                    ev["text"] = body.decode("utf-8")
+                except UnicodeDecodeError:
+                    ev["b64"] = base64.b64encode(body).decode()
+            except Exception as exc:  # noqa: BLE001
+                ev["body_error"] = f"{type(exc).__name__}: {exc}"
+            finally:
+                ev.pop("body_pending", None)
 
         def on_request(req):
             if url_filter and url_filter not in req.url:
@@ -634,6 +669,11 @@ def register_extra(daemon) -> None:
                     # downstream code can distinguish "no headers" from
                     # "header capture off".
                     ev["headers"] = {}
+            if capture_bodies:
+                ev["body_pending"] = True
+                s.network["_body_tasks"].append(
+                    asyncio.ensure_future(_grab_body(resp, ev))
+                )
             s.network["events"].append(ev)
 
         s.page.on("request", on_request)
@@ -645,6 +685,7 @@ def register_extra(daemon) -> None:
             "max": s.network["max"],
             "url_filter": url_filter,
             "capture_response_headers": capture_headers,
+            "capture_response_bodies": capture_bodies,
         }
 
     @daemon.handler("network_stop")
@@ -660,11 +701,25 @@ def register_extra(daemon) -> None:
             except Exception:  # noqa: BLE001
                 pass
         s.network["capturing"] = False
+        for t in s.network.get("_body_tasks", []):
+            if not t.done():
+                t.cancel()
+        s.network["_body_tasks"] = []
         return {"capturing": False, "events": len(s.network["events"])}
 
     @daemon.handler("network_dump")
     async def _network_dump(d, args):
         s = _session(d)
+        # Drain in-flight body-capture tasks (resp.body() is fetched async by
+        # the response listener) so captured bodies are present in the dump.
+        pending = [t for t in s.network.get("_body_tasks", []) if not t.done()]
+        if pending:
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*pending, return_exceptions=True), timeout=10,
+                )
+            except TimeoutError:
+                pass
         path = args.get("path")
         events = s.network.get("events", [])
         if path:

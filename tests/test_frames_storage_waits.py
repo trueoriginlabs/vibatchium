@@ -97,6 +97,49 @@ def test_network_capture_with_response_headers(local_server):
     call("network_stop")
 
 
+def test_network_capture_response_bodies(local_server):
+    """0.9.1: capture_response_bodies grabs the response body into the ring
+    buffer. This is the race-free CreateTweet-capture primitive — arm capture,
+    fire a SEPARATE click that triggers an XHR, then dump and read the body (no
+    session-lock deadlock like wait_response). simple.html's #trigger-fetch
+    button does fetch('/api-test') → JSON, the same shape as a GraphQL submit
+    response carrying a new id."""
+    call("network_start", {
+        "max": 100,
+        "url_filter": "/api-test",
+        "capture_response_bodies": True,
+    })
+    call("go", {"url": f"{local_server}/simple.html"})
+    call("click", {"target": "#trigger-fetch"})
+    call("sleep", {"ms": 300})
+    res = call("network_dump")
+    bodies = [
+        ev for ev in res["events"]
+        if ev.get("phase") == "response" and "/api-test" in ev.get("url", "")
+    ]
+    assert bodies, f"expected an /api-test response event, got {res['events'][:3]}"
+    ev = bodies[0]
+    # network_dump must have drained the async body fetch before returning
+    assert "body_pending" not in ev
+    assert '"hello":"world"' in ev.get("text", ""), \
+        f"expected captured JSON body, got {ev.get('text')!r}"
+    call("network_stop")
+
+
+def test_network_capture_bodies_opt_in(local_server):
+    """Body capture is opt-in: without capture_response_bodies, the matching
+    response event carries no `text`/`b64` (only the cheap metadata)."""
+    call("network_start", {"max": 100, "url_filter": "/api-test"})
+    call("go", {"url": f"{local_server}/simple.html"})
+    call("click", {"target": "#trigger-fetch"})
+    call("sleep", {"ms": 300})
+    res = call("network_dump")
+    for ev in res["events"]:
+        if "/api-test" in ev.get("url", ""):
+            assert "text" not in ev and "b64" not in ev
+    call("network_stop")
+
+
 def test_pages_lifecycle():
     res = call("pages")
     initial = len(res["pages"])
