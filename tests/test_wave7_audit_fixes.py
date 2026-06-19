@@ -194,6 +194,25 @@ def test_attr_routes_through_resolver(local_server):
     assert "value" in r
 
 
+def test_html_honors_timeout_ms_fast_fail(local_server):
+    """0.9.1: the `html` verb now passes timeout_ms to inner_html(), so a
+    readback of a missing/wedged element fails FAST and releases the session
+    lock — instead of blocking on patchright's hard-coded 30s default. This is
+    the daemon-side cure for the drift-#12 ghost (reply posts live but the
+    id-readback hangs). Before the fix this call took ~30s; now ~0.8s."""
+    import time
+    import pytest
+    from vibatchium.client import call, DaemonError
+    call("go", {"url": f"{local_server}/simple.html"})
+    t0 = time.monotonic()
+    with pytest.raises(DaemonError):
+        call("html", {"target": "div#definitely-not-here", "timeout_ms": 800})
+    elapsed = time.monotonic() - t0
+    # 800ms timeout → fast fail. Old behavior (30s patchright default) would
+    # blow well past this ceiling; generous margin keeps it robust under load.
+    assert elapsed < 10, f"html ignored timeout_ms (took {elapsed:.1f}s)"
+
+
 def test_attr_requires_target_or_selector():
     from vibatchium.client import call, DaemonError
     import pytest

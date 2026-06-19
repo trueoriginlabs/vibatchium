@@ -1656,10 +1656,20 @@ def register_all(daemon) -> None:
 
     @daemon.handler("html")
     async def _html(d, args):
+        """Inner HTML of a target (or whole-page HTML when no target given).
+
+        timeout_ms (int) caps the locator wait, default 30000 (patchright's own
+        default — so unchanged for existing callers). Pass a small value so a
+        wedged renderer fails the readback fast and RELEASES the session lock
+        instead of blocking on inner_html() for the full 30s — the drift-#12
+        ghost-readback case (reply posts live, id-readback hangs). Applies to
+        the locator branch; whole-page content() has no timeout knob.
+        """
+        timeout = int(args.get("timeout_ms", 30_000))
         sel = args.get("target") or args.get("selector")
         if sel:
             loc = _resolve_target(d, sel)
-            return {"html": await loc.inner_html()}
+            return {"html": await loc.inner_html(timeout=timeout)}
         s = _need_session(d)
         return {"html": await s.page.content()}
 
@@ -1673,10 +1683,11 @@ def register_all(daemon) -> None:
         stays token-frugal. `max_chars` caps the output (default 40000).
         """
         from ..extract import html_to_markdown
+        timeout = int(args.get("timeout_ms", 30_000))
         sel = args.get("target") or args.get("selector")
         if sel:
             loc = _resolve_target(d, sel)
-            raw_html = await loc.inner_html()
+            raw_html = await loc.inner_html(timeout=timeout)
             url = None
         else:
             s = _need_session(d)
