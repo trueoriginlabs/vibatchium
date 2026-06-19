@@ -20,6 +20,36 @@ from . import elements, observe as _observe_mod
 
 log = logging.getLogger("vibatchium.handlers_extra")
 
+
+def _body_capture_fields(raw: bytes, max_body: int) -> dict:
+    """Truncate a response body to max_body and decode it into capture fields.
+
+    Returns {"text": str} for utf-8 bodies or {"b64": str} for binary, plus
+    {"truncated": True} when the cap was hit. A size cut can land mid multi-byte
+    UTF-8 char, so on a strict-decode failure of a TRUNCATED body we back off up
+    to 3 bytes to the last valid boundary rather than mislabel otherwise-text as
+    binary (mirrors fetch.truncate_body). Used by wait_response and the
+    network_start body-capture listener so both behave identically.
+    """
+    out: dict = {}
+    if len(raw) > max_body:
+        raw = raw[:max_body]
+        out["truncated"] = True
+    try:
+        out["text"] = raw.decode("utf-8")
+        return out
+    except UnicodeDecodeError:
+        if out.get("truncated"):
+            for back in range(1, 4):
+                try:
+                    out["text"] = raw[:-back].decode("utf-8")
+                    return out
+                except UnicodeDecodeError:
+                    continue
+        out["b64"] = base64.b64encode(raw).decode()
+        return out
+
+
 # Pillow is optional — only required for `screenshot --annotate`. We import
 # lazily to keep the base install thin.
 try:  # pragma: no cover - depends on whether pillow is installed
@@ -565,14 +595,7 @@ def register_extra(daemon) -> None:
         if capture_body:
             try:
                 body_bytes = await resp.body()
-                if len(body_bytes) > max_body:
-                    body_bytes = body_bytes[:max_body]
-                    out["truncated"] = True
-                # text-ish bodies → utf-8; binary → base64
-                try:
-                    out["text"] = body_bytes.decode("utf-8")
-                except UnicodeDecodeError:
-                    out["b64"] = base64.b64encode(body_bytes).decode()
+                out.update(_body_capture_fields(body_bytes, max_body))
             except Exception as exc:  # noqa: BLE001
                 out["body_error"] = f"{type(exc).__name__}: {exc}"
         return out
@@ -624,13 +647,12 @@ def register_extra(daemon) -> None:
             # schedule this and let network_dump/network_stop drain it.
             try:
                 body = await resp.body()
-                if len(body) > max_body:
-                    body = body[:max_body]
-                    ev["truncated"] = True
-                try:
-                    ev["text"] = body.decode("utf-8")
-                except UnicodeDecodeError:
-                    ev["b64"] = base64.b64encode(body).decode()
+                ev.update(_body_capture_fields(body, max_body))
+            except asyncio.CancelledError:
+                # network_stop / a dump-drain timeout can cancel us mid-fetch;
+                # leave a marker so the event isn't mistaken for a non-body one.
+                ev["body_error"] = "cancelled"
+                raise
             except Exception as exc:  # noqa: BLE001
                 ev["body_error"] = f"{type(exc).__name__}: {exc}"
             finally:
@@ -720,6 +742,12 @@ def register_extra(daemon) -> None:
                 )
             except TimeoutError:
                 pass
+        # Trim settled tasks so the list does not grow unbounded across a
+        # long-lived capture (it is only otherwise cleared at start/stop).
+        if "_body_tasks" in s.network:
+            s.network["_body_tasks"] = [
+                t for t in s.network["_body_tasks"] if not t.done()
+            ]
         path = args.get("path")
         events = s.network.get("events", [])
         if path:

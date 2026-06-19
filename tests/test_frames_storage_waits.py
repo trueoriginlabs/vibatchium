@@ -119,7 +119,14 @@ def test_network_capture_response_bodies(local_server):
     ]
     assert bodies, f"expected an /api-test response event, got {res['events'][:3]}"
     ev = bodies[0]
-    # network_dump must have drained the async body fetch before returning
+    # By dump time the body fetch has completed (body_pending cleared, text set).
+    # NOTE: this proves end-to-end capture, not the network_dump DRAIN in
+    # isolation — on loopback resp.body() resolves within the settle sleep, so
+    # the drain's pending list is usually empty here. The drain is the safety
+    # net for a slow real-world body (e.g. a large CreateTweet response) and is
+    # statically bounded by wait_for(timeout=10); a loopback harness can't
+    # deterministically hold a body in-flight past the response event to isolate
+    # it.
     assert "body_pending" not in ev
     assert '"hello":"world"' in ev.get("text", ""), \
         f"expected captured JSON body, got {ev.get('text')!r}"
@@ -134,9 +141,38 @@ def test_network_capture_bodies_opt_in(local_server):
     call("click", {"target": "#trigger-fetch"})
     call("sleep", {"ms": 300})
     res = call("network_dump")
-    for ev in res["events"]:
-        if "/api-test" in ev.get("url", ""):
-            assert "text" not in ev and "b64" not in ev
+    matched = [ev for ev in res["events"] if "/api-test" in ev.get("url", "")]
+    # Non-vacuous: prove the event was actually captured before asserting it
+    # carries no body (else a missed fetch would pass this test trivially).
+    assert any(ev.get("phase") == "response" for ev in matched), \
+        f"expected an /api-test response event, got {res['events'][:3]}"
+    for ev in matched:
+        assert "text" not in ev and "b64" not in ev
+    call("network_stop")
+
+
+def test_network_capture_body_truncation(local_server):
+    """max_body caps the captured body and flags truncated. A small cap on the
+    26-byte /api-test JSON proves the byte-cap + the truncated marker (and that
+    an ASCII cut stays `text`, not b64)."""
+    call("network_start", {
+        "max": 100,
+        "url_filter": "/api-test",
+        "capture_response_bodies": True,
+        "max_body": 10,
+    })
+    call("go", {"url": f"{local_server}/simple.html"})
+    call("click", {"target": "#trigger-fetch"})
+    call("sleep", {"ms": 300})
+    res = call("network_dump")
+    bodies = [
+        ev for ev in res["events"]
+        if ev.get("phase") == "response" and "/api-test" in ev.get("url", "")
+    ]
+    assert bodies, f"expected an /api-test response event, got {res['events'][:3]}"
+    ev = bodies[0]
+    assert ev.get("truncated") is True
+    assert ev.get("text") == '{"hello":"', f"got {ev.get('text')!r}"  # first 10 bytes
     call("network_stop")
 
 

@@ -402,7 +402,17 @@ TOOLS: list[tuple[str, str, dict, str, Any]] = [
                      "forced_colors": _str("active|none|no-override")}},
      "media", None),
     ("network_start", "Start capturing request/response events.",
-     {"type": "object", "properties": {"max": _int("Ring buffer size.", 500)}},
+     {"type": "object", "properties": {
+         "max": _int("Ring buffer size.", 500),
+         "url_filter": _str("Only capture events whose URL contains this "
+                            "substring (matches request AND response URLs)."),
+         "capture_response_headers": _bool("Response events include a headers "
+                                           "dict.", False),
+         "capture_response_bodies": _bool("Response events include the body as "
+             "`text` (utf-8) or `b64` (binary), capped at max_body. Pair with "
+             "url_filter; race-free way to read an id from a response you "
+             "trigger via a separate click.", False),
+         "max_body": _int("Per-body cap in bytes when capturing bodies.", 262144)}},
      "network_start", None),
     ("network_stop", "Stop network capture.",
      {"type": "object", "properties": {}}, "network_stop", None),

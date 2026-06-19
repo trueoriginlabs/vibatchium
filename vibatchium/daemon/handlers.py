@@ -1671,7 +1671,11 @@ def register_all(daemon) -> None:
             loc = _resolve_target(d, sel)
             return {"html": await loc.inner_html(timeout=timeout)}
         s = _need_session(d)
-        return {"html": await s.page.content()}
+        # content() has no native timeout; bound it so a wedged renderer on the
+        # whole-page path also frees the session lock (same goal as the locator
+        # branch). wait_for cancels the call and surfaces a TimeoutError.
+        import asyncio as _asyncio
+        return {"html": await _asyncio.wait_for(s.page.content(), timeout / 1000)}
 
     @daemon.handler("extract")
     async def _extract(d, args):
@@ -1691,7 +1695,8 @@ def register_all(daemon) -> None:
             url = None
         else:
             s = _need_session(d)
-            raw_html = await s.page.content()
+            import asyncio as _asyncio
+            raw_html = await _asyncio.wait_for(s.page.content(), timeout / 1000)
             url = s.page.url
         md = html_to_markdown(raw_html)
         max_chars = int(args.get("max_chars", 40_000))

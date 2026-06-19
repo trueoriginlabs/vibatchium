@@ -213,6 +213,21 @@ def test_html_honors_timeout_ms_fast_fail(local_server):
     assert elapsed < 10, f"html ignored timeout_ms (took {elapsed:.1f}s)"
 
 
+def test_extract_honors_timeout_ms_fast_fail(local_server):
+    """0.9.1: the `extract` verb shares the identical timeout_ms readback path
+    as `html` (separate copy in _extract), so it gets its own fast-fail test —
+    a refactor dropping timeout= on one branch must not silently regress."""
+    import time
+    import pytest
+    from vibatchium.client import call, DaemonError
+    call("go", {"url": f"{local_server}/simple.html"})
+    t0 = time.monotonic()
+    with pytest.raises(DaemonError):
+        call("extract", {"target": "div#definitely-not-here", "timeout_ms": 800})
+    elapsed = time.monotonic() - t0
+    assert elapsed < 10, f"extract ignored timeout_ms (took {elapsed:.1f}s)"
+
+
 def test_attr_requires_target_or_selector():
     from vibatchium.client import call, DaemonError
     import pytest
