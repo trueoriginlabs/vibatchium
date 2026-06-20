@@ -162,7 +162,22 @@ VIBATCHIUM_SKILLS=1             # surface per-host skill notes on go/explore (op
 VIBATCHIUM_PLUGINS=0            # disable plugin discovery at daemon startup
 VIBATCHIUM_AUTO_INSTALL=0       # disable one-time Chrome auto-install on first launch (offline/CI)
 VIBATCHIUM_DAEMON_IDLE_TIMEOUT=0  # seconds; >0 self-shuts an idle (0-session) daemon; 0/unset = disabled (default)
+VIBATCHIUM_LOG_FILE=<path>      # full daemon-log path (default: a persistent state dir, see below)
+VIBATCHIUM_LOG_MAX_BYTES=10485760 # rotate the daemon log past this size (0 = never rotate)
+VIBATCHIUM_LOG_BACKUPS=5        # how many rotated daemon-log backups to keep
 ```
+
+> **The daemon log is persistent (0.9.2).** It lives at
+> `$XDG_STATE_HOME/vibatchium/daemon.log` (default `~/.local/state/vibatchium/daemon.log`),
+> not the volatile `$XDG_RUNTIME_DIR` — so tracebacks / self-heal / ghost-readback
+> history survive a reboot or daemon bounce. A `RotatingFileHandler` keeps it
+> bounded (`VIBATCHIUM_LOG_MAX_BYTES` × `VIBATCHIUM_LOG_BACKUPS`); the socket,
+> pidfile, and singleton lock stay in the runtime dir by design. If the state
+> dir can't be created (read-only HOME), the log falls back to the volatile
+> runtime dir — the pre-0.9.2 behaviour — rather than crashing. Because the log
+> now keys off HOME/`XDG_STATE_HOME`, isolating a daemon by `XDG_RUNTIME_DIR`
+> alone no longer isolates its log; set `VIBATCHIUM_LOG_FILE` (or an isolated
+> HOME) too. Old logs in the runtime dir are abandoned, not migrated.
 
 > **One daemon per `XDG_RUNTIME_DIR`.** As of 0.9.1 a daemon holds an exclusive
 > `flock` for life, so duplicate/non-isolated `vb` calls can't spawn a second

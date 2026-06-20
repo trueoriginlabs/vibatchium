@@ -26,7 +26,7 @@ import pytest
 
 from vibatchium.client import call, DaemonError
 from vibatchium.daemon.paths import (
-    CACHE_DIR, CONFIG_DIR, DEFAULT_PROFILE_DIR, PROFILES_DIR,
+    CACHE_DIR, CONFIG_DIR, DEFAULT_PROFILE_DIR, PROFILES_DIR, STATE_DIR,
 )
 
 
@@ -175,7 +175,7 @@ def _mode_bits(p) -> int:
 def test_config_and_profile_dirs_are_0700():
     """Wave 7.5d: dirs that hold per-session cookies / login state must
     not be readable / traversable by other system users."""
-    for d in (CACHE_DIR, CONFIG_DIR, PROFILES_DIR, DEFAULT_PROFILE_DIR):
+    for d in (CACHE_DIR, CONFIG_DIR, PROFILES_DIR, DEFAULT_PROFILE_DIR, STATE_DIR):
         mode = _mode_bits(d)
         assert mode == 0o700, (
             f"{d} mode is 0o{mode:03o}, expected 0o700 — "

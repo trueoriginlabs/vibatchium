@@ -28,6 +28,7 @@ import logging
 import os
 import signal
 import sys
+from logging.handlers import RotatingFileHandler
 import time
 from typing import Any
 from collections.abc import Awaitable, Callable
@@ -36,7 +37,7 @@ from . import handlers, handlers_extra
 from . import lease as _lease
 from ..caps import resolve_caps as _resolve_caps, verb_in_caps
 from .paths import (
-    DEFAULT_SESSION_NAME, LOCK_PATH, LOG_PATH, PID_PATH, SOCK_PATH,
+    CACHE_DIR, DEFAULT_SESSION_NAME, LOCK_PATH, LOG_PATH, PID_PATH, SOCK_PATH,
     get_active_session_name,
 )
 from .registry import SessionEntry, SessionRegistry, current_session_ctx
@@ -793,24 +794,52 @@ class Daemon:
         self._release_singleton_lock()
 
 
+class _SecureRotatingFileHandler(RotatingFileHandler):
+    """RotatingFileHandler that keeps the active log AND every rotated backup at
+    0600 — the daemon log can carry site names / URLs (low-but-real
+    sensitivity). _open() runs on construction and after each rollover, so every
+    file this handler creates is chmod'd; a rotated backup keeps the 0600 it had
+    while it was the active baseFilename."""
+
+    def _open(self):
+        stream = super()._open()
+        try:
+            os.chmod(self.baseFilename, 0o600)
+        except OSError:
+            pass
+        return stream
+
+
 def main() -> None:
     # Wave 7.5e: level controlled by VIBATCHIUM_LOG_LEVEL (default INFO).
     # Setting it to DEBUG together with VIBATCHIUM_LOG_VERBS=1 produces a
     # full audit trail of every verb dispatched.
     level_name = os.environ.get("VIBATCHIUM_LOG_LEVEL", "INFO").upper()
     level = getattr(logging, level_name, logging.INFO)
-    logging.basicConfig(
-        filename=str(LOG_PATH),
-        level=level,
-        format="%(asctime)s %(name)s %(levelname)s %(message)s",
-    )
-    # Wave 7.5d/e fix: basicConfig opens the file with mode inherited from
-    # umask (typically 0664). The daemon log can include site names from
-    # `secret set` and other low-but-real-sensitivity metadata. Force 0600.
+    # 0.9.2: persistent + bounded daemon log. LOG_PATH now resolves to a state
+    # dir (see paths.py) so the forensic trail survives reboots/daemon bounces;
+    # a RotatingFileHandler caps on-disk size. maxBytes=0 disables rotation.
+    # The daemon MUST always start, so neither a malformed size/backup env value
+    # nor an unwritable log path may crash it: bad numbers fall back to the
+    # default, and an un-openable path falls back to the runtime CACHE_DIR
+    # (guaranteed-writable, volatile — the pre-0.9.2 location).
     try:
-        os.chmod(LOG_PATH, 0o600)
+        max_bytes = int(os.environ.get("VIBATCHIUM_LOG_MAX_BYTES") or 10 * 1024 * 1024)
+    except ValueError:
+        max_bytes = 10 * 1024 * 1024
+    try:
+        backups = max(0, int(os.environ.get("VIBATCHIUM_LOG_BACKUPS") or 5))
+    except ValueError:
+        backups = 5
+    try:
+        handler = _SecureRotatingFileHandler(
+            str(LOG_PATH), maxBytes=max_bytes, backupCount=backups)
     except OSError:
-        pass
+        handler = _SecureRotatingFileHandler(
+            str(CACHE_DIR / "daemon.log"), maxBytes=max_bytes, backupCount=backups)
+    handler.setFormatter(
+        logging.Formatter("%(asctime)s %(name)s %(levelname)s %(message)s"))
+    logging.basicConfig(level=level, handlers=[handler])
     asyncio.run(Daemon().run())
 
 

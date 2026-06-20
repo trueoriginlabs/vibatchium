@@ -37,6 +37,11 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 #    (the socket path is derived from XDG_RUNTIME_DIR at import time). ──
 _RUNTIME_DIR = tempfile.mkdtemp(prefix="vb-smoke-")
 os.environ["XDG_RUNTIME_DIR"] = _RUNTIME_DIR
+# 0.9.2: the daemon log now lives in a persistent state dir (shared per-HOME),
+# so isolating XDG_RUNTIME_DIR alone no longer isolates the log — pin it under
+# our temp dir so a smoke run can't interleave/rotate-clobber a real daemon's
+# persistent forensic log.
+os.environ["VIBATCHIUM_LOG_FILE"] = os.path.join(_RUNTIME_DIR, "daemon.log")
 os.environ["VIBATCHIUM_WARM"] = "off"
 os.environ["VIBATCHIUM_MAX_SESSIONS"] = "16"
 

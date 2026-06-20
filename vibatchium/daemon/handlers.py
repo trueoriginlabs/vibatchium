@@ -343,11 +343,11 @@ def register_all(daemon) -> None:
             on = bool(on)
         d.flags["log_verbs"] = on
         log.info("log_verbs toggled to %s", on)
+        from .paths import LOG_PATH as _LOG_PATH
         return {"log_verbs": on,
-                "note": ("per-verb DEBUG log enabled — set "
-                         "VIBATCHIUM_LOG_LEVEL=DEBUG and tail "
-                         "$XDG_RUNTIME_DIR/vibatchium/daemon.log "
-                         "to see verb traffic") if on else "off"}
+                "note": (f"per-verb DEBUG log enabled — set "
+                         f"VIBATCHIUM_LOG_LEVEL=DEBUG and tail {_LOG_PATH} "
+                         f"to see verb traffic") if on else "off"}
 
     # ─── lifecycle ────────────────────────────────────────────────────────
 

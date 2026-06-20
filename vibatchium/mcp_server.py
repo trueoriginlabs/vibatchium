@@ -82,7 +82,7 @@ TOOLS: list[tuple[str, str, dict, str, Any]] = [
       "required": ["url"]},
      "verify_url", None),
     ("set_log_verbs",
-     "Toggle the daemon's per-verb DEBUG audit log at runtime. Useful for non-trivial runs where you want a full call trail; tail $XDG_RUNTIME_DIR/vibatchium/daemon.log to see it.",
+     "Toggle the daemon's per-verb DEBUG audit log at runtime. Useful for non-trivial runs where you want a full call trail; the toggle's response returns the daemon-log path to tail.",
      {"type": "object",
       "properties": {"on": _bool("True to enable, false to disable.", False)},
       "required": ["on"]},

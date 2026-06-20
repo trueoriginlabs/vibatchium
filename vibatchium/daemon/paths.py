@@ -114,7 +114,41 @@ PID_PATH = CACHE_DIR / "daemon.pid"
 # 0.9.1: a daemon holds an exclusive flock on this file for its whole life —
 # the race-free singleton guarantee (one daemon per XDG runtime dir / socket).
 LOCK_PATH = CACHE_DIR / "daemon.lock"
-LOG_PATH = CACHE_DIR / "daemon.log"
+
+# 0.9.2: the daemon LOG lives in a PERSISTENT state dir (survives reboots and
+# daemon bounces), NOT the volatile runtime CACHE_DIR — so the per-verb forensic
+# trail (tracebacks, self-heal, ghost readbacks) is no longer wiped on every
+# restart. Socket/pid/lock deliberately STAY in CACHE_DIR (a stale socket SHOULD
+# die on reboot; the flock is inode-bound). The server writes via a rotating
+# handler so the on-disk log stays bounded. Override the full path with
+# VIBATCHIUM_LOG_FILE (e.g. for tests or a custom location).
+_xdg_state = os.environ.get("XDG_STATE_HOME")
+if _xdg_state and Path(_xdg_state).is_dir():
+    _state_base = Path(_xdg_state) / "vibatchium"
+else:
+    _state_base = Path.home() / ".local" / "state" / "vibatchium"
+# FAIL-SAFE: paths.py is imported by every entrypoint, so a failure here would
+# break all of `vb` AND the daemon. If the persistent state dir can't be created
+# (read-only HOME, odd env), fall back to the runtime CACHE_DIR — a volatile log,
+# i.e. exactly the pre-0.9.2 behaviour, never a crash.
+try:
+    _state_base.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(_state_base, 0o700)
+    except OSError:
+        pass
+    STATE_DIR = _state_base
+except OSError:
+    STATE_DIR = CACHE_DIR
+_log_override = os.environ.get("VIBATCHIUM_LOG_FILE")
+if _log_override:
+    LOG_PATH = Path(_log_override).expanduser()
+    try:
+        LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+else:
+    LOG_PATH = STATE_DIR / "daemon.log"
 DEFAULT_PROFILE_DIR = PROFILES_DIR / "default"
 DEFAULT_PROFILE_DIR.mkdir(parents=True, exist_ok=True)
 try:

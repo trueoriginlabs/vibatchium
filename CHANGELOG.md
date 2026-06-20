@@ -4,6 +4,35 @@ All notable changes to vibatchium are documented here. Versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Until 1.0,
 minor bumps may include breaking changes; we'll always call them out here.
 
+## [0.9.2] — 2026-06-20
+
+Persistent, bounded daemon log + the drift-#12 ghost cure primitives.
+
+### Changed — daemon log survives reboots
+- The daemon log moved from the volatile runtime dir (`$XDG_RUNTIME_DIR/vibatchium/daemon.log`,
+  tmpfs — wiped on every reboot/daemon bounce) to a **persistent state dir**:
+  `$XDG_STATE_HOME/vibatchium/daemon.log` (default `~/.local/state/vibatchium/daemon.log`).
+  The per-verb forensic trail (tracebacks, self-heal, ghost readbacks) is no
+  longer lost when the daemon restarts. The socket, pidfile, and singleton lock
+  deliberately stay in the runtime dir (a stale socket *should* die on reboot).
+- The log is now written via a `RotatingFileHandler` so it stays bounded on disk
+  (`VIBATCHIUM_LOG_MAX_BYTES`, default 10 MiB × `VIBATCHIUM_LOG_BACKUPS`, default
+  5; `maxBytes=0` disables rotation). Active log and every rotated backup are
+  kept at `0600`. Override the full path with `VIBATCHIUM_LOG_FILE`.
+
+### Added — `html`/`extract` honor `timeout_ms`
+- The `html` and `extract` verbs now pass `timeout_ms` (default 30000, unchanged)
+  to the locator read, and bound the whole-page `content()` path too, so a
+  wedged readback fails fast and frees the session lock instead of blocking on
+  patchright's 30s default.
+
+### Added — `network_start` response-body capture
+- `network_start` gains `capture_response_bodies` (+ `max_body`): response events
+  carry `text`/`b64` of the body, drained by `network_dump`. The race-free way to
+  recover an id/token from the response of an action you trigger via a separate
+  rpc (e.g. read a new tweet's `rest_id` from a submit's GraphQL response) —
+  `wait_response` can't, since it holds the session lock while waiting.
+
 ## [0.9.1] — 2026-06-17
 
 Daemon-singleton + idle reaper (reliability fix) — closes the daemon-leak that let non-isolated
