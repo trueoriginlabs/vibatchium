@@ -4,7 +4,10 @@ build-backend = "hatchling.build"
 
 [project]
 name = "vibatchium"
-version = "0.9.3"
+# Single source of truth: the version is read from vibatchium/__init__.py
+# (see [tool.hatch.version]) so the packaging version can never drift from the
+# runtime __version__ again (it did, silently, at 0.9.2 and 0.9.3).
+dynamic = ["version"]
 description = "Patchwright stealth + Vibium-style LLM-friendly CLI for agentic browser automation."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -74,6 +77,9 @@ vb = "vibatchium.cli:main"
 Homepage = "https://github.com/trueoriginlabs/vibatchium"
 Issues = "https://github.com/trueoriginlabs/vibatchium/issues"
 Source = "https://github.com/trueoriginlabs/vibatchium"
+
+[tool.hatch.version]
+path = "vibatchium/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["vibatchium"]
