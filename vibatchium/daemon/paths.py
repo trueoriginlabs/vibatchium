@@ -17,6 +17,7 @@ for the corresponding `session_*` verbs.
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 from pathlib import Path
@@ -122,6 +123,15 @@ LOCK_PATH = CACHE_DIR / "daemon.lock"
 # die on reboot; the flock is inode-bound). The server writes via a rotating
 # handler so the on-disk log stays bounded. Override the full path with
 # VIBATCHIUM_LOG_FILE (e.g. for tests or a custom location).
+#
+# 0.9.3: the LOG FILENAME carries a per-daemon suffix derived from the runtime
+# dir (see _runtime_log_suffix). The state dir is HOME-derived (shared by every
+# daemon for this user) while socket/pid/lock are XDG_RUNTIME_DIR-derived
+# (unique per daemon); without the suffix the primary live daemon and an
+# isolated daemon (e.g. project-scouter on its own XDG_RUNTIME_DIR) would both
+# open the SAME daemon.log with their OWN RotatingFileHandler and race on
+# rotation, shredding each other's history. The primary daemon keeps the
+# documented bare daemon.log; only an isolated runtime dir gets a suffix.
 _xdg_state = os.environ.get("XDG_STATE_HOME")
 if _xdg_state and Path(_xdg_state).is_dir():
     _state_base = Path(_xdg_state) / "vibatchium"
@@ -140,6 +150,39 @@ try:
     STATE_DIR = _state_base
 except OSError:
     STATE_DIR = CACHE_DIR
+def _runtime_log_suffix(runtime_dir: str | None) -> str:
+    """Per-daemon log-file suffix so daemons on DIFFERENT runtime dirs never
+    share one persistent log file.
+
+    The daemon LOG lives under the HOME-derived STATE_DIR (shared across every
+    daemon for this user), while the socket/pid/lock live under the
+    XDG_RUNTIME_DIR-derived CACHE_DIR (unique per daemon). Without a suffix the
+    primary live daemon and an isolated daemon (e.g. project-scouter's
+    XDG_RUNTIME_DIR=/run/user/<uid>/scouter-vb) would both open
+    STATE_DIR/daemon.log with their OWN RotatingFileHandler and RACE on the
+    daemon.log -> daemon.log.1 rename at rotation — silently shredding each
+    other's history.
+
+    The PRIMARY daemon — the default systemd runtime dir (/run/user/<uid>), or
+    no runtime dir at all (the ~/.cache fallback) — keeps the documented bare
+    `daemon.log` for backward-compat. Any OTHER (intentionally isolated) runtime
+    dir gets a stable, readable, collision-safe `-<name>-<hash8>` suffix. Pure
+    function of the path (no env reads) so it's directly unit-testable.
+    """
+    if not runtime_dir or not Path(runtime_dir).is_dir():
+        return ""  # ~/.cache fallback / no per-user runtime dir -> single daemon
+    try:
+        if hasattr(os, "getuid"):
+            if Path(runtime_dir).resolve() == Path(f"/run/user/{os.getuid()}").resolve():
+                return ""  # the primary daemon keeps the bare daemon.log
+    except OSError:
+        pass
+    token = re.sub(r"[^A-Za-z0-9_-]", "-", Path(runtime_dir).name).strip("-") or "rt"
+    digest = hashlib.sha1(runtime_dir.encode("utf-8", "surrogatepass")).hexdigest()[:8]
+    return f"-{token}-{digest}"
+
+
+_LOG_SUFFIX = _runtime_log_suffix(os.environ.get("XDG_RUNTIME_DIR"))
 _log_override = os.environ.get("VIBATCHIUM_LOG_FILE")
 if _log_override:
     LOG_PATH = Path(_log_override).expanduser()
@@ -148,7 +191,7 @@ if _log_override:
     except OSError:
         pass
 else:
-    LOG_PATH = STATE_DIR / "daemon.log"
+    LOG_PATH = STATE_DIR / f"daemon{_LOG_SUFFIX}.log"
 DEFAULT_PROFILE_DIR = PROFILES_DIR / "default"
 DEFAULT_PROFILE_DIR.mkdir(parents=True, exist_ok=True)
 try:

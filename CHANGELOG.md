@@ -4,6 +4,26 @@ All notable changes to vibatchium are documented here. Versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Until 1.0,
 minor bumps may include breaking changes; we'll always call them out here.
 
+## [0.9.3] — 2026-06-21
+
+Per-daemon log files — close the multi-daemon rotation race.
+
+### Fixed — isolated daemons no longer share (and rotate-clobber) one log
+- The persistent daemon log filename now carries a **per-daemon suffix** derived
+  from the runtime dir. The state dir (`$XDG_STATE_HOME/vibatchium`) is
+  HOME-derived and therefore **shared** by every daemon for a user, while the
+  socket/pid/lock are `XDG_RUNTIME_DIR`-derived and unique per daemon. Before
+  this fix, the primary live daemon and an **isolated** daemon (e.g.
+  project-scouter on its own `XDG_RUNTIME_DIR=/run/user/<uid>/scouter-vb`) both
+  opened the same `daemon.log` with their own `RotatingFileHandler` and **raced
+  on the rotation rename**, silently shredding each other's history.
+- The **primary** daemon (default `XDG_RUNTIME_DIR=/run/user/<uid>`, or no
+  runtime dir at all) keeps the documented bare `daemon.log` — no change to the
+  existing path. Only an intentionally-isolated runtime dir gets a stable,
+  readable `daemon-<name>-<hash8>.log` (e.g. `daemon-scouter-vb-1a2b3c4d.log`).
+  `VIBATCHIUM_LOG_FILE` still overrides the whole path.
+- Staged like every daemon change: takes effect on each daemon's next bounce.
+
 ## [0.9.2] — 2026-06-20
 
 Persistent, bounded daemon log + the drift-#12 ghost cure primitives.
