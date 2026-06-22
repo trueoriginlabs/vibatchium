@@ -58,6 +58,34 @@ stealth session.
   layout tables read fine as markdown), a `<canvas>` or a **non-icon** `<svg>`
   (decorative icon-sized svgs are netted out), or an image-heavy / thin-text page.
 
+### Added — MCP server `instructions` (escalate-when-blocked)
+
+The best stealth in the world is wasted if the agent never *reaches* for it. The
+MCP server shipped an **empty** `instructions` field, so a connecting agent saw
+only a flat tool list — and the common failure was: call the built-in WebFetch →
+get a 403 / Cloudflare challenge / JS-shell → report "I couldn't access that" →
+stop, never trying vb.
+
+- The MCP server now ships a tight `instructions` string (surfaced in the
+  `InitializeResult` before any tool is chosen — the channel that reaches an
+  arbitrary connecting MCP client, not just Claude-Code-with-`vb setup`). It is
+  **caps-aware**: it names only the browse verbs actually exposed under the
+  active `--caps`, and is omitted entirely when a narrowed profile leaves no
+  browse escalation, so it never points the agent at a tool it can't call. It
+  names the WebFetch/WebSearch failure symptoms (403/429, Cloudflare/DataDome/
+  PerimeterX challenges, JS-shells, login/paywalls) and makes the escalation
+  explicit: *a block is the signal to switch, not a final result — call
+  `explore`.* It keeps the cheap-default carve-out (plain HTML / search → keep
+  using WebFetch) and **does not overclaim** (patchright clears *most* such walls
+  cold, not all). The same framing already lived in `vb setup`'s CLAUDE.md block
+  + skill and `AGENTS.md`, but those only reach Claude-Code-with-setup.
+- The `go` and `explore` tool descriptions now carry the same when-blocked
+  trigger, so the guidance also rides *with* the tool the agent is about to pick
+  (each MCP surface renders independently — a client may show one and not the
+  other). Implementation note: the text is wired into the hand-built
+  `InitializationOptions` (the load-bearing path the client actually reads),
+  not just the `Server()` constructor.
+
 ## [0.9.3] — 2026-06-21
 
 Per-daemon log files — close the multi-daemon rotation race.

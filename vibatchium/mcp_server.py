@@ -27,6 +27,13 @@ from . import __version__
 from .client import call as daemon_call, daemon_is_running, spawn_daemon
 
 
+# Server instructions are built by `_build_instructions()` (defined below, after
+# the tool table + caps machinery it reads). The `instructions` string is the
+# highest-leverage real estate for tool SELECTION: it reaches every connecting
+# client in the InitializeResult, before any tool is chosen — its whole job is to
+# make an agent that got blocked by WebFetch escalate to vb instead of giving up.
+# We attach it to `server.instructions` once those deps exist, and rebuild it
+# per-connection (caps-aware) in `_init_options()`.
 server = Server("vibatchium")
 
 
@@ -88,6 +95,10 @@ TOOLS: list[tuple[str, str, dict, str, Any]] = [
       "required": ["on"]},
      "set_log_verbs", None),
     ("explore",
+     "USE THIS WHEN WebFetch/WebSearch/curl GOT BLOCKED — a 403, a "
+     "Cloudflare/DataDome \"Just a moment...\" challenge, a login/paywall, or an "
+     "empty \"JavaScript is required\" shell: don't report failure, use this — "
+     "patchright clears most such walls cold. "
      "ONE-CALL 'look at this URL', TEXT-FIRST. Does verify_url → auto-start session if needed (headless) → go → extract text. It does NOT screenshot by default: read and navigate with the returned text/selectors, and a screenshot is captured only as a FALLBACK when the page yields no usable text (canvas/image/blank SPA). This is the 80% case of 'just show me what's on this page' — use it instead of separate start/go/text calls unless you need multi-step interaction. Pass screenshot='always' to force a screenshot, 'never' to suppress even the fallback; when one is captured it comes back as a viewable image, not base64 text. Without an explicit session it runs on an OFF-BUDGET transient ephemeral session (0.7.0) — it never competes with persistent sessions for a slot and is auto-deleted afterward, so it won't touch your 'default' session.",
      {"type": "object",
       "properties": {"url": _str("Target URL — required."),
@@ -120,7 +131,11 @@ TOOLS: list[tuple[str, str, dict, str, Any]] = [
                                     "default": "auto",
                                     "description": "auto = capture only on failure (evidence); always; never."}}},
      "expect", None),
-    ("go", "Navigate to a URL.",
+    ("go", "Navigate to a URL in the stealth browser, then pair with "
+     "extract/text/html/map. Reach for this (or explore) when WebFetch/curl was "
+     "blocked — a 403, a Cloudflare/DataDome \"Just a moment...\" challenge, a "
+     "login/paywall, or a JavaScript-only page that returns no usable HTML — or "
+     "when the page needs a real browser.",
      {"type": "object",
       "properties": {"url": _str("Target URL."),
                      "wait_until": _str("load|domcontentloaded|networkidle|commit"),
@@ -1004,6 +1019,62 @@ def _filter_tools(caps: set[str] | None) -> list[tuple]:
     return [t for t in TOOLS if t[0] in allowed_names]
 
 
+# ─── server instructions (caps-aware, built from the live tool surface) ──────
+#
+# Tailored to the ACTIVE caps so the escalation guidance never names a tool the
+# agent's list doesn't contain — the give-up failure this whole feature targets.
+# (A fresh-eyes review caught the earlier static text promising "always-on"
+# explore/go even under a custom --caps that drops them.) Never overclaim:
+# patchright clears MOST anti-bot walls, not all. The same WHEN-to-use framing
+# also lives in setup_cmd.py (the `vb setup` CLAUDE.md block + skill) and
+# AGENTS.md, but those only reach Claude-Code-with-setup — this channel reaches
+# an ARBITRARY connecting MCP client.
+_ENTRY_LINES = {
+    "explore": "- explore(url) — START HERE. One call: stealth session → navigate → clean page text (off-budget ephemeral, auto-deleted). The 80% case.",
+    "go": "- go(url) then extract — lower-level navigate, then LLM-ready Markdown (flags structure_loss).",
+    "screenshot": "- screenshot(tiles=true) — full page as PNG tiles on disk; read with your own vision when extract flags loss.",
+}
+
+
+def _build_instructions(caps: set[str] | None) -> str | None:
+    """The MCP `instructions` string for the tool surface exposed under ``caps``.
+
+    Names only the browse verbs actually present (the headline escalation and the
+    entry-point list), so an agent is never told to call a tool that isn't in its
+    list. Returns ``None`` when neither ``explore`` nor ``go`` is exposed — an
+    operator has narrowed --caps past any browse escalation, so there's nothing
+    to escalate to and we ship no (false) promise rather than name absent tools.
+    """
+    exposed = {t[0] for t in _filter_tools(caps)}
+    if "explore" not in exposed and "go" not in exposed:
+        return None
+    primary = "explore(url)" if "explore" in exposed else "go(url) then extract"
+    entries = [_ENTRY_LINES[v] for v in ("explore", "go", "screenshot")
+               if v in exposed]
+    head = f"""\
+When WebFetch / WebSearch / curl comes back with any of these, the page is NOT unreachable — it's behind a wall a plain HTTP client can't pass:
+- 403 / 429 / "Access Denied" / generic bot-block
+- a Cloudflare / DataDome / PerimeterX challenge ("Just a moment...", "Checking your browser")
+- an empty JS-shell ("JavaScript is required", blank SPA, content only after scripts run)
+- a login wall or paywall
+
+DO NOT report failure and stop. Do not answer the user "I couldn't access that page" — a block is the SIGNAL to switch, not a final result.
+Call {primary}. vibatchium ('vb') is a real stealth browser (patchright/Playwright fork) on this server; it clears most such walls cold. Not every one — a hard CAPTCHA or interactive click-gate can still fail — so try it, don't pre-assume it won't work.
+
+Cheap default still wins: for plain static HTML, Google, or a news/general lookup, keep using WebFetch/WebSearch — it's faster. Reach for vb when normal fetch FAILS, or the page needs a real browser (SPA, login/session, multi-step flow).
+
+Entry points (this server's current tool surface):
+"""
+    return head + "\n".join(entries) + "\n(Other verbs may exist behind opt-in caps.)"
+
+
+# Default-surface text (no caps filter → full surface) for the Server() ctor /
+# introspection; the load-bearing per-connection value is rebuilt in
+# _init_options() from the ACTIVE caps.
+_INSTRUCTIONS = _build_instructions(None)
+server.instructions = _INSTRUCTIONS
+
+
 # Module-level state set by _entrypoint(caps=...) before the server runs.
 # list_tools / call_tool read this; default None = expose everything.
 _ACTIVE_CAPS: set[str] | None = None
@@ -1213,20 +1284,31 @@ def _result_to_content(result: Any) -> list[types.Content]:
     return blocks
 
 
+def _init_options() -> InitializationOptions:
+    """Build the InitializeResult options handed to ``server.run()``.
+
+    ``instructions`` is the load-bearing field: ServerSession copies it straight
+    into the InitializeResult the client sees (mcp ``session.py``), and because
+    we construct InitializationOptions by hand (rather than via
+    ``server.create_initialization_options()``), the text must be passed HERE —
+    setting it only on the ``Server()`` constructor would be silently dropped.
+    Rebuilt per-connection from the ACTIVE caps so it never names a tool the
+    client can't see (``None`` when no browse escalation is exposed).
+    """
+    return InitializationOptions(
+        server_name="vibatchium",
+        server_version=__version__,
+        instructions=_build_instructions(_ACTIVE_CAPS),
+        capabilities=server.get_capabilities(
+            notification_options=NotificationOptions(),
+            experimental_capabilities={},
+        ),
+    )
+
+
 async def main() -> None:
     async with stdio_server() as (read, write):
-        await server.run(
-            read,
-            write,
-            InitializationOptions(
-                server_name="vibatchium",
-                server_version=__version__,
-                capabilities=server.get_capabilities(
-                    notification_options=NotificationOptions(),
-                    experimental_capabilities={},
-                ),
-            ),
-        )
+        await server.run(read, write, _init_options())
 
 
 def _entrypoint(caps: str | None = None) -> None:
