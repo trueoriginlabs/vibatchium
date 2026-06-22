@@ -24,6 +24,28 @@ _SKIP_SUBTREE = {
 }
 _HEADINGS = {"h1": 1, "h2": 2, "h3": 3, "h4": 4, "h5": 5, "h6": 6}
 
+# An svg this small in BOTH dimensions is a decorative icon (chevron, glyph,
+# social/link icon), not dropped chart content — exclude it from the signal.
+_ICON_SVG_MAX_PX = 64
+
+
+def _px(value: str | None) -> float | None:
+    """Parse a leading CSS pixel length (``16``, ``16px``, ``24 ``) to a float;
+    None for missing / non-numeric (e.g. ``100%``, ``1em``) so it's treated as
+    'unknown size' = potentially content."""
+    if not value:
+        return None
+    m = re.match(r"\s*([0-9]*\.?[0-9]+)", value)
+    return float(m.group(1)) if m else None
+
+
+def _svg_is_icon(attrs) -> bool:
+    """An svg with explicit width AND height both <= _ICON_SVG_MAX_PX is a
+    decorative icon. Missing/relative dimensions => unknown => not an icon."""
+    d = dict(attrs)
+    w, h = _px(d.get("width")), _px(d.get("height"))
+    return w is not None and h is not None and w <= _ICON_SVG_MAX_PX and h <= _ICON_SVG_MAX_PX
+
 
 class _MarkdownExtractor(HTMLParser):
     def __init__(self) -> None:
@@ -34,6 +56,16 @@ class _MarkdownExtractor(HTMLParser):
         self._a_href: str | None = None
         self._a_text: list[str] = []
         self._pre_depth = 0
+        # 0.10.0: structure-loss accounting — count the visual/structural
+        # elements that Markdown extraction degrades (tables linearized to
+        # pipe-runs) or drops wholesale (svg/canvas charts), so a caller can
+        # decide whether a pixel (VLM) read would recover lost signal.
+        # `svg_icon` tracks decorative icon-sized svgs (ubiquitous chevrons /
+        # glyphs) so they don't masquerade as dropped chart content.
+        self.sig: dict[str, int] = {
+            "tables": 0, "table_rows": 0, "table_cells": 0,
+            "svg": 0, "svg_icon": 0, "canvas": 0, "img": 0,
+        }
 
     # ── emit helpers ────────────────────────────────────────────────────
     def _emit(self, text: str) -> None:
@@ -52,9 +84,25 @@ class _MarkdownExtractor(HTMLParser):
                 self._skip_depth += 1
             return
         if tag in _SKIP_SUBTREE:
+            # count the structure-bearing visuals we DROP (vector/canvas charts)
+            # before discarding the subtree. A decorative icon-sized <svg> is
+            # not content, so tally it separately and net it out of the signal.
+            if tag in ("svg", "canvas"):
+                self.sig[tag] += 1
+                if tag == "svg" and _svg_is_icon(attrs):
+                    self.sig["svg_icon"] += 1
             self._skip_depth += 1
             return
         ad = dict(attrs)
+        # structure-loss accounting (independent of the emission chain below).
+        if tag == "table":
+            self.sig["tables"] += 1
+        elif tag == "tr":
+            self.sig["table_rows"] += 1
+        elif tag in ("td", "th"):
+            self.sig["table_cells"] += 1
+        elif tag == "img":
+            self.sig["img"] += 1
         if tag in _HEADINGS:
             self._nl(2)
             self._emit("#" * _HEADINGS[tag] + " ")
@@ -169,12 +217,61 @@ class _MarkdownExtractor(HTMLParser):
 def html_to_markdown(html: str) -> str:
     """Convert an HTML string to clean, LLM-ready Markdown. Boilerplate
     subtrees (script/style/nav/footer/aside/header/form/…) are dropped."""
+    md, _sig = extract_with_signals(html)
+    return md
+
+
+_EMPTY_SIGNALS: dict[str, object] = {
+    "tables": 0, "table_rows": 0, "table_cells": 0, "svg": 0, "svg_icon": 0,
+    "canvas": 0, "img": 0, "text_chars": 0, "html_chars": 0,
+    "structure_loss": False,
+}
+
+
+def _structure_loss(sig: dict, text_chars: int, html_chars: int) -> bool:
+    """Heuristic: did Markdown extraction probably lose meaningful visual or
+    structural signal that a pixel (VLM) read would recover?
+
+    Deliberately conservative — a false positive nudges a caller toward an
+    expensive pixel read, the very cost `extract` exists to avoid. Fires when:
+      * a genuine DATA table is present — multi-row (>=2) AND wide (averaging
+        >=3 cells/row) — which linearizes to ambiguous ``|`` runs with no
+        alignment. Small / 2-column / single-row layout tables read fine as
+        markdown, so they do NOT count;
+      * a ``<canvas>`` or a non-icon ``<svg>`` is present — vector/canvas charts
+        and diagrams are dropped wholesale; decorative icon-sized svgs don't;
+      * the page is image-heavy (>=3 imgs) but yielded little text (alt-text only).
+    """
+    multicol_tables = (
+        sig["tables"] >= 1
+        and sig["table_rows"] >= 2
+        and sig["table_cells"] >= 3 * sig["table_rows"]
+    )
+    content_svg = sig["svg"] - sig.get("svg_icon", 0)
+    dropped_visuals = sig["canvas"] >= 1 or content_svg >= 1
+    image_heavy_thin_text = sig["img"] >= 3 and text_chars < 400
+    return bool(multicol_tables or dropped_visuals or image_heavy_thin_text)
+
+
+def extract_with_signals(html: str) -> tuple[str, dict]:
+    """Like :func:`html_to_markdown`, but also return *structure-loss signals*
+    so a caller can decide whether to escalate to a pixel (VLM) read.
+
+    Returns ``(markdown, signals)`` where ``signals`` carries the element
+    counts plus ``text_chars``, ``html_chars`` and a ``structure_loss`` bool.
+    Pure and cheap — a single parse pass, no extra dependency.
+    """
     if not html:
-        return ""
+        return "", dict(_EMPTY_SIGNALS)
     parser = _MarkdownExtractor()
     try:
         parser.feed(html)
         parser.close()
-    except Exception:  # noqa: BLE001 — never let a malformed page raise; return best-effort
+    except Exception:  # noqa: BLE001 — never let a malformed page raise; best-effort
         pass
-    return parser.result()
+    md = parser.result()
+    sig = dict(parser.sig)
+    sig["text_chars"] = len(md)
+    sig["html_chars"] = len(html)
+    sig["structure_loss"] = _structure_loss(sig, len(md), len(html))
+    return md, sig

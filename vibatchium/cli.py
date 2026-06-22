@@ -1241,9 +1241,26 @@ def keys(ctx, keys):
 @click.option("--full-page", is_flag=True, help="Full-page screenshot (not just viewport).")
 @click.option("--annotate", is_flag=True,
               help="Overlay @eN bounding boxes (needs Pillow).")
+@click.option("--tiles", is_flag=True,
+              help="Slice a full-page capture into fixed-height PNG tiles on disk "
+                   "(0600) instead of one image — for layout-heavy pages a "
+                   "vision-capable agent reads tile-by-tile. Implies --full-page; "
+                   "can't combine with --annotate.")
+@click.option("--tile-height", type=int, default=1024, show_default=True,
+              help="Tile height in px when --tiles is set.")
+@click.option("--max-tiles", type=int, default=None,
+              help="Cap the number of tiles (top of page first).")
+@click.option("--tile-dir", default=None,
+              help="Directory for tile files (default: alongside the output path).")
+@click.option("--max-screenshot-px", type=int, default=None,
+              help="Cap the captured height (px) of a full-page/--tiles shot — "
+                   "bounds the decode memory on tall pages, not just tile count "
+                   "(default VIBATCHIUM_MAX_SCREENSHOT_PX=30000; 0 disables). A "
+                   "taller page is captured to the top N px + height_truncated=true.")
 @click.pass_context
-def screenshot(ctx, output, full_page, annotate):
-    """Capture a screenshot, optionally annotated with @eN box overlays.
+def screenshot(ctx, output, full_page, annotate, tiles, tile_height, max_tiles,
+               tile_dir, max_screenshot_px):
+    """Capture a screenshot, optionally annotated or sliced into tiles.
 
     Default destination is CACHE_DIR/screenshots/screenshot-<ts>.png with
     0600 perms (avoids leaking authenticated-session captures to other
@@ -1252,14 +1269,34 @@ def screenshot(ctx, output, full_page, annotate):
     """
     import time as _time
     from .daemon.paths import CACHE_DIR, secure_mkdir
+    if tiles:
+        if annotate:
+            raise click.UsageError("--tiles cannot be combined with --annotate")
+        # For tiles, let the DAEMON own the default filename when no -o is given:
+        # its per-call entropy stem avoids same-second collisions between two
+        # CLI invocations (the bare CACHE_DIR/screenshot-<ts>.png default below
+        # is only second-granular). An explicit -o keeps predictable names.
+        path = str(Path(output).resolve()) if output is not None else None
+        # No fallback_key: non-JSON prints the whole dict (tiles paths + count +
+        # truncated), so the user can see WHERE the files landed — a bare count
+        # would hide that.
+        _emit(call("screenshot", {"path": path, "tiles": True,
+                                  "tile_height": tile_height,
+                                  "max_tiles": max_tiles,
+                                  "tile_dir": tile_dir,
+                                  "max_screenshot_px": max_screenshot_px}),
+              ctx.obj["json"])
+        return
     if output is None:
         cache = secure_mkdir(CACHE_DIR / "screenshots")
         output = str(cache / f"screenshot-{int(_time.time())}.png")
     else:
         output = str(Path(output).resolve())
     cmd = "screenshot_annotate" if annotate else "screenshot"
-    _emit(call(cmd, {"path": output, "full_page": full_page}),
-          ctx.obj["json"], "path")
+    sargs = {"path": output, "full_page": full_page}
+    if not annotate:
+        sargs["max_screenshot_px"] = max_screenshot_px   # height cap (full-page only)
+    _emit(call(cmd, sargs), ctx.obj["json"], "path")
 
 
 # ─── element model: map + interactive verbs ──────────────────────────────

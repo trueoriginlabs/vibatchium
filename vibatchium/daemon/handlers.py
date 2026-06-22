@@ -14,9 +14,9 @@ from pathlib import Path
 from . import elements
 from . import lease as _lease
 from .paths import (
-    DEFAULT_SESSION_NAME, PROFILES_DIR, get_active_session_name, list_session_names,
-    secure_mkdir, secure_write, session_dir, set_active_session_name,
-    validate_name,
+    CACHE_DIR, DEFAULT_SESSION_NAME, PROFILES_DIR, get_active_session_name,
+    list_session_names, secure_mkdir, secure_write, session_dir,
+    set_active_session_name, validate_name,
 )
 from .registry import current_session_ctx, get_max_ephemeral, SessionLimitError
 
@@ -1686,7 +1686,7 @@ def register_all(daemon) -> None:
         markdown text (boilerplate stripped) — never a base64 screenshot — so it
         stays token-frugal. `max_chars` caps the output (default 40000).
         """
-        from ..extract import html_to_markdown
+        from ..extract import extract_with_signals
         timeout = int(args.get("timeout_ms", 30_000))
         sel = args.get("target") or args.get("selector")
         if sel:
@@ -1698,13 +1698,22 @@ def register_all(daemon) -> None:
             import asyncio as _asyncio
             raw_html = await _asyncio.wait_for(s.page.content(), timeout / 1000)
             url = s.page.url
-        md = html_to_markdown(raw_html)
+        md, sig = extract_with_signals(raw_html)
         max_chars = int(args.get("max_chars", 40_000))
         truncated = False
         if max_chars and len(md) > max_chars:
             md = md[:max_chars]
             truncated = True
         out = {"markdown": md, "chars": len(md)}
+        # 0.10.0: surface structure-loss so a caller can tell when the markdown
+        # dropped/flattened visual signal (tables, svg/canvas charts) and may
+        # want to `screenshot --tiles` and read the tiles with its own vision.
+        if sig.get("structure_loss"):
+            out["structure_loss"] = True
+            out["structure_signals"] = {
+                k: sig[k] for k in ("tables", "table_rows", "table_cells",
+                                    "svg", "canvas", "img")
+            }
         if url is not None:
             out["url"] = url
             s = _need_session(d)
@@ -1752,15 +1761,140 @@ def register_all(daemon) -> None:
     @daemon.handler("screenshot")
     async def _screenshot(d, args):
         s = _need_session(d)
-        full_page = bool(args.get("full_page", False))
+        tiles = bool(args.get("tiles", False))
+        # Tiling only makes sense over a full-page capture; force it on.
+        full_page = bool(args.get("full_page", False)) or tiles
         path = args.get("path")
-        png = await s.page.screenshot(full_page=full_page)
+        tile_height = int(args.get("tile_height", 1024))
+
+        # ── tile-count cap (0.10.0): explicit max_tiles is the caller's opt-in;
+        # absent one, default VIBATCHIUM_MAX_TILES (60). ──────────────────────
+        _mt = args.get("max_tiles")
+        if _mt is not None:
+            max_tiles = max(1, int(_mt))
+        else:
+            try:
+                max_tiles = max(1, int(os.environ.get("VIBATCHIUM_MAX_TILES", "60")))
+            except ValueError:
+                max_tiles = 60
+
+        # ── captured-HEIGHT cap (0.10.0): bound the full-page DECODE itself.
+        # max_tiles only caps OUTPUT count — a tall/infinite-scroll page still
+        # decodes its whole bitmap TWICE (Chrome render+encode, then Pillow
+        # img.load), the real memory driver on the shared daemon. We measure the
+        # real page size and, when it exceeds the budget, capture only the top
+        # `budget` px via a CLIPPED full-page shot (full_page=True + clip reaches
+        # below the fold; verified). The budget is in CAPTURED (device) px:
+        #   tiles : min(max_tiles*tile_height, VIBATCHIUM_MAX_SCREENSHOT_PX)
+        #   plain full-page : VIBATCHIUM_MAX_SCREENSHOT_PX
+        # VIBATCHIUM_MAX_SCREENSHOT_PX=0 disables the ceiling (opt-out). A
+        # viewport (non-full-page) capture is already bounded → never capped.
+        # Totals come from the MEASURED page, never the clipped capture, so the
+        # truncation signals can't silently under-report.
+        _msp = args.get("max_screenshot_px")
+        if _msp is None:
+            try:
+                ceiling = int(os.environ.get("VIBATCHIUM_MAX_SCREENSHOT_PX", "30000"))
+            except ValueError:
+                ceiling = 30000
+        else:
+            ceiling = int(_msp)
+        ceiling = ceiling if ceiling > 0 else None    # None ⇒ no ceiling
+
+        budget = None
+        if tiles:
+            budget = max_tiles * tile_height
+            if ceiling is not None:
+                budget = min(budget, ceiling)
+        elif full_page:
+            budget = ceiling
+
+        # Measure REAL page dims (CSS w/h + dpr) when a budget applies. device
+        # height = css height × dpr is what's actually decoded and tiled.
+        device_h = None
+        if budget is not None:
+            try:
+                dims = await s.page.evaluate(
+                    "() => ({"
+                    "w: Math.max(document.documentElement.scrollWidth,"
+                    " (document.body && document.body.scrollWidth) || 0,"
+                    " document.documentElement.clientWidth),"
+                    "h: Math.max(document.documentElement.scrollHeight,"
+                    " (document.body && document.body.scrollHeight) || 0,"
+                    " document.documentElement.clientHeight),"
+                    "dpr: window.devicePixelRatio || 1})")
+                _dpr = float(dims.get("dpr") or 1) or 1.0
+                _w_css = max(1, int(dims["w"]))
+                _h_css = max(1, int(dims["h"]))
+                device_h = max(1, int(round(_h_css * _dpr)))
+            except Exception:  # noqa: BLE001 — measurement is best-effort
+                device_h = None
+
+        height_capped = budget is not None and device_h is not None and device_h > budget
+        if height_capped:
+            captured_h = budget
+            # full_page=True + clip captures the TOP `captured_h` DEVICE px of the
+            # full page (below the fold), bounding both decode peaks. clip is in
+            # CSS coords, so divide by dpr; Playwright re-applies the scale.
+            png = await s.page.screenshot(
+                full_page=True,
+                clip={"x": 0, "y": 0, "width": _w_css, "height": captured_h / _dpr})
+        else:
+            captured_h = device_h
+            png = await s.page.screenshot(full_page=full_page)
+
+        def _with_height_signal(out):
+            # Never-silent rule: if we cut the page short, say so + report totals.
+            if height_capped:
+                out["height_truncated"] = True
+                out["captured_height_px"] = captured_h
+                out["total_height_px"] = device_h
+            return out
+
+        if tiles:
+            # 0.10.0: slice the capture into fixed-height tiles for a
+            # layout-preserving (PixelRAG-style) read. Tiles are written to DISK
+            # 0600, NOT inlined as base64 — returning N images would flood the
+            # caller's context, the very token-burn `extract` exists to avoid.
+            import secrets as _secrets
+            from ..tiles import count_tiles, tile_png
+            # total tile count from the REAL (measured) device height — honest
+            # even when the capture was clipped; fall back to the captured png.
+            if device_h is not None:
+                total = -(-device_h // tile_height)        # ceil(device_h / th)
+            else:
+                total = count_tiles(png, tile_height=tile_height)
+            parts = tile_png(png, tile_height=tile_height, max_tiles=max_tiles)
+            del png  # free the full-page bytes before the write loop
+            if args.get("tile_dir"):
+                base = Path(args["tile_dir"]).expanduser().resolve()
+            elif path:
+                base = Path(path).expanduser().resolve().parent
+            else:
+                base = CACHE_DIR / "screenshots"
+            secure_mkdir(base)
+            # Default stem carries per-call entropy so two parallel sessions
+            # writing to the shared screenshots dir in the same second can never
+            # collide (silent overwrite / cross-session capture mix-up).
+            stem = Path(path).stem if path else \
+                f"tiles-{int(time.time())}-{_secrets.token_hex(4)}"
+            written = []
+            for i, part in enumerate(parts):
+                fp = base / f"{stem}.tile{i:02d}.png"
+                secure_write(fp, part)
+                written.append(str(fp))
+            out = {"tiles": written, "count": len(written),
+                   "tile_height": tile_height, "full_page": True}
+            if len(written) < total:
+                out["truncated"] = True
+                out["total_tiles"] = total
+            return _with_height_signal(out)
         if path:
             # Always secure-write — page captures may include authenticated
             # sessions (banking, dashboards) and must not leak via umask.
             secure_write(Path(path), png)
-            return {"path": path}
-        return {"png_b64": base64.b64encode(png).decode()}
+            return _with_height_signal({"path": path})
+        return _with_height_signal({"png_b64": base64.b64encode(png).decode()})
 
     # ─── element model: map + interactive verbs ───────────────────────────
 

@@ -39,7 +39,8 @@ $VB verify_url --url https://maybe-dead.example       # ~50ms DNS pre-check
 | Task | Use |
 |---|---|
 | "Look at this URL" | `$VB explore <url>` |
-| "Give me the page as clean Markdown" | `$VB extract` (boilerplate stripped, LLM-ready; `--max-chars` caps it) |
+| "Give me the page as clean Markdown" | `$VB extract` (boilerplate stripped, LLM-ready; `--max-chars` caps it; flags `structure_loss` when tables/charts don't survive) |
+| "This page is all tables/charts" | `$VB extract` flags `structure_loss` → `$VB screenshot --tiles` and read the tile PNGs with your own vision |
 | "Research N independent angles in parallel" | `$VB research --target <url> --intent ... --intent ...` |
 | "Does this domain exist?" | `$VB verify_url --url <url>` |
 | "Hit a JSON/API endpoint behind my login" | `$VB fetch <url>` (reuses session cookies+proxy+UA; needs `[fetch]` extra, `fetch` cap) |
@@ -87,8 +88,8 @@ what you know about the element:
 
 - `explore` → JSON to stdout `{url, title, text, screenshot_path?, screenshot_reason?, status, elapsed_ms, closed}`. **Text-first.** The MCP tool captures a screenshot *only* as a fallback when the page yields no usable text or is walled (`screenshot` = `auto`|`always`|`never`, `min_text_chars` tunes the auto threshold); when it does, the PNG comes back as a viewable image block, not base64. The CLI still screenshots by default, written to `~/.cache/vibatchium/explores/` (no base64 in stdout); `--auto-screenshot` makes the CLI text-first too, `-o <dir>` writes a chosen dir + markdown summary, `--inline-screenshot` returns base64 inline.
 - `research` → per-thread markdown + landing screenshots + `index.md` in `--output-dir`.
-- `screenshot` → PNG via `--path`. `text`/`html`/`content` → stdout.
-- `extract` → `{markdown, chars, url?, title?, truncated?}`. Clean Markdown of the page (or a `target` subtree) with boilerplate stripped — the drop-in for "scrape this authenticated page to Markdown" that Crawl4AI/Firecrawl can't reach. Always text, never base64; `max_chars` (default 40000) caps it.
+- `screenshot` → PNG via `--path`. `text`/`html`/`content` → stdout. `--tiles` slices a full-page capture into fixed-height (`--tile-height`, default 1024px) PNG tiles written to disk (0600) — returns `{tiles:[paths], count}`, never base64 — for layout-heavy pages a vision-capable agent then reads tile-by-tile. The session's real viewport is used (no exotic fixed width — that's a fingerprint signal). Needs Pillow (the `[annotate]` extra).
+- `extract` → `{markdown, chars, url?, title?, truncated?, structure_loss?, structure_signals?}`. Clean Markdown of the page (or a `target` subtree) with boilerplate stripped — the drop-in for "scrape this authenticated page to Markdown" that Crawl4AI/Firecrawl can't reach. Always text, never base64; `max_chars` (default 40000) caps it. Sets `structure_loss` when it had to flatten multi-column tables or drop `<svg>`/`<canvas>` charts — the cue to `screenshot --tiles` and read the tiles with your own vision.
 - `fetch` → `{status, ok, headers, body|body_b64, url, impersonate, cookie_sync, elapsed_ms}`. Authenticated HTTP fetch reusing the session's cookies+proxy+UA with a Chrome-matching JA3/HTTP2 fingerprint, **no renderer, no JS** — for JSON/XHR/static endpoints behind a login. It defeats the *static* TLS-fingerprint gate only: a DataDome/Kasada/Turnstile JS challenge will fail, so `go` instead. Cookies are one-way (browser→fetch); a `Set-Cookie` on the response is **not** persisted to the session. Needs `pip install vibatchium[fetch]`; gated behind the `fetch` cap (off in lean — grant `--caps fetch`).
 
 ## Debug

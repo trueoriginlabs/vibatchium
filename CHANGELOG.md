@@ -4,6 +4,60 @@ All notable changes to vibatchium are documented here. Versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Until 1.0,
 minor bumps may include breaking changes; we'll always call them out here.
 
+## [0.10.0] — 2026-06-22
+
+Screenshot tile mode + a structure-loss signal for layout-heavy pages.
+
+The text `extract` verb (HTML→Markdown) is fast and token-frugal, but it
+*flattens* tables to ambiguous pipe-runs and *drops* `<svg>`/`<canvas>` charts
+wholesale. This release lets an agent capture those pages as ordered image
+**tiles** and read them with its own vision — no extra LLM backend, no API key.
+We borrow PixelRAG's *recipe* (fixed-height tiling), not its code or its
+non-stealth renderer: every tile is captured through vibatchium's own Patchright
+stealth session.
+
+### Added — `screenshot --tiles` (tile mode)
+- `screenshot tiles=true` slices a full-page capture into fixed-height
+  (`tile_height`, default 1024px) non-overlapping PNG tiles **written to disk**
+  (0600 each), returning `{tiles: [paths], count}`. Tiles are never inlined as
+  base64 — returning N images would flood the caller's context, the exact
+  token-burn `extract` exists to avoid. `max_tiles` caps the count; `tile_dir`
+  chooses the destination. CLI: `vb screenshot --tiles [--tile-height N]
+  [--max-tiles N] [--tile-dir DIR]`. New pure `vibatchium/tiles.py` slicer
+  (lazy Pillow — the existing `[annotate]` extra).
+- Bounded by default: absent an explicit `max_tiles`, tile count is capped at
+  `VIBATCHIUM_MAX_TILES` (60) so a tall/infinite-scroll page can't write
+  unbounded tiles to disk or balloon RAM on the shared daemon. Truncation is
+  **signalled** (`truncated: true` + `total_tiles`), never silent. The default
+  filename stem carries per-call entropy so two parallel sessions writing to the
+  shared screenshots dir can never collide and overwrite each other's captures.
+- **Captured-height cap** (the decode is the real memory driver, not tile count):
+  a full-page/`--tiles` capture is bounded to `VIBATCHIUM_MAX_SCREENSHOT_PX`
+  (30000 px; `0` disables, or `--max-screenshot-px`/`max_screenshot_px`). On a
+  taller page we measure the real size and capture only the top N px via a
+  clipped full-page shot (which reaches below the fold), bounding **both** the
+  Chrome render+encode and the Pillow decode — `max_tiles` alone left the
+  whole-page bitmap to decode regardless. Signalled with `height_truncated` +
+  `captured_height_px` + `total_height_px` (totals come from the measured page,
+  not the clipped capture, so they stay honest). Pages shorter than the cap are
+  unchanged. Caveat: content below the cut isn't captured (raise the cap or
+  scroll first); the cap is in captured/device px, so a HiDPI session's true
+  decode is DPR² larger — set it conservatively on shared hosts.
+- We deliberately do **not** pin PixelRAG's exotic 875px viewport — a
+  hard-pinned width is itself a fingerprint signal; tiling uses the session's
+  real viewport.
+
+### Added — `extract` now flags structure loss
+- `extract` returns `structure_loss: true` (plus `structure_signals` counts)
+  when it detects lost visual signal — the cheap cue for a vision-capable agent
+  to `screenshot --tiles` and read the tiles instead. New pure
+  `extract_with_signals()` API; `html_to_markdown()` is unchanged.
+- The heuristic is deliberately **conservative** (a false positive nudges a
+  caller toward an expensive pixel read): it fires only on genuine *wide* data
+  tables (multi-row, averaging >=3 cells/row — narrow / 2-column / single-row
+  layout tables read fine as markdown), a `<canvas>` or a **non-icon** `<svg>`
+  (decorative icon-sized svgs are netted out), or an image-heavy / thin-text page.
+
 ## [0.9.3] — 2026-06-21
 
 Per-daemon log files — close the multi-daemon rotation race.
