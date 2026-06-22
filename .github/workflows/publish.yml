@@ -54,12 +54,16 @@ jobs:
       - name: Set up Python
         run: uv python install 3.12
 
-      - name: Verify tag matches pyproject version
+      - name: Verify tag matches package version
         run: |
           tag="${GITHUB_REF_NAME#v}"
-          pyver=$(grep -E '^version = "' pyproject.toml | head -1 | sed -E 's/version = "([^"]+)"/\1/')
+          # The version is dynamic — hatch reads it from vibatchium/__init__.py
+          # ([tool.hatch.version]), so that file is the source of truth, NOT a
+          # static `version = "..."` line in pyproject (which no longer exists;
+          # grepping for it returned empty and failed every tagged build).
+          pyver=$(grep -E '^__version__' vibatchium/__init__.py | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
           if [ "$tag" != "$pyver" ]; then
-            echo "::error::Git tag v$tag does not match pyproject.toml version $pyver"
+            echo "::error::Git tag v$tag does not match vibatchium/__init__.py __version__ $pyver"
             exit 1
           fi
 
