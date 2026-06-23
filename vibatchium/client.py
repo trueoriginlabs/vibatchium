@@ -23,14 +23,40 @@ class DaemonError(RuntimeError):
 
 
 def _connect(timeout: float = 2.0) -> socket.socket:
+    return _connect_path(SOCK_PATH, timeout=timeout)
+
+
+def _connect_path(sock_path: Any, timeout: float = 2.0) -> socket.socket:
+    """Connect to a daemon at an EXPLICIT socket path (not the import-time
+    SOCK_PATH). Used by `call_on` to address an isolated daemon whose socket
+    lives under its own XDG_RUNTIME_DIR — paths.SOCK_PATH is frozen at import,
+    so the only way to reach a second daemon in-process is by path."""
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     s.settimeout(timeout)
     try:
-        s.connect(str(SOCK_PATH))
+        s.connect(str(sock_path))
     except (FileNotFoundError, ConnectionRefusedError) as exc:
         s.close()
         raise DaemonNotRunning(f"daemon not running ({exc})") from exc
     return s
+
+
+def _exchange(s: socket.socket, cmd: str, payload_args: dict[str, Any]) -> Any:
+    """Send one JSON-line request on an open socket, read one JSON-line
+    response, return its `result` (or raise DaemonError). Shared by `call`
+    and `call_on` so the wire format stays in one place."""
+    req = json.dumps({"id": uuid.uuid4().hex, "cmd": cmd, "args": payload_args}) + "\n"
+    s.sendall(req.encode())
+    buf = b""
+    while not buf.endswith(b"\n"):
+        chunk = s.recv(65536)
+        if not chunk:
+            break
+        buf += chunk
+    resp = json.loads(buf.decode())
+    if not resp.get("ok"):
+        raise DaemonError(resp.get("error", "unknown error"))
+    return resp.get("result")
 
 
 def daemon_is_running(timeout: float = 1.5, attempts: int = 2) -> bool:
@@ -121,19 +147,30 @@ def call(cmd: str, args: dict[str, Any] | None = None, *,
 
     s = _connect(timeout=timeout)
     try:
-        req = json.dumps({"id": uuid.uuid4().hex, "cmd": cmd, "args": payload_args}) + "\n"
-        s.sendall(req.encode())
-        # readline
-        buf = b""
-        while not buf.endswith(b"\n"):
-            chunk = s.recv(65536)
-            if not chunk:
-                break
-            buf += chunk
-        resp = json.loads(buf.decode())
+        return _exchange(s, cmd, payload_args)
     finally:
         s.close()
 
-    if not resp.get("ok"):
-        raise DaemonError(resp.get("error", "unknown error"))
-    return resp.get("result")
+
+def call_on(sock_path: Any, cmd: str, args: dict[str, Any] | None = None, *,
+            session: str | None = None, lease: str | None = None,
+            timeout: float = 120.0) -> Any:
+    """RPC call against a daemon at an EXPLICIT socket path — no auto-spawn.
+
+    The caller owns the daemon's lifecycle (this is how the SDK's isolated
+    `vb.daemon(...)` talks to the private daemon it spawned on its own
+    XDG_RUNTIME_DIR). Unlike `call`, nothing is read from this process's env:
+    `session`/`lease` are passed explicitly or omitted, and the socket is the
+    one given — not the import-time SOCK_PATH. Raises DaemonNotRunning if the
+    socket isn't accepting (the owner is responsible for having started it).
+    """
+    payload_args = dict(args or {})
+    if session:
+        payload_args["_session"] = session
+    if lease:
+        payload_args["_lease"] = lease
+    s = _connect_path(sock_path, timeout=timeout)
+    try:
+        return _exchange(s, cmd, payload_args)
+    finally:
+        s.close()
