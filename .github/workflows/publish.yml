@@ -13,6 +13,9 @@ jobs:
   # 0.9.0: stealth gate — a tagged release must NOT ship if the Runtime.enable
   # leak / stealth posture has regressed. Runs the same probes as CI but blocks
   # the build/publish, not just a PR.
+  # 0.11.0: also runs the offline `vb bench` gate — a tagged release must NOT
+  # ship if wall DETECTION (Cloudflare/DataDome/PerimeterX classification, the
+  # moat's measurement) regresses against the local fixtures.
   stealth-gate:
     runs-on: ubuntu-latest
     steps:
@@ -34,13 +37,14 @@ jobs:
         run: |
           patchright install chrome
           patchright install-deps chrome || true
-      - name: Run stealth gate
+      - name: Run stealth + bench gates
         env:
           PYTHONUNBUFFERED: "1"
         run: |
           xvfb-run -a -s "-screen 0 1920x1080x24" python -m pytest \
             tests/test_stealth_drift_gate.py tests/test_wave7_stealth_gate.py \
-            -v --tb=short --timeout=120
+            tests/test_bench_offline.py \
+            -v --tb=short --timeout=180
 
   build:
     needs: stealth-gate

@@ -4,6 +4,58 @@ All notable changes to vibatchium are documented here. Versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Until 1.0,
 minor bumps may include breaking changes; we'll always call them out here.
 
+## [0.11.0] — 2026-06-23
+
+Two cua-inspired adopts: a stealth-**wall** pass-rate bench that regression-gates
+the moat, and an ergonomic Python SDK with guaranteed teardown — both built on a
+new isolated-daemon keystone that finally closes the profile-leak hole.
+
+### Added — `vb bench` (cold pass-rate vs Cloudflare / DataDome / PerimeterX)
+- New `vibatchium/bench.py` + `vb bench run`. Per target: a throwaway ephemeral
+  session, a cold `go`, the `walled` read the daemon already computes, and an
+  evidence screenshot (0600). Complements `vb evals` (which scores fingerprint
+  *scoreboards*) by measuring the thing the moat is actually about — does a
+  stealth navigation **clear a bot wall**.
+- Two deliberately distinct fields so the number is honest: `expected_waf` (the
+  a-priori label, the aggregation key — `is_walled` returns None on a *cleared*
+  wall, so it can't double as the bucket key) vs runtime `walled`
+  (None == cleared == passed). The published pass-rate is labelled an
+  **OPTIMISTIC UPPER BOUND** because detection is title-only.
+- `is_walled` gains a **PerimeterX** branch (full distinctive titles, so a bare
+  "Access Denied" 403 does NOT false-positive). New local fixtures
+  (`wall_datadome.html` / `wall_perimeterx.html` / `wall_control.html`).
+- `tests/test_bench_offline.py` runs the harness against the four fixtures and
+  is wired into `publish.yml` as a **release-blocking gate**: a wall-detection
+  regression fails a tagged build before it ships. The `--live` lane (real
+  internet) is acknowledgement-gated (non-localhost targets require `--live`)
+  and is never a CI gate. `--update-readme` patches a `<!-- vibatchium-bench -->`
+  region; `--min-pass-rate N` is a manual gate.
+
+### Added — Python SDK (`import vibatchium as vb`) with guaranteed teardown
+- `with vb.session(ephemeral=True) as s:` creates a throwaway session and
+  **always** closes + deletes it on block exit, including on exception. The
+  ephemeral path calls `start{ephemeral:true}` directly (not `session_new`,
+  which defaults `prewarm=True`) so it never spawns a redundant warm Chrome.
+- `with vb.isolated_daemon(home=…) as d:` spawns a private daemon on its
+  own `XDG_RUNTIME_DIR` **and** HOME, torn down completely on exit. (Named
+  `isolated_daemon`, not `daemon`, because `vibatchium.daemon` is a core
+  subpackage.) Overriding
+  HOME (not just the runtime dir) is the fix for the long-standing profile-leak
+  hole — `paths.py` derives profiles/config/state from HOME, so runtime-only
+  isolation still leaked profiles into the shared `~/.config/vibatchium/profiles`
+  (the 1540-profile incident). A `/proc/meminfo` RAM floor (override
+  `VIBATCHIUM_SDK_RAM_FLOOR_MB`) refuses to spawn on a memory-tight box.
+- New `client.call_on(sock_path, …)` reaches a daemon at an explicit socket
+  (the import-time `SOCK_PATH` is frozen) — how the SDK talks to its private
+  daemon. The ambient `call` path is byte-unchanged.
+
+### Added — `vb session` lifecycle facades
+- `session create [--ephemeral] [--connect] [--headless/--headed]`,
+  `session destroy [-y]` (switches the active pointer to `default` first if
+  needed), `session connect`, `session disconnect` — thin conveniences over the
+  existing verbs so a session's whole life reads as one vocabulary. No new
+  daemon handlers.
+
 ## [0.10.0] — 2026-06-22
 
 Screenshot tile mode + a structure-loss signal for layout-heavy pages.

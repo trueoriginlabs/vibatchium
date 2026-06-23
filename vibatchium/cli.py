@@ -420,6 +420,108 @@ def session_delete(ctx, name):
     _emit(call("session_delete", {"name": name}), ctx.obj["json"])
 
 
+# ─── 0.11.0: ergonomic lifecycle facades (create/destroy/connect/disconnect) ──
+# Thin conveniences over the verbs above so a session's whole life reads as one
+# vocabulary. No new daemon handlers — each maps to an existing verb.
+
+@session.command("create")
+@click.argument("name", required=False)
+@click.option("--ephemeral", is_flag=True,
+              help="Throwaway session: launches Chrome NOW (no prewarm) and "
+                   "deletes the profile on close. Mints a name if none given.")
+@click.option("--connect/--no-connect", default=False,
+              help="Persistent only: also launch Chrome now (ephemeral always "
+                   "launches).")
+@click.option("--headless/--headed", "headless", default=None,
+              help="Posture for the launched Chrome (default: daemon default).")
+@click.pass_context
+def session_create(ctx, name, ephemeral, connect, headless):
+    """Create a session.
+
+    `--ephemeral` starts a throwaway session in ONE call — Chrome launches
+    immediately (started{ephemeral}), and the profile dir is removed on close.
+    It calls `start` directly (not `session new`), so it never triggers the
+    prewarm Chrome. Without `--ephemeral` it creates the on-disk profile like
+    `session new` and only launches Chrome if `--connect` is passed.
+    """
+    name = name or ctx.obj.get("session")
+    if ephemeral and not name:
+        import uuid as _uuid
+        name = f"sdk_{_uuid.uuid4().hex[:8]}"
+    if not name:
+        raise click.UsageError(
+            "a session NAME is required (or pass a global --session, or "
+            "--ephemeral to mint one)")
+    if ephemeral:
+        args = {"ephemeral": True}
+        if headless is not None:
+            args["headless"] = headless
+        _emit(call("start", args, session=name), ctx.obj["json"])
+        return
+    res = call("session_new", {"name": name, "prewarm": False})
+    if connect:
+        args = {}
+        if headless is not None:
+            args["headless"] = headless
+        res = call("start", args, session=name)
+    _emit(res, ctx.obj["json"])
+
+
+@session.command("connect")
+@click.argument("name", required=False)
+@click.option("--headless/--headed", "headless", default=None,
+              help="Posture for the launched Chrome (default: daemon default).")
+@click.pass_context
+def session_connect(ctx, name, headless):
+    """Launch Chrome for an existing session (ergonomic alias for `start`)."""
+    name = name or ctx.obj.get("session")
+    args = {}
+    if headless is not None:
+        args["headless"] = headless
+    _emit(call("start", args, session=name), ctx.obj["json"])
+
+
+@session.command("disconnect")
+@click.argument("name", required=False)
+@click.pass_context
+def session_disconnect(ctx, name):
+    """Stop Chrome for a session; keep the profile (alias for `session close`)."""
+    name = name or ctx.obj.get("session")
+    _emit(call("session_close", {"name": name} if name else {}), ctx.obj["json"])
+
+
+@session.command("destroy")
+@click.argument("name")
+@click.option("--yes", "-y", "assume_yes", is_flag=True,
+              help="Skip the confirmation prompt (required non-interactively).")
+@click.pass_context
+def session_destroy(ctx, name, assume_yes):
+    """Close Chrome AND delete the profile dir in one call.
+
+    If NAME is the active session, the active pointer is switched to 'default'
+    before the delete (the daemon refuses to delete the active session).
+    """
+    if not assume_yes:
+        click.confirm(
+            f"really destroy session {name!r} (close Chrome + delete profile)?",
+            abort=True)
+    # Lease-gated close FIRST. session_close is refused by the daemon if NAME is
+    # running and leased by another client — so on the shared box we abort HERE,
+    # before mutating the GLOBAL active-session pointer. (session_use is NOT
+    # lease-gated, so switching first could strand live bots that omit --session
+    # onto 'default' even when the destroy itself gets refused.)
+    call("session_close", {"name": name})
+    # Now switch the active pointer away iff NAME is active (delete refuses the
+    # active session). 'default' is created at daemon startup, so it exists.
+    try:
+        active = call("session_list").get("active")
+    except Exception:  # noqa: BLE001
+        active = None
+    if active == name and name != "default":
+        call("session_use", {"name": "default"})
+    _emit(call("session_delete", {"name": name}), ctx.obj["json"])
+
+
 @session.command("lease")
 @click.argument("name", required=False)
 @click.option("--ttl", "ttl_s", type=int, default=60,
@@ -2336,6 +2438,131 @@ def evals_run(ctx, targets, backends, humanize, settle_ms, out_path,
             sys.exit(1)
         if lowest < min_score_arg:
             click.echo(f"FAIL: min score {lowest} < {min_score_arg}", err=True)
+            sys.exit(1)
+
+
+# ─── 0.11.0: stealth-WALL bench (cold pass-rate vs Cloudflare/DataDome/PX) ────
+
+@cli.group()
+def bench():
+    """Measure the cold pass-rate against bot WALLS (Cloudflare / DataDome /
+    PerimeterX) — does a stealth navigation CLEAR the wall?
+
+    Complements `vb evals` (fingerprint scoreboards). Each target gets a fresh
+    throwaway session, a cold `go`, and an evidence screenshot. Pass-rate keys
+    on the a-priori `expected_waf` label; the published number is an OPTIMISTIC
+    UPPER BOUND (wall detection is title-only).
+
+        # ad-hoc, against the real internet (requires --live):
+        vb bench run --live --url https://example.com --expected cloudflare
+        # from a spec file [{name,url,expected_waf}, ...]:
+        vb bench run --live --targets-file targets.json --evidence-dir ./shots
+        vb bench run --live --targets-file t.json --min-pass-rate 0.6   # gate
+    """
+
+
+@bench.command("run")
+@click.option("--url", "urls", multiple=True,
+              help="A target URL (repeatable). Pair with --expected.")
+@click.option("--expected", "expected", multiple=True,
+              help="Expected WAF for the matching --url (cloudflare/datadome/"
+                   "perimeterx, or 'none'/'control'). Repeatable, positional "
+                   "with --url.")
+@click.option("--targets-file", "targets_file", default=None, type=click.Path(),
+              help="JSON file: a list of {name,url,expected_waf} objects.")
+@click.option("--tier", default="standard",
+              type=click.Choice(["standard", "hardened"]),
+              help="standard=headless (default), hardened=HEADED.")
+@click.option("--settle-ms", default=4000, type=int)
+@click.option("--evidence-dir", "evidence_dir", default=None, type=click.Path(),
+              help="Write a full-page evidence PNG per target here (0600).")
+@click.option("--live", is_flag=True,
+              help="Required to hit non-localhost targets (the real internet). "
+                   "Be courteous: sequential, rate-limited, never hammer.")
+@click.option("--out", "out_path", default=None, type=click.Path())
+@click.option("--json", "as_json", is_flag=True, help="Emit JSON not markdown.")
+@click.option("--update-readme", "update_readme_flag", is_flag=True,
+              help="Patch README.md between <!-- vibatchium-bench --> markers.")
+@click.option("--min-pass-rate", "min_pass_rate_arg", default=None, type=float,
+              help="Exit non-zero if the lowest WAF bucket pass-rate is below "
+                   "this (0..1). A manual/local gate — never a CI gate.")
+@click.pass_context
+def bench_run(ctx, urls, expected, targets_file, tier, settle_ms, evidence_dir,
+              live, out_path, as_json, update_readme_flag, min_pass_rate_arg):
+    """Run the bench against the given targets and emit a results table."""
+    from . import bench as _bench
+
+    targets: list[dict] = []
+    if targets_file:
+        from pathlib import Path as _P
+        spec = json.loads(_P(targets_file).read_text())
+        if not isinstance(spec, list):
+            raise click.UsageError("--targets-file must contain a JSON list")
+        targets.extend(spec)
+    for i, u in enumerate(urls):
+        exp = expected[i] if i < len(expected) else None
+        targets.append({"name": u, "url": u, "expected_waf": exp})
+
+    if not targets:
+        raise click.UsageError(
+            "no targets — pass --targets-file or one or more --url")
+
+    # Normalize + validate expected_waf uniformly (both --url and --targets-file
+    # paths) so a typo like 'cloudflar' can't silently spawn a phantom bucket.
+    valid = set(_bench.VALID_WAFS) | {None}
+    for t in targets:
+        exp = t.get("expected_waf")
+        if isinstance(exp, str) and exp.strip().lower() in ("none", "control", ""):
+            exp = None
+        t["expected_waf"] = exp
+        if exp not in valid:
+            raise click.UsageError(
+                f"unknown expected_waf {exp!r} for {t.get('url')!r} — use one of "
+                f"{sorted(_bench.VALID_WAFS)} or 'none'/'control'")
+
+    # Safety gate: non-localhost targets require --live so the harness never
+    # hits a real commercial WAF by accident.
+    if not live:
+        offenders = [t["url"] for t in targets
+                     if not _bench.is_localhost(t.get("url", ""))]
+        if offenders:
+            raise click.UsageError(
+                f"refusing to hit non-localhost targets without --live: "
+                f"{', '.join(offenders[:3])}"
+                f"{' …' if len(offenders) > 3 else ''}")
+
+    rows = _bench.run_bench(call, targets, tier=tier, settle_ms=settle_ms,
+                            evidence_dir=evidence_dir)
+
+    output = _bench.render_json(rows) if as_json else _bench.render_markdown(rows)
+
+    if update_readme_flag:
+        from pathlib import Path as _P
+        readme = _P.cwd() / "README.md"
+        if not readme.exists():
+            import vibatchium as _pm
+            readme = _P(_pm.__file__).resolve().parent.parent / "README.md"
+        if readme.exists():
+            changed = _bench.update_readme(readme, _bench.render_markdown(rows))
+            click.echo(f"README updated: {changed} ({readme})", err=True)
+        else:
+            click.echo("README.md not found", err=True)
+
+    if out_path:
+        from pathlib import Path as _P
+        _P(out_path).write_text(output)
+        click.echo(f"wrote {out_path}", err=True)
+    else:
+        click.echo(output)
+
+    if min_pass_rate_arg is not None:
+        lowest = _bench.min_pass_rate(rows)
+        if lowest is None:
+            click.echo("error: no tested targets (all errored)", err=True)
+            sys.exit(1)
+        if lowest < min_pass_rate_arg:
+            click.echo(f"FAIL: min pass-rate {lowest} < {min_pass_rate_arg}",
+                       err=True)
             sys.exit(1)
 
 

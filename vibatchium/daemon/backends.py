@@ -54,7 +54,17 @@ DATADOME_TITLES = (
     "blocked - datadome",
     "you've been blocked",
 )
-WALL_TITLES = CLOUDFLARE_TITLES + DATADOME_TITLES
+# PerimeterX / HUMAN block page titles. These are deliberately the FULL,
+# distinctive phrasings PerimeterX serves — NOT a bare "access denied", which
+# countless legit Akamai/IIS/nginx 403 pages also use. Matching the short form
+# would false-positive on ordinary forbidden responses (see the bench's
+# wall_control.html: a legit "Access Denied" that must read as cleared, not
+# walled).
+PERIMETERX_TITLES = (
+    "access to this page has been denied",
+    "please verify you are a human",
+)
+WALL_TITLES = CLOUDFLARE_TITLES + DATADOME_TITLES + PERIMETERX_TITLES
 
 
 def is_walled(title: str, status: int | None) -> str | None:
@@ -63,6 +73,13 @@ def is_walled(title: str, status: int | None) -> str | None:
     Used by `_go` to surface `cloudflare_walled: <defender>` in the result
     when a navigation seems blocked. Caller can then advise switching to the
     nodriver backend (which sometimes gets through where patchright doesn't).
+
+    Detection is TITLE-ONLY by design (status 403/429 alone is too noisy to be
+    conclusive — many legit responses use them). That makes this a best-effort
+    *upper-bound* signal: a body- or iframe-rendered challenge with an innocuous
+    <title> reads as cleared. `vb bench` labels its published pass-rate
+    accordingly (an optimistic upper bound), and callers must not treat a None
+    return as a hard guarantee the page was reachable.
     """
     if status == 403 or status == 429:
         # status alone isn't conclusive — many legit 403/429 responses exist
@@ -74,6 +91,9 @@ def is_walled(title: str, status: int | None) -> str | None:
     for needle in DATADOME_TITLES:
         if needle in tl:
             return "datadome"
+    for needle in PERIMETERX_TITLES:
+        if needle in tl:
+            return "perimeterx"
     return None
 
 
