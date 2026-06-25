@@ -133,6 +133,54 @@ def get_max_ephemeral() -> int:
         return 2
 
 
+def get_session_ram_floor_mb() -> int:
+    """0.12.0: opt-in memory admission floor (MB). When > 0, create() refuses a
+    NEW cold Chrome launch if /proc/meminfo MemAvailable is below it — a portable
+    belt to keep a fan-out of sessions from tipping a shared box into the OOM
+    killer (the real multi-tenant blast-radius hazard: one tenant's heavy Chrome
+    takes down co-tenants' sessions). Default 0 = OFF (count-based admission only,
+    today's behavior). Non-Linux / unreadable /proc → never blocks.
+
+    This is the in-process, portable half. The heavier, non-racy OS ceiling — a
+    cgroup around the daemon (e.g. ``systemd-run --scope -p MemoryMax=…``) — caps
+    the daemon AND all its Chromes in AGGREGATE (not per-renderer; a breach
+    OOM-kills inside the scope, possibly the daemon). It's the operator-level
+    complement (see the README "Resource governance" note), the right tool when
+    you can use it."""
+    try:
+        return max(0, int(os.environ.get("VIBATCHIUM_SESSION_RAM_FLOOR_MB", "0")))
+    except ValueError:
+        return 0
+
+
+def _mem_available_mb() -> int | None:
+    """Available memory (MB) from /proc/meminfo, or None if unreadable (non-Linux
+    / sandboxed /proc). None means 'can't tell' → never blocks."""
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) // 1024
+    except (OSError, ValueError, IndexError):
+        return None
+    return None
+
+
+def _ram_floor_blocked() -> int | None:
+    """If the opt-in admission floor is set AND MemAvailable is below it, return
+    the available MB (the caller should REFUSE the launch); else None. Used by
+    BOTH create()'s cold path and schedule_prewarm() so the default
+    session_new→prewarm→start workflow can't sneak a ~300MB Chrome past the floor
+    (a warm-claim legitimately skips it — the RAM was already spent at prewarm)."""
+    floor = get_session_ram_floor_mb()
+    if floor <= 0:
+        return None
+    avail = _mem_available_mb()
+    if avail is not None and avail < floor:
+        return avail
+    return None
+
+
 def _profile_last_active(path: Path) -> float | None:
     """Best-effort 'last touched' epoch for a profile dir — the newest mtime
     among the dir itself and its immediate children.
@@ -395,6 +443,13 @@ class SessionRegistry:
             log.debug("skipping prewarm of %s — at VIBATCHIUM_MAX_SESSIONS=%d",
                       name, cap)
             return
+        # 0.12.0: honor the opt-in memory admission floor here too — a prewarm is
+        # a real ~300MB Chrome, and the default workflow (session_new prewarm →
+        # warm-claim start) would otherwise launch it with no floor check.
+        if _ram_floor_blocked() is not None:
+            log.debug("skipping prewarm of %s — below VIBATCHIUM_SESSION_RAM_FLOOR_MB",
+                      name)
+            return
 
         async def _do_prewarm():
             try:
@@ -626,6 +681,20 @@ class SessionRegistry:
                     await _backends.close(warm)
                 except Exception:  # noqa: BLE001
                     pass
+            # 0.12.0: memory admission floor — gate a genuinely ADDITIVE cold
+            # launch only (warm is None). A mismatched warm closed just above is
+            # swapped for a fresh Chrome ⇒ net RAM-neutral, so don't refuse it on
+            # a floor re-read that hasn't seen the just-freed RSS yet. Opt-in;
+            # default 0 = no-op. Raised as SessionLimitError so callers that
+            # degrade on a full cap (e.g. `vb research`) treat it the same way.
+            blocked = _ram_floor_blocked() if warm is None else None
+            if blocked is not None:
+                raise SessionLimitError(
+                    f"memory admission floor: only {blocked}MB available, a new "
+                    f"session needs >= {get_session_ram_floor_mb()}MB "
+                    f"(VIBATCHIUM_SESSION_RAM_FLOOR_MB). Close a session or "
+                    f"wait for memory to free up."
+                )
             sess = await self._launch_for(name, profile_dir=pdir,
                                           headless=headless, backend=backend,
                                           proxy_cfg=proxy_cfg, geo_cfg=geo_cfg)

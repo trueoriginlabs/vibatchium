@@ -4,6 +4,108 @@ All notable changes to vibatchium are documented here. Versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Until 1.0,
 minor bumps may include breaking changes; we'll always call them out here.
 
+## [0.12.0] — 2026-06-25
+
+### Multi-agent honesty — make the real isolation boundary reachable, fix two concurrency bugs, drop fetch's needless ceremony
+
+A grounded audit of "can vibatchium *truly* be a multi-agent session browser?"
+found the ergonomics were inverted: the only model that actually contains one
+agent's blast radius from another — a **per-agent daemon** (own socket + HOME +
+profiles + session budget) — was SDK-only, so CLI/MCP-arriving agents defaulted
+into the *shared* daemon, where a "session" is not a boundary. This release makes
+the honest boundary reachable, fixes two real concurrency/robustness bugs on the
+headline paths, and removes the friction that made `vb fetch` feel heavyweight.
+(Within one UID the per-agent daemon is a *blast-radius* boundary, not a security
+boundary — mutually-distrusting tenants still need OS-level sandboxing; we do not
+claim otherwise.)
+
+**The isolated-daemon front door (was SDK-only).**
+- `vb daemon start --isolated [--home DIR] [--runtime-dir DIR] [--idle-timeout S]`
+  spawns a **private daemon** on its own socket + HOME and prints the
+  `XDG_RUNTIME_DIR`/`HOME` to export so subsequent `vb` calls target it. Reuses
+  the `IsolatedDaemon` env-derivation + RAM-floor admission (one source of truth,
+  factored into `sdk.build_isolated_env`).
+- `vb mcp --isolated [--home] [--idle-timeout]` runs the MCP server against a
+  private daemon (re-execs into the private env — the import-time socket is
+  frozen, so in-process env mutation can't redirect it).
+- `vb daemon reap [--all]` — the safety net for the per-agent model: sweeps
+  abandoned private daemons (socket no longer answering) and removes their temp
+  HOME/runtime dirs; `--all` also shuts down live ones. Detached daemons default
+  to a self-exit idle timeout, and are recorded in a discoverable registry under
+  the ambient config dir.
+
+**Concurrency / robustness fixes.**
+- **`go` auto-start race:** the frictionless `go`-with-no-session path created the
+  session *without* the registry `mutate_lock` (unlike the explore ephemeral
+  lane), so two concurrent `vb go <url>` on the implicit `default` could both
+  launch Chrome on the same profile and collide on its `SingletonLock`. Now
+  wrapped + double-checked under the lock.
+- **`vb research` no longer detonates past the cap:** it fanned out *persistent,
+  on-budget* sessions and a `SessionLimitError` on `start` propagated out of
+  `fut.result()`, aborting the **entire** run (dropping completed threads). Now
+  the pool is bounded to the session cap (slots recycle as threads finish), a
+  capacity error retries then degrades **that thread** to an error result, and the
+  redundant `session_new` (which spawned a throwaway prewarm Chrome) is dropped.
+
+**Sessionless `fetch` (drop the ceremony).**
+- `vb fetch --no-cookies <url>` with no session running now does a true
+  **sessionless** anonymous GET — coherent Chrome JA3/HTTP2 fingerprint, no
+  cookies, **no `vb start`, no browser**. (With a session it still reuses its
+  cookies+proxy+UA exactly as before.) New `--user-agent` override. The dispatcher
+  routes fetch through even with no session (`SESSIONLESS_FALLBACK_VERBS`) and the
+  handler decides; a cookie-wanting call with no session gets a clear "start a
+  session or pass --no-cookies" message.
+
+**Resource governance (opt-in).**
+- `VIBATCHIUM_SESSION_RAM_FLOOR_MB` (default 0 = off): refuse a new cold Chrome
+  launch when `/proc/meminfo` MemAvailable is below the floor — a portable
+  admission belt against the OOM blast radius. Raised as `SessionLimitError` so
+  `research` degrades gracefully. The heavier OS ceiling — a cgroup around the
+  daemon (`systemd-run --scope -p MemoryMax=…`, an *aggregate* daemon-wide cap,
+  not per-renderer) — is documented as the operator-level complement.
+
+**Discoverability & packaging.**
+- MCP server `instructions` gain a **Concurrency** paragraph (namespace your
+  `session` on a shared daemon; one-shots are already isolated; `--isolated` for a
+  private daemon), and the per-tool `session` arg description nudges the same.
+- `vb install` now reports optional **lanes** (fetch/vision/secrets/liveview/rest)
+  as informational — a missing extra no longer turns the core verdict red (a
+  missing `pillow` used to). `vb update` and the missing-`curl_cffi` error are
+  **uv-/editable-aware** (emit `uv pip install --python …`; no-op on an editable
+  tree). `vb setup` warns when `vb` isn't on PATH. README/AGENTS install lines
+  surface the `[fetch]`/`[all]` extras.
+
+## [0.11.1] — 2026-06-24
+
+### Added — `vb login` (one-command headed login on a shared box)
+
+Getting a visible window to log into a session's profile used to be a 10-minute
+fiddle on a box whose default daemon is **headless** (e.g. it runs live bots):
+you had to hand-spin a second daemon on its own socket, keep the *real* profile,
+get the display env right, and clear a stale Chrome `SingletonLock` — and it was
+easy to misdiagnose (an isolated runtime dir hides Wayland/dbus; a *native
+Wayland* window is invisible to `xwininfo`, which reads as "no window"). `vb
+login` bakes the whole recipe into one command.
+
+- New `vibatchium/login.py` + `vb login <name> [--url ...]`. It spins up a
+  **separate daemon on its own socket** (the live bots' default daemon is never
+  touched) but on the **real** profile dir `PROFILES_DIR/<name>` — so the cookies
+  you type land exactly where the headless bot reads them. It auto-discovers
+  `DISPLAY`/`XAUTHORITY` (the mutter Xwayland auth file has a random per-login
+  suffix, so it's globbed, not hardcoded), **forces X11/XWayland** (drops Wayland
+  hints so the window is a normal, tool-visible X toplevel), and clears a stale
+  `SingletonLock` only when its owner is dead / on another host.
+- The window **persists** after the command returns so you can log in; tear it
+  down with `vb login --close <name>`. On a truly headless host (no `DISPLAY`)
+  it errors clearly and points you at the cookie-import / `vb attach` path.
+- It navigates the **named** session (`go session=<name>`) and relaunches a
+  fresh window on re-invoke — so it never (a) routes the URL to the daemon's
+  default session, which would open a second window on `profiles/default` and
+  write the login cookies to the wrong profile, or (b) "reuse" a daemon whose
+  window you already closed and show nothing.
+- Most of the module is pure (env/path/lock computation), unit-tested in
+  `tests/test_login.py` without a browser.
+
 ## [0.11.0] — 2026-06-23
 
 Two cua-inspired adopts: a stealth-**wall** pass-rate bench that regression-gates

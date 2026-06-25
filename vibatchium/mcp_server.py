@@ -440,16 +440,18 @@ TOOLS: list[tuple[str, str, dict, str, Any]] = [
      {"type": "object", "properties": {"path": _str("Optional output JSON path.")}},
      "network_dump", None),
     ("fetch",
-     "Authenticated HTTP fetch that REUSES this session's cookies + proxy + UA "
-     "and impersonates the nearest curl_cffi-supported Chrome JA3/HTTP2 "
-     "fingerprint at or below the live Chrome major — NO renderer, NO "
-     "JavaScript. For JSON/XHR/static endpoints behind a login you already "
-     "established in the browser: full speed, no Chrome cost. It defeats the "
-     "static TLS/HTTP2 fingerprint gate ONLY — a DataDome/Kasada/Turnstile JS "
-     "challenge will fail, so fall back to `go`. Cookies flow browser→fetch "
-     "ONE-WAY (response Set-Cookie is NOT written back to the session). Needs "
-     "`pip install vibatchium[fetch]`; gated behind the `fetch` cap (off by "
-     "default). Internal/loopback/link-local targets are refused unless "
+     "Chrome-fingerprinted HTTP fetch (curl_cffi) — NO renderer, NO JavaScript. "
+     "Impersonates the nearest curl_cffi-supported Chrome JA3/HTTP2 fingerprint. "
+     "Two lanes: (1) WITH a running session it REUSES that session's cookies + "
+     "proxy + UA — for JSON/XHR/static endpoints behind a login you already "
+     "established in the browser; (2) SESSIONLESS (cookies=false and no session) "
+     "it does an anonymous GET with a coherent Chrome fingerprint and NO browser "
+     "/ no `vb start` — the cheapest lane for a pure TLS-fingerprint wall on a "
+     "public endpoint. It defeats the static TLS/HTTP2 gate ONLY — a "
+     "DataDome/Kasada/Turnstile JS challenge will fail, so fall back to `go`. "
+     "Cookies flow browser→fetch ONE-WAY (response Set-Cookie is NOT written "
+     "back). Needs `pip install vibatchium[fetch]`; gated behind the `fetch` cap "
+     "(off by default). Internal/loopback/link-local targets are refused unless "
      "allow_internal=true (SSRF guard).",
      {"type": "object", "properties": {
          "url": _str("Target URL (http/https) — required."),
@@ -459,7 +461,8 @@ TOOLS: list[tuple[str, str, dict, str, Any]] = [
          "json": {"type": "object", "description": "JSON request body (sets Content-Type)."},
          "data": _str("Raw request body (form/text)."),
          "impersonate": _str("Override the curl_cffi impersonate target (default: matches the live Chrome)."),
-         "cookies": _bool("Forward the session's cookies for this URL.", True),
+         "user_agent": _str("Override the User-Agent. In the sessionless lane, omit to let the impersonation target supply a coherent Chrome UA."),
+         "cookies": _bool("Forward the session's cookies for this URL. Set false (with no session) for the anonymous sessionless lane.", True),
          "allow_redirects": _bool("Follow redirects.", True),
          "allow_internal": _bool("Permit loopback/link-local/private targets (SSRF guard off).", False),
          "timeout_ms": _int("Request timeout in ms.", 30_000),
@@ -1063,6 +1066,8 @@ Call {primary}. vibatchium ('vb') is a real stealth browser (patchright/Playwrig
 
 Cheap default still wins: for plain static HTML, Google, or a news/general lookup, keep using WebFetch/WebSearch — it's faster. Reach for vb when normal fetch FAILS, or the page needs a real browser (SPA, login/session, multi-step flow).
 
+Concurrency: this daemon may be SHARED with other agents. A one-shot lookup (explore) is safe — it runs on its own throwaway session. But for STATEFUL multi-step work (go → click → fill across calls), pass a unique `session` name on every tool call (e.g. your task id) so you don't collide with another agent on the implicit 'default' session; use `session_lease` to coordinate if you must share one. For a fully private blast radius, an operator can run a per-agent daemon (`vb daemon start --isolated`).
+
 Entry points (this server's current tool surface):
 """
     return head + "\n".join(entries) + "\n(Other verbs may exist behind opt-in caps.)"
@@ -1090,7 +1095,9 @@ def _augment_schema_with_session(schema: dict) -> dict:
     new = {**schema}
     props = dict(new.get("properties") or {})
     props.setdefault("session", _str(
-        "Optional session name to target (omit for the active session)."
+        "Optional session name to target (omit for the shared 'default'). On a "
+        "daemon shared with other agents, pass a UNIQUE name for stateful "
+        "multi-step work (go→click→fill) so you don't collide on 'default'."
     ))
     props.setdefault("lease", _str(
         "Optional lease token to present if the target session is leased "

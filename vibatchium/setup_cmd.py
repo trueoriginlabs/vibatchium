@@ -384,6 +384,11 @@ def run_setup(agents: list[str] | None = None, dry_run: bool = False,
         results.append(_SETUPPERS[name](binary, dry_run=dry_run, write_docs=write_docs))
     return {
         "binary": binary,
+        # Whether a bare `vb` is on PATH. The registered MCP command uses the
+        # absolute `binary` path (robust), but the doc block / skill tell agents
+        # to shell out to bare `vb`, which fails from a non-Python cwd when it
+        # isn't on PATH — surfaced so the CLI can warn + suggest a fix.
+        "on_path": shutil.which("vb") is not None,
         "dry_run": dry_run,
         "detected": {n: {"detected": info.detected, "reason": info.reason}
                     for n, info in detected.items()},

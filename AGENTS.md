@@ -5,12 +5,15 @@ If you're a coding agent (Codex, Cursor, Claude Code) and a user said "use vibat
 ## First-time setup (for users)
 
 ```bash
-pipx install git+https://github.com/trueoriginlabs/vibatchium
+pipx install 'git+https://github.com/trueoriginlabs/vibatchium#egg=vibatchium[all]'  # core install drops the [all] for browse-only
 patchright install chrome   # optional preflight — the first launch auto-installs Chrome if missing
 vb setup            # wire vibatchium into Codex / Claude Code / Cursor (idempotent)
+vb install          # verify: prints core readiness + which optional lanes (fetch/vision/secrets/…) are available
 ```
 
 After `setup`, any agent session in any cwd sees vibatchium as a registered MCP server. Restart agent sessions to pick up the registration.
+
+> `vb fetch` (the curl_cffi TLS-fingerprint HTTP lane) needs the `[fetch]` extra. A core-only install can browse but `vb fetch` will say which interpreter to add curl_cffi to. On a **uv** venv (no pip): `uv pip install --python <venv>/bin/python curl_cffi`.
 
 ## TL;DR — the commands you actually need
 
@@ -45,9 +48,36 @@ $VB verify_url --url https://maybe-dead.example       # ~50ms DNS pre-check
 | "Does this domain exist?" | `$VB verify_url --url <url>` |
 | "Hit a JSON/API endpoint behind my login" | `$VB fetch <url>` (reuses session cookies+proxy+UA; needs `[fetch]` extra, `fetch` cap) |
 | Walled site (Cloudflare/Datadome 403) | `$VB explore` — patchright stealth clears most cold |
-| Login-walled (X, LinkedIn) | Manual login + `$VB attach http://localhost:9222` |
+| Log into a session's profile by hand | `$VB login <name> --url <login-url>` — see "Headed login" below. Headless host → cookie import / `$VB attach`. |
 | Google / news / Reddit threads | **WebSearch**, not vibatchium |
 | Plain HTML, known URL, single fetch | **WebFetch**, not vibatchium |
+
+## Headed login on a shared box
+
+To log into a session's profile by hand (so a headless bot can then use the
+cookies), use **`vb login`** — don't hand-roll an isolated daemon:
+
+```bash
+$VB login sigintzero --url https://x.com/login   # a real window opens; log in
+$VB login --close sigintzero                      # tear it down when done
+```
+
+Why a command exists for this: on a box whose **default daemon is headless**
+(e.g. it runs live bots), you can't just `vb start --headed` — that either
+reuses the bots' headless daemon or, on an isolated one, is easy to get wrong.
+`vb login` spins a **separate daemon on its own socket** (the live bots are never
+touched) but on the **real** profile dir, harvests `DISPLAY`/`XAUTHORITY`, and
+forces X11/XWayland. Gotchas it removes (these burned earlier debugging):
+
+- Explicit `--headed` **always** wins over the TTY default (`cli.py`
+  `_cli_resolve_headless`) — "needs a real TTY" is a myth; the window just needs
+  a daemon spawned with a working display env.
+- A **native Wayland** Chrome window is **invisible to `xwininfo`/`wmctrl`** —
+  "nothing in xwininfo" is *not* proof of no window. `vb login` forces X11 so
+  the window is a normal, tool-visible toplevel.
+- A Chrome killed earlier leaves a stale `SingletonLock` in the profile that
+  silently blocks a headed relaunch; `vb login` clears it (only if its owner is
+  dead / on another host).
 
 ## Multi-step interactive
 

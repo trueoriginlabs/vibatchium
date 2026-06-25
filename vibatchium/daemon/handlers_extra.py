@@ -772,7 +772,10 @@ def register_extra(daemon) -> None:
     # (authenticated arbitrary-URL egress is higher blast-radius than browsing).
     @daemon.handler("fetch")
     async def _fetch(d, args):
-        s = _session(d)
+        # 0.12.0: fetch can run SESSIONLESS. `s` may be None — when no session
+        # exists the dispatcher routes fetch here anyway (SESSIONLESS_FALLBACK_VERBS)
+        # and we resolve identity without a live context (see below).
+        s = d.session
         url = args.get("url")
         if not isinstance(url, str) or not url:
             raise ValueError("fetch requires `url` (str)")
@@ -796,30 +799,63 @@ def register_extra(daemon) -> None:
                     "— SSRF guard; pass allow_internal=true to override"
                 )
 
+        # 0.12.0 sessionless precondition — checked BEFORE requiring the optional
+        # dep so the actionable guidance shows even in a venv without curl_cffi: a
+        # cookie-reusing fetch needs a session to reuse cookies from. (A --no-cookies
+        # call with no session proceeds to the anonymous sessionless lane below.)
+        if s is None and args.get("cookies", True):
+            from .handlers import SessionNotStarted
+            raise SessionNotStarted(
+                "fetch with cookies needs a session to reuse — run `vb start` "
+                "first, or pass --no-cookies for an anonymous fetch (no session, "
+                "no browser)."
+            )
+
         try:
             import curl_cffi.requests as _cc
         except ImportError as e:
+            import sys as _sys
             raise RuntimeError(
-                "fetch requires `pip install vibatchium[fetch]` (curl_cffi) — "
-                "the authenticated TLS-impersonating HTTP lane"
+                f"fetch needs curl_cffi (the `vibatchium[fetch]` extra) in the "
+                f"DAEMON's interpreter ({_sys.executable}). Install it there — "
+                f"e.g. `uv pip install --python {_sys.executable} curl_cffi` "
+                f"(or `pip install curl_cffi`) — then bounce the daemon with "
+                f"`vb shutdown` (it auto-respawns on the next call)."
             ) from e
         from ..proxy import load_session_proxy, parse as _proxy_parse
         from .browser import coherent_headless_ua
 
-        # Identity reads happen here, under the per-session lock, so cookies/UA
-        # are coherent with the live context.
-        ck = await s.context.cookies()
-        try:
-            ua = await s.page.evaluate("navigator.userAgent")
-        except Exception:  # noqa: BLE001
-            ua = await coherent_headless_ua(s.pw)
-        proxies = None
-        if getattr(s, "profile_dir", None) is not None:
-            try:
-                purl = load_session_proxy(s.profile_dir)
-                proxies = _f.proxy_cfg_to_curl(_proxy_parse(purl)) if purl else None
-            except Exception:  # noqa: BLE001 — proxy read/parse failure → direct
-                proxies = None
+        ua_override = args.get("user_agent")
+        if s is None:
+            # SESSIONLESS LANE (0.12.0): no live session to reuse identity from
+            # (the cookie-wanting case already raised above). An anonymous,
+            # stateless GET — curl_cffi's impersonate target supplies a coherent
+            # Chrome UA + JA3/HTTP2 fingerprint, so this needs NO browser and NO
+            # `vb start`. Reuses the exact same TLS-impersonation lane, just with
+            # no cookies/proxy.
+            ck: list = []
+            # None → curl_cffi's `impersonate` sets a coherent Chrome UA itself;
+            # an explicit --user-agent still wins.
+            ua = ua_override
+            proxies = None
+        else:
+            # Identity reads happen here, under the per-session lock, so cookies/UA
+            # are coherent with the live context.
+            ck = await s.context.cookies()
+            if ua_override:
+                ua = ua_override
+            else:
+                try:
+                    ua = await s.page.evaluate("navigator.userAgent")
+                except Exception:  # noqa: BLE001
+                    ua = await coherent_headless_ua(s.pw)
+            proxies = None
+            if getattr(s, "profile_dir", None) is not None:
+                try:
+                    purl = load_session_proxy(s.profile_dir)
+                    proxies = _f.proxy_cfg_to_curl(_proxy_parse(purl)) if purl else None
+                except Exception:  # noqa: BLE001 — proxy read/parse failure → direct
+                    proxies = None
 
         impersonate = _f.pick_impersonate(ua, args.get("impersonate"))
         headers = {}

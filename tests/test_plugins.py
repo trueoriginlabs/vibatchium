@@ -327,6 +327,11 @@ def test_remove_pep668_fallback_uninstall(monkeypatch):
 def test_update_pip_latest(monkeypatch):
     from vibatchium import cli
     monkeypatch.setattr(cli, "_is_pipx_install", lambda: False)
+    # 0.12.0: _update_dist now also branches on uv-venv / editable install before
+    # the pip path — pin both to False so this test exercises the pip branch
+    # regardless of the dev environment it runs in (the repo's own venv is uv).
+    monkeypatch.setattr(cli, "_is_uv_venv", lambda: False)
+    monkeypatch.setattr(cli, "_is_editable_install", lambda: False)
     calls: list[list[str]] = []
 
     def fake_run(cmd, *, capture):
@@ -342,6 +347,9 @@ def test_update_pip_latest(monkeypatch):
 def test_update_pipx_latest(monkeypatch):
     from vibatchium import cli
     monkeypatch.setattr(cli, "_is_pipx_install", lambda: True)
+    # editable is checked before pipx in _update_dist — pin it off so the pipx
+    # branch runs even when the test executes from the repo's editable venv.
+    monkeypatch.setattr(cli, "_is_editable_install", lambda: False)
     calls: list[list[str]] = []
     monkeypatch.setattr(cli, "_run",
                         lambda cmd, *, capture: calls.append(list(cmd)) or _FakeCompleted(0))
@@ -354,6 +362,7 @@ def test_update_pipx_latest(monkeypatch):
 def test_update_pipx_pinned_version(monkeypatch):
     from vibatchium import cli
     monkeypatch.setattr(cli, "_is_pipx_install", lambda: True)
+    monkeypatch.setattr(cli, "_is_editable_install", lambda: False)
     calls: list[list[str]] = []
     monkeypatch.setattr(cli, "_run",
                         lambda cmd, *, capture: calls.append(list(cmd)) or _FakeCompleted(0))
@@ -365,6 +374,10 @@ def test_update_pipx_pinned_version(monkeypatch):
 def test_update_pip_pinned_pep668_fallback(monkeypatch):
     from vibatchium import cli
     monkeypatch.setattr(cli, "_is_pipx_install", lambda: False)
+    # See test_update_pip_latest: pin the new uv/editable predicates to False so
+    # the pip (PEP-668 fallback) branch is exercised in any dev environment.
+    monkeypatch.setattr(cli, "_is_uv_venv", lambda: False)
+    monkeypatch.setattr(cli, "_is_editable_install", lambda: False)
     calls: list[list[str]] = []
 
     def fake_run(cmd, *, capture):

@@ -262,11 +262,19 @@ def install(ctx, skip_chrome):
     import subprocess
     from .daemon.paths import CACHE_DIR, PROFILES_DIR, CONFIG_DIR, DEFAULT_PROFILE_DIR
 
-    out = {"checks": []}
+    out = {"checks": [], "extras": []}
 
     def check(name, ok, note=""):
         out["checks"].append({"name": name, "ok": ok, "note": note})
         click.echo(f"[{'+' if ok else '!'}] {name}: {note}")
+
+    def lane(name, available, what):
+        # Optional-extra lanes are INFORMATIONAL — a missing one never fails the
+        # core 'ready' verdict; it just means that lane is off until you install
+        # its extra. Reported so lane availability is visible up-front instead of
+        # being discovered mid-task.
+        out["extras"].append({"name": name, "ok": available, "note": what})
+        click.echo(f"[{'+' if available else '·'}] lane:{name}: {what}")
 
     # 1) Python version
     import sys as _sys
@@ -294,31 +302,45 @@ def install(ctx, skip_chrome):
               "no DISPLAY — headed mode needs one. Try: "
               "`Xvfb :99 -screen 0 1920x1080x24 &` then `export DISPLAY=:99`")
 
-    # 4) Pillow (for screenshot --annotate)
-    try:
-        import PIL  # noqa: F401
-        check("pillow", True, "available — annotated screenshots enabled")
-    except ImportError:
-        check("pillow", False, "missing — `pip install pillow` for screenshot --annotate")
-
-    # 5) Cache / profile paths writable
+    # 4) Cache / profile paths writable (core)
     for label, p in [("cache_dir", CACHE_DIR), ("config_dir", CONFIG_DIR),
                      ("profiles_dir", PROFILES_DIR), ("default_profile", DEFAULT_PROFILE_DIR)]:
         ok = os.access(p, os.W_OK)
         check(label, ok, str(p))
 
-    # 6) MCP SDK importable
+    # 5) MCP SDK importable (core)
     try:
         import mcp  # noqa: F401
         check("mcp", True, "available — vb mcp server runnable")
     except ImportError:
         check("mcp", False, "missing — `pip install mcp` for the MCP server")
 
+    # ─── optional-extra lanes (informational — never fail the core verdict) ──
+    def _lane(modname, name, what, dep):
+        try:
+            __import__(modname)
+            lane(name, True, f"available — {what}")
+        except Exception:  # noqa: BLE001
+            lane(name, False, f"unavailable — {what}. Add: {_pkg_install_cmd(dep)}")
+
+    _lane("curl_cffi", "fetch", "stealth HTTP fetch lane (`vb fetch`)", "curl_cffi")
+    _lane("PIL", "annotate", "annotated screenshots (`screenshot --annotate`)", "pillow")
+    _lane("anthropic", "vision", "VLM read/locate (`visual-extract`, vision click)", "anthropic")
+    _lane("aiohttp", "liveview", "live-view stream (`vb liveview`)", "aiohttp")
+    _lane("nacl", "secrets", "encrypted credential vault (`secret_*`)", "pynacl")
+    _lane("fastapi", "rest", "REST shim (`vb serve`)", "fastapi")
+
+    # The verdict reflects ONLY core checks (browse / daemon / MCP). A missing
+    # optional lane is reported above but never turns the verdict red — it means
+    # "that lane is off", not "vibatchium is broken".
     overall_ok = all(c["ok"] for c in out["checks"])
     out["ok"] = overall_ok
     click.echo("")
-    click.echo("[+] all checks passed — vibatchium ready" if overall_ok
-               else "[!] some checks failed — see notes above")
+    if overall_ok:
+        click.echo("[+] core checks passed — vibatchium ready "
+                   "(optional lanes listed above)")
+    else:
+        click.echo("[!] some CORE checks failed — see notes above")
     if ctx.obj["json"]:
         click.echo(json.dumps(out, indent=2))
 
@@ -845,6 +867,47 @@ def attach(ctx, cdp_url):
 
 
 @cli.command()
+@click.argument("name")
+@click.option("--url", default=None,
+              help="Navigate the window to this URL after launch (e.g. an "
+                   "account's login page, https://x.com/login).")
+@click.option("--close", "close_", is_flag=True,
+              help="Tear down NAME's login window/daemon instead of opening one.")
+@click.pass_context
+def login(ctx, name, url, close_):
+    """Open a HEADED window to log into session NAME's profile by hand.
+
+    For a shared box whose default daemon is HEADLESS (e.g. it runs live bots):
+    spins up a SEPARATE daemon on its OWN socket (the live bots' daemon is never
+    touched) but on the REAL profile dir, with a working display, so you log in
+    by hand and the cookies land where the headless bot reads them. The window
+    persists until you close it.
+
+      vb login sigintzero --url https://x.com/login   # window opens; log in
+      vb login --close sigintzero                      # tear it down
+
+    On a headless host (no DISPLAY) use cookie import instead — see `vb attach`.
+    """
+    from . import login as _login
+    if close_:
+        _emit(_login.close_login(name), ctx.obj["json"], "session")
+        return
+    try:
+        info = _login.run_login(name, url=url)
+    except (_login.NoDisplayError, DaemonError) as e:
+        raise click.ClickException(str(e)) from e
+    if ctx.obj["json"]:
+        _emit(info, True)
+        return
+    click.echo(f"Headed login window opened for '{name}'.")
+    if url:
+        click.echo(f"  → {url}")
+    click.echo(f"  profile : {info['profile']}")
+    click.echo(f"  isolated daemon: {info['sock']}  (live bots untouched)")
+    click.echo(f"  Log in by hand in the window, then:  vb login --close {name}")
+
+
+@cli.command()
 @click.pass_context
 def stop(ctx):
     """Stop the browser session. Daemon stays up."""
@@ -1003,6 +1066,13 @@ def setup(ctx, agents, check, no_docs):
         click.echo(json.dumps(result, indent=2))
         return
     click.echo(f"binary: {result['binary']}")
+    if not result.get("on_path", True):
+        click.echo(
+            "[!] `vb` is NOT on your PATH — the MCP server is registered with the "
+            "absolute path above (fine), but agents that shell out to bare `vb` "
+            "(per the docs/skill) will get command-not-found from a non-Python "
+            "cwd. Fix: `uv tool install --editable .` (or symlink the binary into "
+            "~/.local/bin).", err=True)
     if check:
         click.echo("(dry-run — no changes written)")
     click.echo()
@@ -1049,6 +1119,13 @@ def update(ctx, version, no_restart):
     if rc != 0:
         click.echo(f"update failed (rc={rc})", err=True)
         sys.exit(rc)
+    # On an editable tree nothing was installed, so bouncing the daemon would
+    # just drop live sessions for no gain — skip the restart there.
+    if _is_editable_install():
+        click.echo("editable install — daemon left running ("
+                   "`git pull` already updated the code on disk; bounce with "
+                   "`vb shutdown` if a daemon is serving older code).", err=True)
+        return
     if not no_restart:
         try:
             if daemon_is_running():
@@ -1218,16 +1295,30 @@ def extract(ctx, selector, max_chars):
 @click.option("--data", default=None, help="Raw request body.")
 @click.option("--impersonate", default=None,
               help="Override the curl_cffi impersonate target (default: live Chrome).")
-@click.option("--no-cookies", is_flag=True, help="Don't forward the session's cookies.")
+@click.option("--no-cookies", is_flag=True, help="Don't forward the session's cookies. "
+              "With no session running this also enables the SESSIONLESS lane — an "
+              "anonymous GET with no `vb start` and no browser.")
+@click.option("--user-agent", "user_agent", default=None,
+              help="Override the User-Agent. In the sessionless lane, omit it and "
+                   "curl_cffi's impersonation target supplies a coherent Chrome UA.")
 @click.option("--allow-internal", is_flag=True,
               help="Permit loopback/link-local/private targets (SSRF guard off).")
 @click.option("--timeout-ms", type=int, default=30000, show_default=True)
 @click.pass_context
-def fetch(ctx, url, method, headers, data, impersonate, no_cookies, allow_internal, timeout_ms):
-    """Authenticated HTTP fetch reusing the session's cookies+proxy+UA (curl_cffi).
+def fetch(ctx, url, method, headers, data, impersonate, no_cookies, user_agent, allow_internal, timeout_ms):
+    """Chrome-fingerprinted HTTP fetch (curl_cffi) — no renderer, no JS.
 
-    No renderer, no JS — for JSON/API/static endpoints behind a login. Needs
-    `pip install vibatchium[fetch]`.
+    Two lanes:
+
+    \b
+    - WITH a running session: reuses its cookies + proxy + UA, for JSON/API/
+      static endpoints behind a login you already established in the browser.
+    - SESSIONLESS (`--no-cookies`, no session): an anonymous GET with a coherent
+      Chrome JA3/HTTP2 fingerprint and no `vb start`, no browser — the cheapest
+      lane for a TLS-fingerprint wall on a public endpoint.
+
+    Needs `pip install vibatchium[fetch]` (curl_cffi). For a plain anonymous GET
+    that ISN'T fingerprint-walled, WebFetch/curl is simpler.
     """
     args = {"url": url, "method": method, "timeout_ms": timeout_ms}
     hdrs = {}
@@ -1241,6 +1332,8 @@ def fetch(ctx, url, method, headers, data, impersonate, no_cookies, allow_intern
         args["data"] = data
     if impersonate:
         args["impersonate"] = impersonate
+    if user_agent:
+        args["user_agent"] = user_agent
     if no_cookies:
         args["cookies"] = False
     if allow_internal:
@@ -2880,11 +2973,23 @@ def fingerprint(ctx, target, url, extract, settle_ms):
                    "(or `all`) to expose every tool. Buckets: core,session,nav,"
                    "content,input,element,pages,storage,network,dialogs,overrides,"
                    "vision,devtools,agent,… Example: `--caps=core,nav,input,agent`.")
-def mcp(caps):
+@click.option("--isolated", is_flag=True,
+              help="Run this MCP server against a PRIVATE daemon (own socket + "
+                   "HOME — separate profiles/config/state) so an MCP-driven agent "
+                   "gets the per-agent isolation boundary without touching the "
+                   "shared daemon. Reap the daemon later with `vb daemon reap`.")
+@click.option("--home", default=None,
+              help="(--isolated) Private HOME dir (default: a fresh temp dir). "
+                   "Pass a fixed dir to persist this agent's profiles/logins.")
+@click.option("--idle-timeout", default=1800, type=int, show_default=True,
+              help="(--isolated) Private daemon self-exits after this many idle "
+                   "seconds (0 = never); it auto-respawns on the next call.")
+def mcp(caps, isolated, home, idle_timeout):
     """Run the MCP server (stdio JSON-RPC) — wires the CLI verbs as MCP tools.
 
     Defaults to the lean tool surface so agents aren't flooded with ~150 tools;
-    `--caps=full` restores the complete surface.
+    `--caps=full` restores the complete surface. `--isolated` runs it on a
+    private per-agent daemon.
     """
     from .mcp_server import _entrypoint
     # 0.8.0 (Vibium lesson): lean-by-default. An explicit --caps (incl. `full`/
@@ -2892,6 +2997,41 @@ def mcp(caps):
     # _entrypoint default also enforces this for `python -m vibatchium.mcp_server`).
     if not caps:
         caps = "lean"
+    if isolated:
+        # Spawn a detached private daemon, then RE-EXEC this CLI (without
+        # --isolated) in its env so the import-time socket — frozen from
+        # XDG_RUNTIME_DIR — targets the private daemon. In-process env mutation
+        # can't work here: client/paths are already imported, so the socket path
+        # is fixed; re-exec is the clean way to point a fresh process at it.
+        import shutil as _shutil
+        from .sdk import spawn_detached_isolated, build_isolated_env, RamFloorError
+        try:
+            info = spawn_detached_isolated(home=home, idle_timeout=(idle_timeout or 0))
+        except RamFloorError as exc:
+            raise click.ClickException(str(exc)) from exc
+        except Exception as exc:  # noqa: BLE001
+            raise click.ClickException(f"failed to start isolated daemon: {exc}") from exc
+        click.echo(f"[vb mcp] private daemon {info['sock_path']} "
+                   f"(HOME={info['home']}) — reap later with `vb daemon reap`",
+                   err=True)
+        env = build_isolated_env(info["runtime_dir"], info["home"])
+        tail = ["mcp", "--caps", caps]
+        # Prefer re-exec'ing the actual `vb` console script when it's executable
+        # (the canonical path). For the `python -m vibatchium.cli` form, argv[0]
+        # is the NON-executable cli.py — which() returns None and execve'ing the
+        # .py would EACCES — so fall through to the interpreter form. (Gate on
+        # X_OK, and guard execve with try/except so a surprising argv[0] can't
+        # crash the process and orphan the daemon we just spawned.)
+        prog = _shutil.which(sys.argv[0])
+        if prog and os.access(prog, os.X_OK):
+            try:
+                os.execve(prog, [prog, *tail], env)
+            except OSError:
+                pass  # fall through to the interpreter re-exec
+        os.execve(sys.executable,
+                  [sys.executable, "-c",
+                   "from vibatchium.cli import main; main()", *tail], env)
+        return  # unreachable after execve
     try:
         _entrypoint(caps=caps)
     except ValueError as exc:
@@ -3050,6 +3190,44 @@ def research(ctx, target, intents, threads, output_dir, headless, safety,
 
     target_host = _urlparse(target).hostname or "unknown"
 
+    # 0.12.0: research fans out PERSISTENT, on-budget sessions, so it must live
+    # within VIBATCHIUM_MAX_SESSIONS. Resolve the daemon's real cap and bound the
+    # pool to it — extra threads QUEUE and reuse slots as finished threads close
+    # their session, instead of all N racing the cap at once. (Previously a
+    # SessionLimitError on `start` propagated out of fut.result() and aborted the
+    # ENTIRE run, dropping already-completed threads' output.)
+    import time as _time
+
+    def _persistent_cap():
+        try:
+            st = call("status")
+            cap = st.get("budgets", {}).get("persistent", {}).get("cap")
+            return int(cap) if cap else None
+        except Exception:  # noqa: BLE001
+            return None
+
+    _CAP_MARKERS = ("MAX_SESSIONS", "MAX_EPHEMERAL", "memory admission")
+
+    def _start_session(name: str, attempts: int = 4, delay: float = 2.0) -> None:
+        """Start a research session, RETRYING a capacity error so a momentarily
+        full cap (peers / sibling threads) recycles before we give up; a
+        non-capacity error fails fast. Drops the old redundant `session_new`
+        (which scheduled a throwaway prewarm Chrome) — `start` creates the
+        session directly, exactly like the explore/go auto-start path."""
+        last: Exception | None = None
+        for i in range(attempts):
+            try:
+                call("start", {"headless": headless}, session=name)
+                return
+            except DaemonError as exc:
+                last = exc
+                if not any(m in str(exc) for m in _CAP_MARKERS):
+                    raise
+                if i < attempts - 1:
+                    _time.sleep(delay)
+        assert last is not None
+        raise last
+
     def _run_thread(idx: int, intent: str) -> dict:
         """Single research thread. Sync — runs in a thread pool worker."""
         name = f"research-{idx + 1}"
@@ -3058,8 +3236,15 @@ def research(ctx, target, intents, threads, output_dir, headless, safety,
         thread_log.append(f"- session: `{name}`")
         thread_log.append(f"- target: {target}")
         try:
-            call("session_new", {"name": name})
-            call("start", {"headless": headless}, session=name)
+            try:
+                _start_session(name)
+            except DaemonError as exc:
+                # Capacity never freed up (or a hard start error) — degrade THIS
+                # thread to an error result; the run continues and other threads'
+                # output is preserved.
+                thread_log.append(f"- start FAILED (no session slot): {exc}")
+                return {"name": name, "intent": intent, "log": thread_log,
+                        "screenshot": None, "text": None, "error": str(exc)}
             # Safety mode per-session before any external crawl
             if safety and safety != "off":
                 try:
@@ -3129,15 +3314,31 @@ def research(ctx, target, intents, threads, output_dir, headless, safety,
             except DaemonError:
                 pass
 
-    # Fan out — N threads in parallel via a thread pool
-    click.echo(f"fanning out {n_threads} sessions on {target_host}…", err=True)
+    # Fan out — bounded by the session cap so slots recycle (extra intents queue).
+    cap = _persistent_cap()
+    max_workers = max(1, min(n_threads, cap)) if cap else n_threads
+    if cap and n_threads > cap:
+        click.echo(f"note: {n_threads} intents > session cap {cap} — running "
+                   f"{max_workers} at a time (slots recycle as threads finish); "
+                   f"raise VIBATCHIUM_MAX_SESSIONS for more parallelism.", err=True)
+    click.echo(f"fanning out {n_threads} sessions on {target_host} "
+               f"({max_workers} at a time)…", err=True)
     t0 = _dt.datetime.now()
     results = []
-    with ThreadPoolExecutor(max_workers=n_threads) as pool:
-        futures = [pool.submit(_run_thread, i, intents_list[i])
-                   for i in range(n_threads)]
-        for fut in futures:
-            results.append(fut.result())
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = {pool.submit(_run_thread, i, intents_list[i]): (i, intents_list[i])
+                   for i in range(n_threads)}
+        for fut, (idx, intent) in futures.items():
+            try:
+                results.append(fut.result())
+            except Exception as exc:  # noqa: BLE001
+                # Backstop: the in-thread guards catch DaemonError, but a SIBLING
+                # DaemonNotRunning or a socket timeout on a wedged op would
+                # otherwise re-raise here and abort the WHOLE run, discarding every
+                # other thread's already-written output. Degrade this one instead.
+                results.append({"name": f"research-{idx + 1}", "intent": intent,
+                                "log": [f"thread crashed: {exc}"], "screenshot": None,
+                                "text": None, "error": str(exc)})
     wall_s = (_dt.datetime.now() - t0).total_seconds()
     # Index report
     index_md = out / "index.md"
@@ -3270,15 +3471,69 @@ def daemon_cmd():
               help="Default `start` calls to headless when args don't specify. "
                    "For fan-out / background scraping workflows where you don't "
                    "want desktop clutter. Per-call `--headless`/`--headed` still wins.")
-def daemon_start(max_sessions, log_verbs, default_safety, default_headless):
+@click.option("--isolated", is_flag=True,
+              help="Start a PRIVATE daemon on its own socket + HOME (separate "
+                   "profiles/config/state) that NEVER touches the shared daemon. "
+                   "The honest per-agent boundary: prints the XDG_RUNTIME_DIR/HOME "
+                   "to export so subsequent `vb` calls target it. Reap with "
+                   "`vb daemon reap`.")
+@click.option("--home", default=None,
+              help="(--isolated) Private HOME dir (default: a fresh temp dir, "
+                   "removed on reap). Pass a fixed dir to persist its profiles/login.")
+@click.option("--runtime-dir", default=None,
+              help="(--isolated) Private XDG_RUNTIME_DIR (default: a fresh temp dir).")
+@click.option("--idle-timeout", default=900, type=int, show_default=True,
+              help="(--isolated) Self-exit after this many seconds with zero "
+                   "sessions (0 = never). Guards against an abandoned private daemon.")
+def daemon_start(max_sessions, log_verbs, default_safety, default_headless,
+                 isolated, home, runtime_dir, idle_timeout):
     """Explicitly bootstrap the daemon with non-default settings.
 
     For most uses you don't need this — `vb start` auto-spawns
     the daemon. Use this only when you need a higher session cap,
-    full audit logging, or a non-default safety mode set at daemon
-    start time.
+    full audit logging, a non-default safety mode, or a private
+    `--isolated` daemon set at start time.
     """
     from .client import daemon_is_running, spawn_daemon
+
+    if isolated:
+        # The reachable front door to the per-agent isolation boundary — the only
+        # model that actually contains one agent's blast radius (socket, profiles,
+        # OOM, session budget) from another's. SDK-only before 0.12.0.
+        from .sdk import spawn_detached_isolated, RamFloorError
+        extra_env = {}
+        if log_verbs:
+            extra_env["VIBATCHIUM_LOG_VERBS"] = "1"
+            extra_env["VIBATCHIUM_LOG_LEVEL"] = "DEBUG"
+        if default_headless:
+            extra_env["VIBATCHIUM_DEFAULT_HEADLESS"] = "1"
+        if default_safety:
+            extra_env["VIBATCHIUM_DEFAULT_SAFETY"] = default_safety
+        try:
+            info = spawn_detached_isolated(
+                home=home, runtime_dir=runtime_dir, max_sessions=max_sessions,
+                idle_timeout=idle_timeout, extra_env=extra_env or None)
+        except RamFloorError as exc:
+            click.echo(f"refused: {exc}", err=True)
+            sys.exit(1)
+        except Exception as exc:  # noqa: BLE001
+            click.echo(f"failed to start isolated daemon: {exc}", err=True)
+            sys.exit(1)
+        click.echo("private daemon started — isolated socket + HOME (separate "
+                   "profiles/config/state); the shared daemon is untouched.",
+                   err=True)
+        click.echo(f"  pid     {info['pid']}", err=True)
+        click.echo(f"  socket  {info['sock_path']}", err=True)
+        if info["idle_timeout"]:
+            click.echo(f"  idle    self-exits after {info['idle_timeout']}s idle "
+                       f"(`vb daemon reap` sweeps it afterward)", err=True)
+        click.echo("\nExport these so every subsequent `vb` call targets it:",
+                   err=True)
+        # To STDOUT so it can be eval'd: eval "$(vb daemon start --isolated | tail -1)"
+        click.echo(f'export XDG_RUNTIME_DIR="{info["runtime_dir"]}" '
+                   f'HOME="{info["home"]}"')
+        return
+
     if daemon_is_running():
         click.echo("daemon already running — stop it first with "
                     "`vb shutdown`", err=True)
@@ -3298,6 +3553,43 @@ def daemon_start(max_sessions, log_verbs, default_safety, default_headless):
         click.echo(f"applying env: {env_overrides}", err=True)
     spawn_daemon(wait=10)
     click.echo("daemon started", err=True)
+
+
+@daemon_cmd.command(name="reap")
+@click.option("--all", "kill_live", is_flag=True,
+              help="Also shut down LIVE private daemons (default: only orphans "
+                   "whose daemon is gone).")
+@click.pass_context
+def daemon_reap(ctx, kill_live):
+    """Sweep abandoned `--isolated` private daemons + their temp dirs.
+
+    The safety net for the per-agent model: if the process that started a private
+    daemon was hard-killed (or the daemon idle-exited), its temp HOME/runtime dir
+    can linger. This reads the isolated-daemon registry, removes the dirs of any
+    daemon that's no longer answering, and (with --all) shuts down live ones too.
+
+    Run it from the AMBIENT environment (not inside an isolated HOME).
+    """
+    from .sdk import reap_isolated_daemons
+    rep = reap_isolated_daemons(kill_live=kill_live)
+    if ctx.obj["json"]:
+        click.echo(json.dumps({k: [e.get("sock_path") for e in v]
+                               for k, v in rep.items()}, indent=2))
+        return
+    reaped, killed, kept = rep["reaped"], rep["killed"], rep["kept"]
+    for e in killed:
+        click.echo(f"[killed] {e.get('sock_path')}", err=True)
+    for e in reaped:
+        click.echo(f"[reaped] {e.get('runtime_dir')} (+ home)", err=True)
+    for e in kept:
+        click.echo(f"[live]   {e.get('sock_path')} — left running "
+                   f"(use --all to stop)", err=True)
+    if kill_live:
+        click.echo(f"killed {len(killed)} live + reaped {len(reaped)} orphan(s); "
+                   f"cleaned their dirs.")
+    else:
+        click.echo(f"reaped {len(reaped)} orphan(s); {len(kept)} live private "
+                   f"daemon(s) kept.")
 
 
 @daemon_cmd.command(name="list")
@@ -3452,6 +3744,49 @@ def _is_pipx_install() -> bool:
     return "pipx" in parts and "venvs" in parts
 
 
+def _is_uv_venv() -> bool:
+    """True when this interpreter lives in a uv-created venv. uv venvs commonly
+    ship WITHOUT pip, so `python -m pip ...` (and the PEP-668 fallback) is broken
+    there — the modern install path needs `uv pip ...` instead. Detected via the
+    uv marker in pyvenv.cfg, or the absence of a pip module as a fallback."""
+    try:
+        cfg = Path(sys.prefix) / "pyvenv.cfg"
+        if cfg.is_file() and "uv =" in cfg.read_text():
+            return True
+    except Exception:  # noqa: BLE001
+        pass
+    import importlib.util
+    return importlib.util.find_spec("pip") is None
+
+
+def _is_editable_install() -> bool:
+    """True when vibatchium is installed editable (`pip/uv pip install -e .`) — a
+    dev tree. `vb update` must NOT run a package install there (it would shadow
+    the editable tree with the PyPI release); the user pulls the repo instead."""
+    try:
+        from importlib.metadata import Distribution
+        durl = Distribution.from_name("vibatchium").read_text("direct_url.json")
+        # Compare against a space-stripped copy with a space-free needle — else
+        # the needle's space never matches the stripped haystack and this is
+        # always False (the editable guard would be dead code).
+        return bool(durl and '"editable":true' in durl.replace(" ", ""))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _pkg_install_cmd(pkg: str) -> str:
+    """The exact command to add a (bare) dependency like ``curl_cffi`` into THIS
+    interpreter, matched to how vibatchium was installed. Bare deps (not the
+    ``vibatchium[extra]`` form) are used so an editable/uv install gains the lane
+    without the PyPI release shadowing the dev tree."""
+    exe = sys.executable
+    if _is_pipx_install():
+        return f"pipx inject vibatchium {pkg}"
+    if _is_uv_venv() or _is_editable_install():
+        return f"uv pip install --python {exe} {pkg}"
+    return f"pip install {pkg}"
+
+
 def _run(cmd, *, capture: bool):
     """Indirection point so tests can monkeypatch ``subprocess.run``."""
     import subprocess
@@ -3510,11 +3845,24 @@ def _update_dist(version: str | None) -> tuple[int, str]:
     ``--break-system-packages`` fallback for plain pip.
     """
     target = f"vibatchium=={version}" if version else "vibatchium"
+    if _is_editable_install():
+        # An editable dev tree: a package install would shadow it with the PyPI
+        # release. No-op with guidance instead of a destructive (or, on a
+        # uv venv, broken) install.
+        return 0, ("editable install detected — `vb update` is a no-op; "
+                   "`git pull` in the repo to update the dev tree.")
     if _is_pipx_install():
         cmd = (["pipx", "install", "--force", target] if version
                else ["pipx", "upgrade", "vibatchium"])
         rc = _run(cmd, capture=False).returncode
         return rc, "pipx detected — " + " ".join(cmd)
+    if _is_uv_venv():
+        # uv venvs ship without pip → `python -m pip` is broken; use `uv pip`.
+        exe = sys.executable
+        cmd = (["uv", "pip", "install", "--python", exe, target] if version
+               else ["uv", "pip", "install", "--python", exe, "-U", "vibatchium"])
+        rc = _run(cmd, capture=False).returncode
+        return rc, "uv venv detected — " + " ".join(cmd)
     pip_args = ["install", target] if version else ["install", "-U", "vibatchium"]
     rc, _, note = _pip_with_pep668_fallback(pip_args)
     return rc, note
