@@ -1507,7 +1507,19 @@ def register_all(daemon) -> None:
             # 0.6.11: respect VIBATCHIUM_DEFAULT_HEADED instead of hardcoding
             # headless — `go` carries no posture, so resolve_headless({}) applies
             # the canonical precedence (defaults headless, honors the env opt-in).
-            await d._handlers["start"](d, {"headless": resolve_headless({})})
+            #
+            # 0.12.0 concurrency fix: `go` is a SESSION_AUTOSTART verb that the
+            # dispatcher runs WITHOUT the registry mutate_lock (server.py), and
+            # start()→registry.create() relies on that lock for create-atomicity
+            # (its `name in _entries` check is not atomic across the launch
+            # await). Take the lock here — exactly as the explore ephemeral lane
+            # does — so two concurrent `go`-first calls on the same session name
+            # can't both create() and collide on Chrome's user-data-dir
+            # SingletonLock. Double-checked under the lock: a racing caller may
+            # have started it while we awaited, so re-test before launching.
+            async with d.registry.mutate_lock:
+                if d.registry.get(name) is None:
+                    await d._handlers["start"](d, {"headless": resolve_headless({})})
         s = _need_session(d)
         url = args["url"]
         # Per-goal domain allowlist enforcement: while a goal owns this session

@@ -4,12 +4,18 @@
 Patched Playwright + multi-session daemon + credential vault + vision clicking + prompt-injection safety. One MCP server, N parallel Chromes, persistent per-session profiles.
 
 ```
-pipx install vibatchium     # or: pip install vibatchium
+pipx install vibatchium             # core: browse / extract / screenshot / N parallel sessions
+# want the stealth HTTP fetch lane (vb fetch), the credential vault, VLM read, or the REST shim?
+pipx install 'vibatchium[all]'      # everything; or pick extras: vibatchium[fetch], [secrets], [llm], [rest]
 patchright install chrome
 vb setup                    # register MCP + an auto-discoverable skill so agents reach for vb (idempotent)
 ```
 
-> Bleeding edge from `master`: `pipx install git+https://github.com/trueoriginlabs/vibatchium`
+Core install covers all browsing. `vb fetch` (the curl_cffi TLS-fingerprint lane) is the
+`[fetch]` extra; `vb install` reports which optional lanes are available. On a **uv** venv
+(no pip), add an extra with `uv pip install --python <venv>/bin/python curl_cffi`.
+
+> Bleeding edge from `master`: `pipx install 'git+https://github.com/trueoriginlabs/vibatchium#egg=vibatchium[all]'`
 
 > **Coding agents (Codex / Cursor / Claude Code):** read [`AGENTS.md`](AGENTS.md) first — it has the one-call recipes (`explore`, `research`) and the env-discovery traps to skip.
 
@@ -77,6 +83,33 @@ vb session list
 ```
 
 Active-session resolution: `--session FLAG` → `$VIBATCHIUM_SESSION` env → `~/.config/vibatchium/active-session` → `default`. Cap via `VIBATCHIUM_MAX_SESSIONS=4` (default 4).
+
+### Multi-agent: shared sessions vs a private daemon
+
+On **one** shared daemon, sessions give real fingerprint isolation (separate
+Chromes, no cookie bleed) but share the host: the session count budget, the
+memory, and the blast radius of an OOM or a daemon bounce. Two models, pick per
+trust level:
+
+- **Cooperating agents (your own fleet):** the shared daemon is right — just give
+  each concurrent agent a **unique `--session` name** so stateful flows don't
+  collide on `default`. `vb session lease` coordinates a shared name.
+- **A private blast radius:** a **per-agent daemon** on its own socket + `HOME`
+  — separate profiles/config/state, its own session budget, zero contact with
+  the shared daemon. `vb daemon start --isolated` prints the `XDG_RUNTIME_DIR`/
+  `HOME` to export for subsequent calls; `vb mcp --isolated` runs the MCP server
+  on its own private daemon directly. `vb daemon reap` cleans up abandoned ones.
+  (Same UID = same trust domain — this bounds *blast radius*, not a security
+  boundary between distrusting tenants; for that, separate UIDs/containers.)
+
+**Resource governance.** The session cap bounds process *count*, not bytes. On a
+shared box, set `VIBATCHIUM_SESSION_RAM_FLOOR_MB` to refuse a new launch when free
+memory is low (a portable admission belt). For a hard ceiling, run the daemon
+under a cgroup — `systemd-run --user --scope -p MemoryMax=4G vb daemon start` puts
+the daemon **and all its Chromes** in one cgroup sharing the limit: an *aggregate*
+daemon-wide cap (not per-renderer), and a breach OOM-kills inside the scope, which
+can include the daemon. It's the only non-racy memory bound, so size it for the
+whole fan-out.
 
 ## Documentation
 

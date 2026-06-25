@@ -164,6 +164,18 @@ class Daemon:
         "go",  # auto-starts headless when called without a prior `start`
     })
 
+    # 0.12.0: verbs that CAN run with no session at all (no auto-start, no
+    # session lock) when one isn't present — the dispatcher lets them through
+    # instead of rejecting with "no session", and the handler decides whether
+    # it can proceed sessionless or must raise a precondition error. `fetch` is
+    # the case: an anonymous --no-cookies GET carries no session state (no
+    # cookies/UA/proxy to reuse), so forcing a full Chrome session for it was
+    # pure ceremony. When a session DOES exist, fetch still runs under the
+    # per-session lock and reuses its identity exactly as before.
+    SESSIONLESS_FALLBACK_VERBS = frozenset({
+        "fetch",
+    })
+
     # Verbs that mutate the registry itself (create/destroy sessions, switch
     # active session, daemon-level queries that don't need a session). These
     # acquire the registry.mutate_lock instead of a per-session lock.
@@ -473,6 +485,11 @@ class Daemon:
                     # handler can fire; the registry lookup will succeed
                     # on a follow-up dispatcher call once `start` returns.
                     if cmd in self.SESSION_AUTOSTART_VERBS:
+                        result = await self._handlers[cmd](self, args)
+                    elif cmd in self.SESSIONLESS_FALLBACK_VERBS:
+                        # No session, no lock — run the handler and let it decide
+                        # whether it can proceed sessionless (e.g. an anonymous
+                        # fetch) or must raise its own precondition error.
                         result = await self._handlers[cmd](self, args)
                     else:
                         return {
