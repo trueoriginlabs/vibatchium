@@ -47,6 +47,37 @@ def resolve_headless(args: dict) -> bool:
     return True
 
 
+def headed_no_display_msg(headless: bool, environ, name: str) -> str | None:
+    """Guidance text when a *headed* launch cannot produce a window because this
+    daemon has no DISPLAY, else None. Pure so it unit-tests without a browser.
+
+    The recurring "I don't see a headed session" trap: a background daemon (e.g.
+    a live bot's) has no DISPLAY, so a headed launch is doomed — Chromium exits
+    with "Missing X server or $DISPLAY" (empirically confirmed) and never shows a
+    window. The daemon knows its own env, so it refuses BEFORE the doomed launch
+    and points at the command that spins a *windowed* daemon with a real display
+    (`vb show`, alias `vb login`).
+    """
+    if headless or environ.get("DISPLAY"):
+        return None
+    return (
+        f"cannot launch headed: this daemon has no DISPLAY, so Chrome would exit "
+        f"with 'Missing X server or $DISPLAY' and no window would appear. To get "
+        f"a REAL visible window (to solve a captcha or log in by hand) use: "
+        f"vb show {name} --url <url>  (alias `vb login`; spins a separate "
+        f"windowed daemon with a harvested display, live bots untouched). For "
+        f"background/automation work, use headless instead (drop --headed).")
+
+
+class HeadedNoDisplayError(RuntimeError):
+    """Raised by `start` when a headed launch is asked of a display-less daemon.
+
+    Server formats this WITHOUT the type prefix (like SessionNotStarted) so the
+    caller sees the bare actionable message — not a cryptic Playwright X-server
+    stack trace after a doomed launch.
+    """
+
+
 import re as _re
 
 _REF_TARGET_RE = _re.compile(r"^@?(e\d+)$|^\[ref=e\d+\]$")
@@ -383,6 +414,17 @@ def register_all(daemon) -> None:
         # (close() guards it anyway — this keeps the response honest).
         want_ephemeral = bool(args.get("ephemeral")) and name != DEFAULT_SESSION_NAME
 
+        # 0.13.0: an explicit `--gpu/--no-gpu` persists to gpu.json. Do it BEFORE the
+        # already-running early return AND before create(), so the choice is durable +
+        # self-heal-safe on BOTH paths (create/relaunch resolve GPU from disk+env, never
+        # a transient param). On a running session it takes effect on the next start. A
+        # bare `start` sends no `gpu` key and inherits env/persisted/off.
+        gpu_persisted = None
+        if "gpu" in args:
+            from ..gpu import save_session_gpu
+            gpu_persisted = bool(args["gpu"])
+            save_session_gpu(profile_dir, {"on": gpu_persisted})
+
         if d.registry.has(name):
             entry = d.registry.get(name)
             # Allow `start --ephemeral` to mark an already-running session for
@@ -396,15 +438,29 @@ def register_all(daemon) -> None:
                         f"VIBATCHIUM_MAX_EPHEMERAL={get_max_ephemeral()} reached "
                         f"— cannot reclassify {name!r} as ephemeral")
                 entry.ephemeral = True
-            return {"already_started": True, "mode": entry.session.mode,
-                    "session": name, "profile": str(entry.profile_dir),
-                    "ephemeral": entry.ephemeral}
+            out = {"already_started": True, "mode": entry.session.mode,
+                   "session": name, "profile": str(entry.profile_dir),
+                   "ephemeral": entry.ephemeral,
+                   "gpu": bool(getattr(entry.session, "gpu", False))}
+            if gpu_persisted is not None:
+                out["gpu_pending"] = gpu_persisted
+                out["note"] = ("gpu persisted; already running — close + start to "
+                               "apply (a live renderer swap needs a relaunch)")
+            return out
 
         # 0.6.4: headless by default (a background daemon owns no display).
         # Explicit headless=true|false wins; VIBATCHIUM_DEFAULT_HEADED=1 opts a
         # whole daemon back into headed. Interactive `vb start` sends headed
         # explicitly so humans at a terminal still get a window.
         headless = resolve_headless(args)
+        # Honesty guard: a headed launch on a display-less daemon is doomed —
+        # Chromium exits with "Missing X server or $DISPLAY" and shows no window
+        # (the recurring "I don't see a headed session" trap). Refuse BEFORE the
+        # doomed launch with an actionable message, instead of letting Playwright
+        # throw a cryptic X-server stack trace with no pointer to `vb show`.
+        _no_display = headed_no_display_msg(headless, os.environ, name)
+        if _no_display:
+            raise HeadedNoDisplayError(_no_display)
         backend = args.get("backend") or "patchright"
         ephemeral = want_ephemeral
         entry = await d.registry.create(
@@ -415,7 +471,27 @@ def register_all(daemon) -> None:
         out = {"started": True, "mode": "launch",
                "session": name, "profile": str(entry.profile_dir),
                "profile_name": entry.profile_dir.name,
-               "backend": backend, "ephemeral": ephemeral}
+               "backend": backend, "ephemeral": ephemeral,
+               "gpu": bool(getattr(entry.session, "gpu", False))}
+        # Honest residual (v1 is WebGL-only): a real renderer still reports
+        # screen == viewport in headless — don't let `gpu:true` read as a fully-real
+        # device. Mirrors gpu_info.
+        if out["gpu"]:
+            out["screen_coherent"] = False
+            out["note"] = ("WebGL renderer is real; screen still == viewport in "
+                           "headless (v1 is WebGL-only)")
+        else:
+            # GPU was configured-on but the effective launch is NOT GPU (nodriver
+            # backend ignores it, headed no-op, or the host has no render node) —
+            # surface it in the RESPONSE, not just the daemon log, so `--gpu` never
+            # silently contradicts itself.
+            from ..gpu import load_session_gpu
+            if (load_session_gpu(profile_dir) or {}).get("on"):
+                reason = ("nodriver backend (patchright-only in v1)" if backend == "nodriver"
+                          else "headed (GPU is headless-only)" if not headless
+                          else "no accessible /dev/dri/renderD* on this host")
+                out["gpu_ignored"] = True
+                out["note"] = f"GPU WebGL configured but not applied: {reason}"
         return out
 
     # ─── session management ────────────────────────────────────────────
@@ -478,7 +554,15 @@ def register_all(daemon) -> None:
     async def _session_close(d, args):
         """Stop Chrome for one session; profile dir is preserved on disk."""
         name = args.get("name") or current_session_ctx.get()
-        name = validate_name(name, kind="session name")
+        # Close an ALREADY-REGISTERED session by its EXACT name without strict
+        # validation. Internal underscore-prefixed sessions (_ex- explore, _iv-
+        # interactive-view) are creatable via `start`/the `_session` field but
+        # validate_name rejects a leading underscore — so without this they can't be
+        # closed via session_close and LEAK (only the `stop` verb could close them).
+        # A name that ISN'T a live session is still validated, so a genuinely
+        # malformed/unknown name still gets a clean error.
+        if not d.registry.has(name):
+            name = validate_name(name, kind="session name")
         closed = await d.registry.close(name)
         return {"closed": closed, "name": name}
 
@@ -801,6 +885,105 @@ def register_all(daemon) -> None:
                 out["browser_probe_error"] = str(exc)
         return out
 
+    # ─── 0.13.0: headless GPU WebGL ────────────────────────────────────
+
+    @daemon.handler("gpu_set")
+    async def _gpu_set(d, args):
+        """Persist GPU WebGL on/off for the current session (the only opt-in path,
+        alongside `start --gpu`). Takes effect on next `start` (close the session first
+        if running). Flipping a logged-in account's renderer is a deliberate one-time
+        device-change signal — do it knowingly, and not on more than one same-box
+        account until de-twinning lands (see CHANGELOG honest scope)."""
+        from ..gpu import (save_session_gpu, load_session_gpu, gpu_available,
+                           render_nodes, VALID_GPU_NODES, egl_vendor_for_node,
+                           available_gpu_nodes)
+        from .registry import current_session_ctx as _ctx
+        from .paths import session_dir as _sd
+        on = bool(args.get("on", True))
+        sname = _ctx.get()
+        entry = d.registry.get(sname)
+        pdir = entry.profile_dir if entry else _sd(sname)
+        # De-twin node: validate; merge — preserve the existing node when `--node`
+        # isn't passed, so `gpu set --off`/`--on` toggles don't wipe the pin.
+        node = args.get("node")
+        if node is not None:
+            node = str(node).strip().lower()
+            if node not in VALID_GPU_NODES:
+                raise ValueError(
+                    f"unknown gpu node {node!r}; valid: {sorted(VALID_GPU_NODES)}")
+            if node == "default":
+                node = None
+        else:
+            node = (load_session_gpu(pdir) or {}).get("node")
+        save_session_gpu(pdir, {"on": on, "node": node})
+        out = {"set": True, "on": on, "node": node, "session": sname,
+               "note": "takes effect on next `start` (close session first if running)"}
+        if on and not gpu_available():
+            out["warning"] = ("no accessible /dev/dri/renderD* on this host — will "
+                              "degrade to SwiftShader at launch")
+            out["render_nodes"] = render_nodes()
+        if on and node and egl_vendor_for_node(node) is None:
+            out["node_warning"] = (f"gpu node {node!r} has no matching EGL vendor on "
+                                   f"this host — will use the default GPU")
+            out["available_nodes"] = available_gpu_nodes()
+        return out
+
+    @daemon.handler("gpu_clear")
+    async def _gpu_clear(d, args):
+        from ..gpu import save_session_gpu
+        from .registry import current_session_ctx as _ctx
+        from .paths import session_dir as _sd
+        sname = _ctx.get()
+        entry = d.registry.get(sname)
+        pdir = entry.profile_dir if entry else _sd(sname)
+        save_session_gpu(pdir, None)
+        return {"cleared": True, "session": sname}
+
+    @daemon.handler("gpu_info")
+    async def _gpu_info(d, args):
+        """Show configured (gpu.json) + effective (resolve_gpu) GPU mode, host
+        capability, and — if running — the LIVE WebGL renderer the browser actually
+        reports (proving the flag took, or catching a silent software fallback). Also
+        surfaces the residual `screen==viewport` incoherence (WebGL-only v1)."""
+        from ..gpu import (load_session_gpu, resolve_gpu, resolve_gpu_node,
+                           gpu_available, render_nodes, renderer_is_real,
+                           available_gpu_nodes, WEBGL_PROBE)
+        from .registry import current_session_ctx as _ctx
+        from .paths import session_dir as _sd
+        sname = _ctx.get()
+        entry = d.registry.get(sname)
+        pdir = entry.profile_dir if entry else _sd(sname)
+        cfg = load_session_gpu(pdir)
+        out = {"session": sname,
+               "configured": None if cfg is None else cfg["on"],
+               "effective": resolve_gpu(pdir, name=sname),
+               "configured_node": (cfg or {}).get("node"),
+               "effective_node": resolve_gpu_node(pdir, name=sname),
+               "available_nodes": available_gpu_nodes(),
+               "host_gpu_available": gpu_available(),
+               "render_nodes": render_nodes()}
+        if entry is not None:
+            out["launched_gpu"] = bool(getattr(entry.session, "gpu", False))
+            out["launched_gpu_node"] = getattr(entry.session, "gpu_node", None)
+            # Live renderer probe — same lock discipline as geo_info.
+            try:
+                async with entry.lock:
+                    r = await entry.session.page.evaluate(WEBGL_PROBE)
+                out["renderer"] = r.get("renderer")
+                out["renderer_vendor"] = r.get("vendor")
+                out["renderer_is_real"] = renderer_is_real(r.get("renderer"))
+                if r.get("err"):
+                    out["renderer_error"] = r["err"]
+                # Honest residual: v1 fixes WebGL only; screen still == viewport in
+                # headless (see FP-DIVERSITY Phase 2 / VIBATCHIUM_FP_VIEWPORT).
+                if out.get("launched_gpu"):
+                    out["screen_coherent"] = False
+                    out["note"] = ("WebGL renderer is real; screen still == viewport "
+                                   "in headless (v1 is WebGL-only)")
+            except Exception as exc:  # noqa: BLE001
+                out["renderer_probe_error"] = str(exc)
+        return out
+
     # ─── Wave 6.1c: session checkpoint / restore ───────────────────────
 
     @daemon.handler("checkpoint_save")
@@ -1003,7 +1186,13 @@ def register_all(daemon) -> None:
     async def _session_delete(d, args):
         """Delete a profile dir on disk. Refuses if the session is running,
         active, or is the special 'default'."""
-        name = validate_name(args.get("name"), kind="session name")
+        name = args.get("name")
+        # Same rationale as session_close: allow deleting an EXISTING profile (or live
+        # session) by exact name without strict validation, so an internal
+        # underscore-prefixed profile (_ex-/_iv-) can be cleaned up. Validate only a
+        # name that identifies neither a live session nor an on-disk profile.
+        if not (name and (d.registry.has(name) or session_dir(name).exists())):
+            name = validate_name(args.get("name"), kind="session name")
         if name == get_active_session_name():
             raise ValueError(f"session {name!r} is active — switch first")
         deleted = await d.registry.delete_profile_dir(name)
@@ -1591,10 +1780,16 @@ def register_all(daemon) -> None:
                 # nodriver beats patchright on the hardest Cloudflare gates
                 # (2026 benchmark). Suggest headed first, nodriver if it holds.
                 out["advice"] = (
-                    f"page looks {wall}-walled. Try headed first (stealthier "
-                    f"than headless, keeps cookies): `vb session close {name} "
-                    f"&& vb --session {name} start --headed`. If it still "
-                    f"walls, swap backend: `vb --session {name} start "
+                    f"page looks {wall}-walled. TWO paths: "
+                    f"(1) a HUMAN solves it (captcha/challenge) — open the "
+                    f"profile in a REAL, visible window: `vb session close "
+                    f"{name} && vb show {name} --url {s.page.url}` (alias of "
+                    f"`vb login`; a separate windowed daemon, live bots "
+                    f"untouched; close with `vb show --close {name}`). "
+                    f"(2) AUTOMATIC stealth retry, no human — these render "
+                    f"OFF-SCREEN (for evasion, NOT for viewing): go headed "
+                    f"`vb session close {name} && vb --session {name} start "
+                    f"--headed`, or swap backend `vb --session {name} start "
                     f"--backend nodriver` (after close)."
                 )
         # Skills: surface per-host field-notes (opt-in via VIBATCHIUM_SKILLS).

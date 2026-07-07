@@ -18,7 +18,7 @@ process is the sweet spot:
 - Single daemon = simple IPC + simple MCP routing
 - N Chrome processes = real fingerprint isolation per session
 - Profile↔session 1:1 enforced by OS user-data-dir lock
-- ~200-400 MB RAM per Chrome; default cap 4 sessions (VIBATCHIUM_MAX_SESSIONS)
+- ~200-400 MB RAM per Chrome; default cap 8 sessions (VIBATCHIUM_MAX_SESSIONS)
 
 The interface is shaped so a future "remote session" (process-per-session,
 arch C) could be added behind the same `SessionEntry` surface without
@@ -113,9 +113,9 @@ current_session_ctx: ContextVar[str] = ContextVar(
 def get_max_sessions() -> int:
     """Concurrent-session cap — read at every call so it's testable."""
     try:
-        return max(1, int(os.environ.get("VIBATCHIUM_MAX_SESSIONS", "4")))
+        return max(1, int(os.environ.get("VIBATCHIUM_MAX_SESSIONS", "8")))
     except ValueError:
-        return 4
+        return 8
 
 
 def get_max_ephemeral() -> int:
@@ -125,12 +125,12 @@ def get_max_ephemeral() -> int:
     Unlike get_max_sessions (min 1), this floors at 0 — setting
     VIBATCHIUM_MAX_EPHEMERAL=0 HARD-DISABLES the lane, so `vb explore` without a
     pinned session and `vb start --ephemeral` then raise SessionLimitError.
-    Default 2 bounds worst-case total Chromes to MAX_SESSIONS+MAX_EPHEMERAL.
+    Default 4 bounds worst-case total Chromes to MAX_SESSIONS+MAX_EPHEMERAL.
     """
     try:
-        return max(0, int(os.environ.get("VIBATCHIUM_MAX_EPHEMERAL", "2")))
+        return max(0, int(os.environ.get("VIBATCHIUM_MAX_EPHEMERAL", "4")))
     except ValueError:
-        return 2
+        return 4
 
 
 def get_session_ram_floor_mb() -> int:
@@ -653,11 +653,11 @@ class SessionRegistry:
         # second disk read. _launch_for re-loads from disk when called WITHOUT
         # them (the relaunch/self-heal path), so a mid-life `vb proxy set` is
         # honored on recovery.
-        proxy_cfg, geo_cfg = self._load_proxy_geo(name, pdir)
+        proxy_cfg, geo_cfg, gpu_on, gpu_node = self._load_session_overrides(name, pdir)
         # Wave 6.1b: prefer a pre-warmed session if one is available for this
         # name AND the requested config matches (backend, headless, no proxy,
-        # no geo). Proxy- or geo-configured sessions always launch fresh because
-        # the warm session was launched without those overrides.
+        # no geo, no gpu). Proxy-/geo-/gpu-configured sessions always launch fresh
+        # because the warm session was launched without those overrides.
         #
         # If a prewarm is in-flight (task started but not done), await it
         # first — both that task and a fresh launch would race for the
@@ -671,7 +671,8 @@ class SessionRegistry:
         warm = self._warm_sessions.pop(name, None)
         if (warm is not None and backend == "patchright"
                 and warm.profile_dir == pdir and warm.headless == headless
-                and proxy_cfg is None and geo_cfg is None):
+                and proxy_cfg is None and geo_cfg is None
+                and not gpu_on):  # prewarm never launches with GPU, so gpu_on=True → cold
             sess = warm
             log.info("session %s claimed pre-warmed Chrome", name)
         else:
@@ -697,7 +698,8 @@ class SessionRegistry:
                 )
             sess = await self._launch_for(name, profile_dir=pdir,
                                           headless=headless, backend=backend,
-                                          proxy_cfg=proxy_cfg, geo_cfg=geo_cfg)
+                                          proxy_cfg=proxy_cfg, geo_cfg=geo_cfg,
+                                          gpu_on=gpu_on, gpu_node=gpu_node)
         sess.flags = getattr(sess, "flags", {}) if hasattr(sess, "flags") else {}
         entry = SessionEntry(name=name, profile_dir=pdir, session=sess,
                              ephemeral=ephemeral)
@@ -709,13 +711,17 @@ class SessionRegistry:
                  name, pdir, sess.mode, backend)
         return entry
 
-    def _load_proxy_geo(self, name: str, profile_dir: Path):
-        """Resolve the persisted per-session proxy (proxy.json) + geo (geo.json)
-        for a profile dir. Returns ``(proxy_cfg, geo_cfg)`` — either may be None.
+    def _load_session_overrides(self, name: str, profile_dir: Path):
+        """Resolve the persisted per-session proxy (proxy.json) + geo (geo.json) +
+        gpu (gpu.json/env, host-gated) for a profile dir. Returns
+        ``(proxy_cfg, geo_cfg, gpu_on)`` — proxy_cfg/geo_cfg may be None; gpu_on is a
+        bool.
 
-        Shared by create() (warm-claim guard + cold launch) and _launch_for's
-        relaunch path so the proxy/geo resolution + the proxy-without-geo
-        coherence warning live in ONE place.
+        Returns ``(proxy_cfg, geo_cfg, gpu_on, gpu_node)``. Shared by create() (warm-
+        claim guard + cold launch) and _launch_for's relaunch path so resolution + the
+        proxy-without-geo coherence warning live in ONE place — and so the self-heal
+        relaunch RE-READS gpu.json (incl the de-twin node), carrying the GPU posture
+        forward on crash recovery (persist-never-re-derive).
         """
         from ..proxy import load_session_proxy, parse as _parse_proxy
         proxy_cfg = None
@@ -735,29 +741,38 @@ class SessionRegistry:
                 "session %s has a proxy but no geo override — the host "
                 "timezone may not match the proxy's IP (a bot tell). "
                 "Set `vb geo set --country <cc>` to cohere.", name)
-        return proxy_cfg, geo_cfg
+        from ..gpu import resolve_gpu, resolve_gpu_node
+        gpu_on = resolve_gpu(profile_dir, name=name)
+        gpu_node = resolve_gpu_node(profile_dir, name=name) if gpu_on else None
+        return proxy_cfg, geo_cfg, gpu_on, gpu_node
 
     async def _launch_for(self, name: str, *, profile_dir: Path,
                           headless: bool, backend: str,
-                          proxy_cfg=_UNSET, geo_cfg=_UNSET,
+                          proxy_cfg=_UNSET, geo_cfg=_UNSET, gpu_on=_UNSET,
+                          gpu_node=_UNSET,
                           allow_install: bool = True) -> BrowserSession:
         """Cold-launch a Chrome for a session with NO warm-claim — the single
         launch seam shared by create()'s cold path and relaunch().
 
-        When proxy_cfg/geo_cfg are omitted (the relaunch/self-heal path) they
-        are RE-READ from disk so a mid-life `vb proxy set` / `vb geo set` is
-        honored on recovery. create() passes its already-loaded cfgs through to
-        avoid a redundant read.
+        When proxy_cfg/geo_cfg/gpu_on are omitted (the relaunch/self-heal path) they
+        are RE-READ from disk so a mid-life `vb proxy set` / `vb geo set` / `vb gpu
+        set` is honored on recovery — this is what carries the GPU posture forward
+        through a renderer-crash relaunch (otherwise it would silently revert to
+        SwiftShader). create() passes its already-loaded cfgs through to avoid a
+        redundant read.
         """
         pw = await self._ensure_pw()
         from . import backends as _backends
-        if proxy_cfg is _UNSET or geo_cfg is _UNSET:
-            proxy_cfg, geo_cfg = self._load_proxy_geo(name, profile_dir)
+        if (proxy_cfg is _UNSET or geo_cfg is _UNSET or gpu_on is _UNSET
+                or gpu_node is _UNSET):
+            (proxy_cfg, geo_cfg, gpu_on,
+             gpu_node) = self._load_session_overrides(name, profile_dir)
 
         async def _do_launch():
             return await _backends.launch(
                 backend, profile_dir, headless=headless, pw=pw, proxy=proxy_cfg,
-                timezone_id=(geo_cfg or {}).get("timezone_id"))
+                timezone_id=(geo_cfg or {}).get("timezone_id"), gpu=bool(gpu_on),
+                gpu_node=gpu_node)
 
         try:
             return await _do_launch()
@@ -873,6 +888,15 @@ class SessionRegistry:
                         "to an existing Chrome — geo applies only to cold-launch "
                         "(`start`); the attached browser keeps its own timezone.",
                         name)
+        # 0.13.0: same as geo — GPU WebGL is a cold-launch flag injection; an
+        # attached Chrome keeps its own renderer. Don't silently ignore a configured
+        # gpu.json — warn.
+        from ..gpu import load_session_gpu
+        _gpu = load_session_gpu(session_dir(name))
+        if _gpu and _gpu.get("on"):
+            log.warning("session %s has GPU WebGL configured but is ATTACHing to an "
+                        "existing Chrome — GPU applies only to cold-launch (`start`); "
+                        "the attached browser keeps its own WebGL renderer.", name)
         entry = SessionEntry(name=name, profile_dir=session_dir(name), session=sess)
         self._entries[name] = entry
         log.info("session attached name=%s cdp_url=%s", name, cdp_url)

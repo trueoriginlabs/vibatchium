@@ -56,10 +56,10 @@ async def test_headed_request_does_not_claim_headless_prewarm(monkeypatch):
     calls = {"launch": 0, "closed": []}
 
     async def fake_launch(backend, pdir, *, headless, pw=None, proxy=None,
-                          timezone_id=None):
+                          timezone_id=None, gpu=False, gpu_node=None):
         calls["launch"] += 1
         return SimpleNamespace(headless=headless, profile_dir=pdir, mode="launch",
-                               timezone_id=timezone_id)
+                               timezone_id=timezone_id, gpu=bool(gpu), gpu_node=gpu_node)
 
     async def fake_close(sess):
         calls["closed"].append(sess)

@@ -28,7 +28,7 @@ dependencies = [
     # Upper bounds prevent surprise breakage when a major-version bump
     # changes APIs we depend on. Bump these floors+ceilings deliberately,
     # not implicitly via uv lock.
-    "patchright>=1.59.0,<2.0",
+    "patchright>=1.59.0,<1.61",  # <1.61 until 1.61 clears the stealth gate (see tests/test_stealth_drift_gate.py)
     "click>=8.1.7,<9.0",
     "mcp>=1.0.0,<2.0",
 ]

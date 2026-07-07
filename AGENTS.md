@@ -48,26 +48,33 @@ $VB verify_url --url https://maybe-dead.example       # ~50ms DNS pre-check
 | "Does this domain exist?" | `$VB verify_url --url <url>` |
 | "Hit a JSON/API endpoint behind my login" | `$VB fetch <url>` (reuses session cookies+proxy+UA; needs `[fetch]` extra, `fetch` cap) |
 | Walled site (Cloudflare/Datadome 403) | `$VB explore` — patchright stealth clears most cold |
-| Log into a session's profile by hand | `$VB login <name> --url <login-url>` — see "Headed login" below. Headless host → cookie import / `$VB attach`. |
+| See a page / solve a captcha / log in by hand (real visible window) | `$VB show <name> --url <url>` (alias `$VB login`) — see "Show a real window" below. **Not** `start --headed` (renders off-screen on a headless-daemon box). Headless host → cookie import / `$VB attach`. |
 | Google / news / Reddit threads | **WebSearch**, not vibatchium |
 | Plain HTML, known URL, single fetch | **WebFetch**, not vibatchium |
 
-## Headed login on a shared box
+## Show a real window / headed login on a shared box
 
-To log into a session's profile by hand (so a headless bot can then use the
-cookies), use **`vb login`** — don't hand-roll an isolated daemon:
+To put a session's profile in a **real, visible window** — to *see* a page, let
+a human **solve a captcha/challenge**, or **log in by hand** — use **`vb show`**
+(alias **`vb login`**). Don't hand-roll an isolated daemon, and **don't reach for
+`vb start --headed`**: on a shared/headless-daemon box that renders **off-screen**
+(headed there only sheds headless fingerprint tells — no window appears; three
+agents burned ~10 min each rediscovering this, one landing Chrome on an invisible
+Xvfb display).
 
 ```bash
-$VB login sigintzero --url https://x.com/login   # a real window opens; log in
-$VB login --close sigintzero                      # tear it down when done
+$VB show shopscout --url https://www.aliexpress.com/item/123.html   # window opens on-screen
+$VB show --close shopscout                                          # tear it down when done
+# `vb login <name> --url …` is the same command (use whichever reads better).
 ```
 
 Why a command exists for this: on a box whose **default daemon is headless**
 (e.g. it runs live bots), you can't just `vb start --headed` — that either
-reuses the bots' headless daemon or, on an isolated one, is easy to get wrong.
-`vb login` spins a **separate daemon on its own socket** (the live bots are never
-touched) but on the **real** profile dir, harvests `DISPLAY`/`XAUTHORITY`, and
-forces X11/XWayland. Gotchas it removes (these burned earlier debugging):
+reuses the bots' headless daemon (which has **no DISPLAY**, so the window is
+invisible) or, on an isolated one, is easy to get wrong. `vb show`/`vb login`
+spins a **separate daemon on its own socket** (the live bots are never touched)
+but on the **real** profile dir, harvests `DISPLAY`/`XAUTHORITY`, and forces
+X11/XWayland. Gotchas it removes (these burned earlier debugging):
 
 - Explicit `--headed` **always** wins over the TTY default (`cli.py`
   `_cli_resolve_headless`) — "needs a real TTY" is a myth; the window just needs
@@ -78,6 +85,11 @@ forces X11/XWayland. Gotchas it removes (these burned earlier debugging):
 - A Chrome killed earlier leaves a stale `SingletonLock` in the profile that
   silently blocks a headed relaunch; `vb login` clears it (only if its owner is
   dead / on another host).
+- If you ignore the above and run `vb start --headed` against a display-less
+  daemon anyway, `start` now **refuses before the doomed launch** with a clear
+  error (`cannot launch headed: this daemon has no DISPLAY … use vb show …`) —
+  instead of Chromium exiting with a cryptic "Missing X server or $DISPLAY" and
+  no pointer to the right command.
 
 ## Multi-step interactive
 

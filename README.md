@@ -82,7 +82,7 @@ wait
 vb session list
 ```
 
-Active-session resolution: `--session FLAG` → `$VIBATCHIUM_SESSION` env → `~/.config/vibatchium/active-session` → `default`. Cap via `VIBATCHIUM_MAX_SESSIONS=4` (default 4).
+Active-session resolution: `--session FLAG` → `$VIBATCHIUM_SESSION` env → `~/.config/vibatchium/active-session` → `default`. Cap via `VIBATCHIUM_MAX_SESSIONS=8` (default 8).
 
 ### Multi-agent: shared sessions vs a private daemon
 

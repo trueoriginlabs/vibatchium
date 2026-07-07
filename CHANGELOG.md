@@ -4,6 +4,91 @@ All notable changes to vibatchium are documented here. Versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Until 1.0,
 minor bumps may include breaking changes; we'll always call them out here.
 
+## [0.13.1] — 2026-07-07
+
+### Stop `--headed` from silently painting to nothing; add `vb show`
+
+Third agent in two weeks reinvented the headed-window recipe by hand and got it
+wrong — one landed Chrome on an invisible Xvfb display, so the human never saw
+the window they were asked to interact with. Root cause wasn't a missing command
+(`vb login` shipped in 0.11.1); it was that **nothing on the agent's actual path
+corrected it**. Three fixes, all at the point of failure:
+
+- **`vb start --headed` on a display-less daemon now refuses instead of lying.**
+  A headed launch with no `DISPLAY` is doomed — Chromium exits with "Missing X
+  server or $DISPLAY". `start` now detects this **before** launching and raises a
+  clean, bare error pointing at `vb show <name> --url <url>` (or headless for
+  background work), instead of surfacing Playwright's cryptic X-server stack
+  trace. (New pure `handlers.headed_no_display_msg`, unit-tested.)
+- **The walled-page `advice` no longer sends you into the trap.** It now splits
+  the two intents explicitly: a HUMAN solving a captcha → `vb show <name> --url
+  <url>` (a real visible window); an AUTOMATIC stealth retry → `start --headed` /
+  `--backend nodriver`, clearly labelled as rendering **off-screen for evasion,
+  not viewing**.
+- **`vb show` — a discoverable alias of `vb login`.** Same isolated-socket,
+  real-profile, display-harvesting daemon; named for the "just show me the page /
+  solve this captcha" intent that `login` (reads as auth-only) hid.
+
+Also: pin `patchright<1.61` until 1.61 clears the stealth-drift gate
+(`tests/test_stealth_drift_gate.py` — the tripwire that fires on any un-vetted
+patchright bump); the shipped stealth behaviour stays on the vetted 1.60 line.
+
+## [0.13.0] — 2026-07-05
+
+### Headless GPU WebGL — kill the SwiftShader tell without Xvfb
+
+Plain-headless Chrome reports a **SwiftShader** (software) WebGL renderer via
+`UNMASKED_RENDERER` — a classic no-GPU/automation tell, and half of the
+"SwiftShader + `screen==viewport`" combo that exists on **zero** consumer devices.
+On a host with a DRM render node, a single ANGLE flag pair steers Chrome to the
+**real GPU** in plain headless — no Xvfb, no headed window. Empirically verified on
+an Intel UHD 620 box: `ANGLE (…SwiftShader driver)` → `ANGLE (Intel, Mesa Intel(R)
+UHD Graphics 620 (KBL GT2), OpenGL ES 3.2)`.
+
+- **Opt-in, per-session, persisted — no global switch.** `vb gpu set --on|--off` /
+  `vb gpu clear` / `vb gpu info`, or `vb start --gpu/--no-gpu` (persists the choice
+  like `gpu set`). Off by default, and enabled only by a deliberate per-session write
+  — there is intentionally no daemon-wide env default (a global auto-on would flip
+  every session to the *same* real GPU, which on a shared box tightens same-machine
+  correlation instead of loosening it — see Honest scope).
+- **Real launch-flag change, not a spoof.** Rides `--use-gl=angle
+  --use-angle=gl-egl` (+ dropping the software-WebGL defaults) — JS-invisible and
+  coherent, not an `add_init_script` renderer-string lie a CreepJS-class oracle can
+  catch. The property stealth gate (`navigator.webdriver` falsy, no `--no-sandbox`,
+  `chrome.runtime` undefined) holds under GPU-on (asserted offline; the `--no-sandbox`
+  drop is extended, not clobbered).
+- **Host-capability gated + best-effort.** No accessible `/dev/dri/renderD*` ⇒ the
+  request degrades to SwiftShader + a WARN, never a hard fail. `vb gpu info` does a
+  live WebGL probe so you can see the real renderer (or catch a silent software
+  fallback).
+- **Self-heal-safe.** The choice persists to a per-session `gpu.json` that the
+  crash-recovery relaunch re-reads, so a renderer crash can't silently revert a GPU
+  session to SwiftShader (the render-node pin is carried too).
+- **De-twinning across GPUs.** `vb gpu set --node nvidia|intel` pins a session to a
+  specific render node, so same-box accounts report **different** real renderers
+  instead of one shared string (e.g. `flow=intel`, `sigint=nvidia`). Rides the glvnd
+  EGL vendor (`__EGL_VENDOR_LIBRARY_FILENAMES`) on the *same* gl-egl backend — verified
+  on Intel UHD 620 + NVIDIA MX150, both reporting `OpenGL ES 3.2` with only the GPU
+  differing. A node with no matching EGL vendor degrades to the default GPU + WARN.
+
+Also fixed: **`session_close` / `session_delete` now operate on an already-registered
+session by its exact name without re-validating.** Internal underscore-prefixed
+sessions (`_ex-` explore, `_iv-` interactive-view) are creatable via `start` (the
+`_session` field isn't name-validated) but `validate_name` rejects a leading
+underscore — so they couldn't be closed via `session_close` and leaked (only the `stop`
+verb could close them). A name that isn't a live session/on-disk profile is still
+validated, so malformed input still errors cleanly.
+
+Honest scope: this is **forward fingerprint hardening** — it de-correlates the fleet
+from the *global* headless-Chrome SwiftShader cluster (a real, monotonic per-session
+win), and with `--node` it de-twins same-box accounts from each other too. De-twinning
+scales only to the number of real GPUs (a 2-GPU laptop = 2 de-twinnable accounts);
+beyond that the real lever is per-account IP + behavior, not GPU strings. Not a cure
+for an already-tripped account-level throttle. v1 is WebGL-only (the residual
+`screen==viewport` headless incoherence is reported by `gpu info`, not silently papered
+over). Headless-only; no-op headed/attach. The nodriver backend ignores it in this
+release (patchright-only) with a WARN.
+
 ## [0.12.0] — 2026-06-25
 
 ### Multi-agent honesty — make the real isolation boundary reachable, fix two concurrency bugs, drop fetch's needless ceremony
