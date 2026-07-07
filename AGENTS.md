@@ -48,7 +48,7 @@ $VB verify_url --url https://maybe-dead.example       # ~50ms DNS pre-check
 | "Does this domain exist?" | `$VB verify_url --url <url>` |
 | "Hit a JSON/API endpoint behind my login" | `$VB fetch <url>` (reuses session cookies+proxy+UA; needs `[fetch]` extra, `fetch` cap) |
 | Walled site (Cloudflare/Datadome 403) | `$VB explore` — patchright stealth clears most cold |
-| See a page / solve a captcha / log in by hand (real visible window) | `$VB show <name> --url <url>` (alias `$VB login`) — see "Show a real window" below. **Not** `start --headed` (renders off-screen on a headless-daemon box). Headless host → cookie import / `$VB attach`. |
+| See a page / solve a captcha / log in by hand (real visible window) | `$VB show <name> --url <url>` (alias `$VB login`) — see "Show a real window" below. **Not** `start --headed` (refused on a display-less daemon; invisible under Xvfb). Headless host → cookie import / `$VB attach`. |
 | Google / news / Reddit threads | **WebSearch**, not vibatchium |
 | Plain HTML, known URL, single fetch | **WebFetch**, not vibatchium |
 
@@ -57,10 +57,11 @@ $VB verify_url --url https://maybe-dead.example       # ~50ms DNS pre-check
 To put a session's profile in a **real, visible window** — to *see* a page, let
 a human **solve a captcha/challenge**, or **log in by hand** — use **`vb show`**
 (alias **`vb login`**). Don't hand-roll an isolated daemon, and **don't reach for
-`vb start --headed`**: on a shared/headless-daemon box that renders **off-screen**
-(headed there only sheds headless fingerprint tells — no window appears; three
-agents burned ~10 min each rediscovering this, one landing Chrome on an invisible
-Xvfb display).
+`vb start --headed`**: on a shared/headless-daemon box it gives you no window —
+a display-less daemon now **refuses** it (`cannot launch headed … use vb show`),
+and under Xvfb it renders **off-screen** (headed there only sheds headless
+fingerprint tells — no window appears; three agents burned ~10 min each
+rediscovering this, one landing Chrome on an invisible Xvfb display).
 
 ```bash
 $VB show shopscout --url https://www.aliexpress.com/item/123.html   # window opens on-screen

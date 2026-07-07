@@ -172,15 +172,95 @@ def test_headed_no_display_msg_silent_when_visible_or_headless():
     assert handlers.headed_no_display_msg(False, {"DISPLAY": ""}, "x") is not None
 
 
-def test_headed_no_display_error_is_bare_emitted_by_server():
-    # The guard raises HeadedNoDisplayError; the server must emit it WITHOUT the
-    # "ClassName:" prefix (like SessionNotStarted) so the guidance reads clean.
-    from vibatchium.daemon import handlers
-    assert issubclass(handlers.HeadedNoDisplayError, RuntimeError)
+def test_headed_no_display_error_bare_emitted_not_prefixed():
+    # The dispatch except-block must special-case HeadedNoDisplayError in its
+    # isinstance tuple (like SessionNotStarted) so the `vb show` guidance is
+    # emitted bare, not buried behind an "HeadedNoDisplayError:" prefix. A
+    # whole-module substring grep is tautological (import + comment mention the
+    # name); assert the ACTUAL isinstance tuple in dispatch names it, so dropping
+    # it from the tuple fails this test.
     import inspect
-    from vibatchium.daemon import server
-    src = inspect.getsource(server)
-    assert "HeadedNoDisplayError" in src, "server must special-case bare emission"
+    import re
+    from vibatchium.daemon import handlers, server
+    assert issubclass(handlers.HeadedNoDisplayError, RuntimeError)
+    src = inspect.getsource(server.Daemon.dispatch)
+    m = re.search(r"isinstance\(\s*exc\s*,\s*\(([^)]*)\)\s*\)", src)
+    assert m and "HeadedNoDisplayError" in m.group(1), (
+        "dispatch must bare-emit HeadedNoDisplayError via its isinstance tuple")
+
+
+def test_start_handler_raises_headed_no_display_before_launch(monkeypatch, tmp_path):
+    # Integration: the start HANDLER (not just the pure helper) must call the
+    # guard with the resolved headless + real os.environ and raise BEFORE any
+    # launch. Regressing the wiring (deleting the raise / inverting headless)
+    # must fail a test — the pure-helper tests alone would not catch it.
+    import asyncio
+    import types
+
+    import pytest
+    from vibatchium.daemon import handlers
+    from vibatchium.daemon.registry import current_session_ctx
+
+    # capture the registered "start" handler without standing up a real Daemon
+    cap = types.SimpleNamespace(_handlers={})
+    cap.handler = lambda name: (lambda fn: cap._handlers.__setitem__(name, fn) or fn)
+    handlers.register_all(cap)
+    start = cap._handlers["start"]
+
+    monkeypatch.delenv("DISPLAY", raising=False)              # display-less daemon
+    fake_d = types.SimpleNamespace(
+        registry=types.SimpleNamespace(has=lambda n: False))  # not already running
+    tok = current_session_ctx.set("acct")
+    try:
+        with pytest.raises(handlers.HeadedNoDisplayError) as ei:
+            # absolute profile → no session_dir mkdir; guard raises before create()
+            asyncio.run(start(fake_d, {"headless": False,
+                                       "profile": str(tmp_path / "acct")}))
+        assert "vb show acct" in str(ei.value)
+    finally:
+        current_session_ctx.reset(tok)
+
+
+def test_start_handler_notes_headed_ignored_on_already_running(monkeypatch, tmp_path):
+    # Medium-1: `start --headed` on an ALREADY-RUNNING HEADLESS session must not
+    # silently drop --headed (the early return precedes the cold-launch guard).
+    # It returns headed_ignored + a note pointing at `vb show` — at the session's
+    # REAL profile dir (a divergent --profile != session name), not the name. And
+    # it must NOT fire when the live session is already headed (nothing ignored).
+    import asyncio
+    import types
+
+    from vibatchium.daemon import handlers
+    from vibatchium.daemon.registry import current_session_ctx
+
+    cap = types.SimpleNamespace(_handlers={})
+    cap.handler = lambda name: (lambda fn: cap._handlers.__setitem__(name, fn) or fn)
+    handlers.register_all(cap)
+    start = cap._handlers["start"]
+    monkeypatch.delenv("DISPLAY", raising=False)
+
+    def run(session_headless):
+        entry = types.SimpleNamespace(
+            session=types.SimpleNamespace(mode="launch", gpu=False,
+                                          headless=session_headless),
+            profile_dir=Path("/p/realprof"), ephemeral=False)  # name 'acct' != profile
+        fake_d = types.SimpleNamespace(registry=types.SimpleNamespace(
+            has=lambda n: True, get=lambda n: entry))
+        tok = current_session_ctx.set("acct")
+        try:
+            return asyncio.run(start(fake_d, {"headless": False,
+                                              "profile": str(tmp_path / "x")}))
+        finally:
+            current_session_ctx.reset(tok)
+
+    # live session is headless → --headed genuinely ignored → note + real profile
+    out = run(True)
+    assert out["already_started"] is True and out["headed_ignored"] is True
+    assert "vb show realprof" in out["note"]     # real profile dir, not name 'acct'
+
+    # live session already headed → nothing ignored → no headed_ignored, no note
+    out2 = run(False)
+    assert "headed_ignored" not in out2
 
 
 # ─── `vb show` — discoverable alias of `vb login`, same impl ──────────────────

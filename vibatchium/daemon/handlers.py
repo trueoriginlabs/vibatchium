@@ -8,6 +8,7 @@ from __future__ import annotations
 import base64
 import logging
 import os
+import shlex
 import time
 from pathlib import Path
 
@@ -446,6 +447,27 @@ def register_all(daemon) -> None:
                 out["gpu_pending"] = gpu_persisted
                 out["note"] = ("gpu persisted; already running — close + start to "
                                "apply (a live renderer swap needs a relaunch)")
+            # Honesty: `--headed` can't upgrade an ALREADY-RUNNING browser. Say so
+            # (mirrors gpu_pending) instead of silently dropping it — the guard
+            # below only fires on a COLD launch, so without this the most common
+            # shared-box call (`start --headed` on a live session) re-opens the
+            # "I don't see a headed session" trap with no window and no pointer.
+            # Only when a headed launch is requested AND the live session is
+            # actually headless — an already-headed session ignored nothing. Point
+            # at the session's REAL profile dir (a divergent --profile != name).
+            if not resolve_headless(args) and getattr(entry.session, "headless", True):
+                prof = entry.profile_dir.name
+                out["headed_ignored"] = True
+                if headed_no_display_msg(False, os.environ, name):
+                    out.setdefault("note",
+                        f"already running headless; --headed can't upgrade a live "
+                        f"browser and this daemon has no DISPLAY — close it and use "
+                        f"`vb show {prof} --url <url>` for a real visible window.")
+                else:
+                    out.setdefault("note",
+                        f"already running headless; --headed can't upgrade a live "
+                        f"browser — `vb session close {name}` then `start --headed` "
+                        f"to relaunch visible.")
             return out
 
         # 0.6.4: headless by default (a background daemon owns no display).
@@ -1779,18 +1801,34 @@ def register_all(daemon) -> None:
                 # on its own and cheaper than a backend swap; (2) backend —
                 # nodriver beats patchright on the hardest Cloudflare gates
                 # (2026 benchmark). Suggest headed first, nodriver if it holds.
+                # Copy-paste-safe URL (walled URLs carry bare `&`/`?`), and point
+                # `vb show` at the session's REAL profile dir — a session started
+                # with a divergent `--profile` has name != profile, so hardcoding
+                # `name` would open (and land the human's cookies in) the wrong
+                # profile the bot never reads.
+                url_q = shlex.quote(s.page.url)
+                prof = entry.profile_dir.name if entry else name
+                # Path (2) headed evasion needs a display; on a display-less daemon
+                # the cold-launch guard would REFUSE `start --headed`, so only offer
+                # it when a display (e.g. Xvfb) is actually present — else the advice
+                # would recommend a command this same daemon rejects.
+                if os.environ.get("DISPLAY"):
+                    auto = (f"go headed `vb session close {name} && vb --session "
+                            f"{name} start --headed` (renders off-screen — evasion, "
+                            f"not viewing), or swap backend `vb --session {name} "
+                            f"start --backend nodriver`")
+                else:
+                    auto = (f"swap backend `vb --session {name} start --backend "
+                            f"nodriver` (headed evasion needs a display this daemon "
+                            f"lacks)")
                 out["advice"] = (
                     f"page looks {wall}-walled. TWO paths: "
                     f"(1) a HUMAN solves it (captcha/challenge) — open the "
                     f"profile in a REAL, visible window: `vb session close "
-                    f"{name} && vb show {name} --url {s.page.url}` (alias of "
+                    f"{name} && vb show {prof} --url {url_q}` (alias of "
                     f"`vb login`; a separate windowed daemon, live bots "
-                    f"untouched; close with `vb show --close {name}`). "
-                    f"(2) AUTOMATIC stealth retry, no human — these render "
-                    f"OFF-SCREEN (for evasion, NOT for viewing): go headed "
-                    f"`vb session close {name} && vb --session {name} start "
-                    f"--headed`, or swap backend `vb --session {name} start "
-                    f"--backend nodriver` (after close)."
+                    f"untouched; close with `vb show --close {prof}`). "
+                    f"(2) AUTOMATIC stealth retry, no human (after close): {auto}."
                 )
         # Skills: surface per-host field-notes (opt-in via VIBATCHIUM_SKILLS).
         # Best-effort — a skills-store hiccup must never break navigation.
