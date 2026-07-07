@@ -26,11 +26,11 @@ def _clean_session_env(monkeypatch):
 # ─── UNIT: env reader + count helpers + naming ───────────────────────────
 def test_get_max_ephemeral_default_and_env(monkeypatch):
     monkeypatch.delenv("VIBATCHIUM_MAX_EPHEMERAL", raising=False)
-    assert R.get_max_ephemeral() == 2
+    assert R.get_max_ephemeral() == 4
     monkeypatch.setenv("VIBATCHIUM_MAX_EPHEMERAL", "5")
     assert R.get_max_ephemeral() == 5
     monkeypatch.setenv("VIBATCHIUM_MAX_EPHEMERAL", "garbage")
-    assert R.get_max_ephemeral() == 2
+    assert R.get_max_ephemeral() == 4
     monkeypatch.setenv("VIBATCHIUM_MAX_EPHEMERAL", "0")
     assert R.get_max_ephemeral() == 0
     monkeypatch.setenv("VIBATCHIUM_MAX_EPHEMERAL", "-3")
@@ -72,8 +72,10 @@ def test_mint_ephemeral_name_unique_and_internal():
 
 # ─── UNIT: create() splits the two budgets (stubbed launch) ──────────────
 def _patch_launch(reg, monkeypatch):
-    async def fake(name, *, profile_dir, headless, backend, proxy_cfg=None, geo_cfg=None):
-        return types.SimpleNamespace(mode="launch", headless=headless, flags={})
+    async def fake(name, *, profile_dir, headless, backend,
+                   proxy_cfg=None, geo_cfg=None, gpu_on=None, gpu_node=None):
+        return types.SimpleNamespace(mode="launch", headless=headless, gpu=bool(gpu_on),
+                                     gpu_node=gpu_node, flags={})
     monkeypatch.setattr(reg, "_launch_for", fake)
 
 

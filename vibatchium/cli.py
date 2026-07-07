@@ -227,8 +227,13 @@ def _cli_resolve_headless(explicit, *, isatty: bool) -> bool:
               help="Delete this session's profile dir when it closes. For one-shot "
                    "work that shouldn't leave cookies/login state on disk — prevents "
                    "profile-dir bloat from per-run session names. Never affects 'default'.")
+@click.option("--gpu/--no-gpu", "gpu", default=None,
+              help="Headless GPU WebGL: report the real GPU instead of SwiftShader "
+                   "(opt-in, persisted per session — this writes the choice, like "
+                   "`vb gpu set`). Default: persisted/off. Requires a DRM render "
+                   "node; degrades to SwiftShader + WARN otherwise. Headless-only.")
 @click.pass_context
-def start(ctx, profile, headless, backend, ephemeral):
+def start(ctx, profile, headless, backend, ephemeral, gpu):
     """Start a browser session (cold launch real Chrome + persistent context).
 
     Default headed/headless is inferred from the calling context: a TTY means a
@@ -248,6 +253,10 @@ def start(ctx, profile, headless, backend, ephemeral):
         args["backend"] = backend
     if ephemeral:
         args["ephemeral"] = True
+    # 0.13.0: explicit --gpu/--no-gpu persists the choice (like `vb gpu set`) so it's
+    # durable + self-heal-safe; a bare `vb start` sends nothing (inherits env/persisted).
+    if gpu is not None:
+        args["gpu"] = gpu
     _emit(call("start", args), ctx.obj["json"])
 
 
@@ -866,6 +875,31 @@ def attach(ctx, cdp_url):
     _emit(call("attach", {"cdp_url": cdp_url}), ctx.obj["json"], "cdp_url")
 
 
+def _headed_window_cmd(ctx, name, url, close_, *, verb):
+    """Shared impl for `vb login` / `vb show`: open (or `--close`) a REAL,
+    visible browser window on session NAME's profile via a separate windowed
+    daemon (live bots' default daemon never touched). `verb` is the command the
+    user invoked, echoed back so the teardown hint matches what they typed."""
+    from . import login as _login
+    if close_:
+        _emit(_login.close_login(name), ctx.obj["json"], "session")
+        return
+    try:
+        info = _login.run_login(name, url=url)
+    except (_login.NoDisplayError, DaemonError) as e:
+        raise click.ClickException(str(e)) from e
+    if ctx.obj["json"]:
+        _emit(info, True)
+        return
+    click.echo(f"Visible window opened for '{name}'.")
+    if url:
+        click.echo(f"  → {url}")
+    click.echo(f"  profile : {info['profile']}")
+    click.echo(f"  isolated daemon: {info['sock']}  (live bots untouched)")
+    click.echo(f"  Interact in the window (solve captcha / log in), then:  "
+               f"vb {verb} --close {name}")
+
+
 @cli.command()
 @click.argument("name")
 @click.option("--url", default=None,
@@ -886,25 +920,39 @@ def login(ctx, name, url, close_):
       vb login sigintzero --url https://x.com/login   # window opens; log in
       vb login --close sigintzero                      # tear it down
 
-    On a headless host (no DISPLAY) use cookie import instead — see `vb attach`.
+    Same as `vb show` (use whichever reads better). On a headless host (no
+    DISPLAY) use cookie import instead — see `vb attach`.
     """
-    from . import login as _login
-    if close_:
-        _emit(_login.close_login(name), ctx.obj["json"], "session")
-        return
-    try:
-        info = _login.run_login(name, url=url)
-    except (_login.NoDisplayError, DaemonError) as e:
-        raise click.ClickException(str(e)) from e
-    if ctx.obj["json"]:
-        _emit(info, True)
-        return
-    click.echo(f"Headed login window opened for '{name}'.")
-    if url:
-        click.echo(f"  → {url}")
-    click.echo(f"  profile : {info['profile']}")
-    click.echo(f"  isolated daemon: {info['sock']}  (live bots untouched)")
-    click.echo(f"  Log in by hand in the window, then:  vb login --close {name}")
+    _headed_window_cmd(ctx, name, url, close_, verb="login")
+
+
+@cli.command()
+@click.argument("name")
+@click.option("--url", default=None,
+              help="Navigate the window to this URL after launch (e.g. the page "
+                   "you want to see, or a captcha/challenge to solve).")
+@click.option("--close", "close_", is_flag=True,
+              help="Tear down NAME's window/daemon instead of opening one.")
+@click.pass_context
+def show(ctx, name, url, close_):
+    """Open session NAME's profile in a REAL, VISIBLE window on your screen.
+
+    Use this to SEE a page or let a human solve a captcha/challenge — NOT
+    `vb start --headed`, which on a shared/headless-daemon box renders
+    OFF-SCREEN (headed there only sheds fingerprint tells; no window appears).
+
+    `vb show` spins a SEPARATE daemon on its OWN socket (live bots untouched) on
+    the REAL profile dir, harvests DISPLAY/XAUTHORITY, and forces X11/XWayland so
+    the window is actually visible. Identical to `vb login` (aliased for the
+    "just show me the page" intent). The window persists until you close it.
+
+      vb show shopscout --url https://www.aliexpress.com/item/123.html
+      vb show --close shopscout
+
+    Headless host (no DISPLAY) → there's no screen to show on; import cookies
+    instead (`vb attach`).
+    """
+    _headed_window_cmd(ctx, name, url, close_, verb="show")
 
 
 @cli.command()
@@ -2804,6 +2852,70 @@ def geo_info(ctx):
     _emit(call("geo_info"), ctx.obj["json"])
 
 
+# ─── 0.13.0: headless GPU WebGL ─────────────────────────────────────────
+
+@cli.group()
+def gpu():
+    """Headless GPU WebGL — real renderer instead of SwiftShader.
+
+    Plain-headless Chrome reports a SwiftShader (software) WebGL renderer — a classic
+    no-GPU/automation tell, and half the "SwiftShader + screen==viewport" combo that
+    exists on zero consumer devices. On a host with a DRM render node this steers
+    ANGLE to the real GPU, no Xvfb:
+
+        vb --session work gpu set --on
+        vb --session work start          # applies the GPU mode
+        vb --session work gpu info       # configured + what the browser reports
+        vb --session work gpu set --off
+
+    De-twinning (multiple GPUs): pin different accounts to different render nodes so
+    they report DIFFERENT real GPUs instead of one shared string:
+
+        vb --session flow gpu set --on --node intel
+        vb --session sigint gpu set --on --node nvidia
+        vb --session sigint gpu info     # available_nodes + the live renderer
+
+    Opt-in per session, persisted (takes effect on next `start`), headless-only —
+    there is no daemon-wide switch (that would flip every session to the same GPU).
+    Forward fingerprint hardening — NOT a cure for an account-level throttle. Flipping
+    a logged-in account's renderer is a one-time device-change signal (do it
+    deliberately); when co-enabling on same-box accounts, give each a distinct `--node`
+    (scales to the number of real GPUs — 2 = 2 de-twinnable accounts).
+    """
+
+
+@gpu.command("set")
+@click.option("--on/--off", "on", default=True,
+              help="Enable (default) or disable GPU WebGL for the current session.")
+@click.option("--node", default=None,
+              type=click.Choice(["nvidia", "intel", "mesa", "default"]),
+              help="De-twin: pin this session to a specific GPU so same-box accounts "
+                   "report DIFFERENT real renderers (e.g. flow=intel, sigint=nvidia). "
+                   "default = host default. Preserved across on/off toggles.")
+@click.pass_context
+def gpu_set(ctx, on, node):
+    """Persist GPU WebGL on/off (+ optional de-twin --node) for the current session."""
+    args = {"on": on}
+    if node is not None:
+        args["node"] = node
+    _emit(call("gpu_set", args), ctx.obj["json"])
+
+
+@gpu.command("clear")
+@click.pass_context
+def gpu_clear(ctx):
+    """Remove the GPU override (falls back to off on next start)."""
+    _emit(call("gpu_clear"), ctx.obj["json"])
+
+
+@gpu.command("info")
+@click.pass_context
+def gpu_info(ctx):
+    """Show configured/effective GPU mode, host capability, and (if running) the
+    live WebGL renderer the browser actually reports."""
+    _emit(call("gpu_info"), ctx.obj["json"])
+
+
 # ─── Wave 6.1c: session checkpoint / restore ────────────────────────────
 
 @cli.group()
@@ -3460,7 +3572,7 @@ def daemon_cmd():
 
 @daemon_cmd.command(name="start")
 @click.option("--max-sessions", default=None, type=int,
-              help="Concurrent session cap (default 4). Sets VIBATCHIUM_MAX_SESSIONS "
+              help="Concurrent session cap (default 8). Sets VIBATCHIUM_MAX_SESSIONS "
                    "for the daemon process. Persists for the daemon's lifetime.")
 @click.option("--log-verbs", is_flag=True,
               help="Start with per-verb DEBUG audit log enabled (VIBATCHIUM_LOG_VERBS=1).")

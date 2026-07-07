@@ -147,6 +147,14 @@ class BrowserSession:
     # unset). Recorded for observability (geo_info / status) and so tests/the
     # warm path can introspect posture, mirroring `headless`.
     timezone_id: str | None = None
+    # 0.13.0: whether this session launched with headless GPU WebGL mode (real
+    # renderer instead of SwiftShader). Recorded for observability (gpu_info /
+    # status) and warm-claim/self-heal posture, mirroring `timezone_id`. Only ever
+    # True on a headless launch (headed already reaches the GPU).
+    gpu: bool = False
+    # 0.13.0 de-twinning: the render-node pin this GPU session launched with (e.g.
+    # "nvidia"), or None for the host-default GPU. Observability only.
+    gpu_node: str | None = None
     frame_ref: object = None         # patchright.Frame | None
     dialog_policy: dict = field(default_factory=lambda: {"action": "dismiss"})
     downloads: list = field(default_factory=list)
@@ -339,7 +347,9 @@ def _schedule_revive(session: BrowserSession) -> None:
 async def launch_session(profile_dir: Path, headless: bool = False,
                          *, pw: Playwright | None = None,
                          proxy: dict | None = None,
-                         timezone_id: str | None = None) -> BrowserSession:
+                         timezone_id: str | None = None,
+                         gpu: bool = False,
+                         gpu_node: str | None = None) -> BrowserSession:
     """Cold-launch real Chrome with persistent context (canonical Patchright config).
 
     The Playwright driver (Node.js subprocess) can be shared across multiple
@@ -358,10 +368,21 @@ async def launch_session(profile_dir: Path, headless: bool = False,
     Patchright's script filter AND propagates to worker threads. Defeats the
     host-tz-vs-proxy-IP mismatch tell. (Locale/navigator.language is deliberately
     NOT overridden — see geo.py: it can't reach workers without a mismatch.)
+
+    `gpu` (0.13.0): headless GPU WebGL. When True AND headless, injects the ANGLE
+    launch flags (see gpu.py) so WebGL's UNMASKED_RENDERER reports the box's real GPU
+    instead of SwiftShader — no Xvfb, no headed window. No-op when headed/attach (they
+    already reach the GPU). A real launch-flag change, not an add_init_script spoof.
+    Opt-in, off by default; the registry resolves it per-session from gpu.json.
+
+    `gpu_node` (0.13.0 de-twinning): pin the GPU session to a specific render node
+    (e.g. "nvidia") by setting the glvnd EGL vendor env, so different same-box accounts
+    report DIFFERENT real GPUs. None = host default (Intel here). Requires `gpu` +
+    headless; a node with no matching EGL vendor is a no-op (default GPU).
     """
     profile_dir.mkdir(parents=True, exist_ok=True)
-    log.info("launch persistent context profile=%s headless=%s proxy=%s",
-             profile_dir, headless, bool(proxy))
+    log.info("launch persistent context profile=%s headless=%s proxy=%s gpu=%s node=%s",
+             profile_dir, headless, bool(proxy), bool(gpu and headless), gpu_node)
 
     owns_pw = pw is None
     if pw is None:
@@ -386,6 +407,23 @@ async def launch_session(profile_dir: Path, headless: bool = False,
     if proxy:
         from ..proxy import webrtc_leak_guard_args
         extra_args = list(extra_args) + webrtc_leak_guard_args()
+    # 0.13.0: headless GPU WebGL — steer ANGLE to the real DRM render node so
+    # UNMASKED_RENDERER reports the actual GPU instead of SwiftShader. Headless-only
+    # (headed already reaches the GPU). This is a launch-flag change (JS-invisible,
+    # coherent), NOT an add_init_script lie the way string-spoofing a renderer is —
+    # that's the whole point vs. a CreepJS-detectable spoof.
+    effective_node = None
+    launch_env = None
+    if gpu and headless:
+        from ..gpu import GPU_ANGLE_ARGS, gpu_env_for_node
+        extra_args = list(extra_args) + GPU_ANGLE_ARGS
+        # De-twinning: route ANGLE to a specific GPU (render node) via the glvnd EGL
+        # vendor env, keeping the same gl-egl backend. Empty for the default/unpinned
+        # node, so a default GPU launch stays env-identical to v1.
+        node_env = gpu_env_for_node(gpu_node)
+        if node_env:
+            effective_node = gpu_node
+            launch_env = {**os.environ, **node_env}
     # Wave 7.5c stealth fix: Playwright defaults inject `--no-sandbox`, which
     # (a) triggers Chrome's visible yellow "unsupported command-line flag"
     # infobar — readable in every screenshot and obviously bot-shaped —
@@ -396,6 +434,12 @@ async def launch_session(profile_dir: Path, headless: bool = False,
     ignore_default_args = None
     if os.environ.get("VIBATCHIUM_DISABLE_SANDBOX", "0") not in ("1", "true", "yes"):
         ignore_default_args = ["--no-sandbox"]
+    # 0.13.0: drop the software-WebGL defaults so the GPU args above take. Extend
+    # (never clobber) the --no-sandbox drop. ignore_default_args silently ignores any
+    # entry that isn't an actual Playwright default, so this is safe unconditionally.
+    if gpu and headless:
+        from ..gpu import GPU_IGNORE_DEFAULTS
+        ignore_default_args = list(ignore_default_args or []) + GPU_IGNORE_DEFAULTS
     launch_kwargs = {
         "user_data_dir": str(profile_dir),
         "channel": "chrome",
@@ -412,6 +456,10 @@ async def launch_session(profile_dir: Path, headless: bool = False,
     # match a proxy's country so the browser clock doesn't betray the host.
     if timezone_id:
         launch_kwargs["timezone_id"] = timezone_id
+    # 0.13.0 de-twinning: only set env when a render-node pin is active, so default
+    # launches stay byte-identical to v1 (Playwright defaults env to process.env).
+    if launch_env is not None:
+        launch_kwargs["env"] = launch_env
     context = await pw.chromium.launch_persistent_context(**launch_kwargs)
     # Wave 7.5d stealth note: bare Patchright leaves `window.chrome.runtime`
     # undefined, which IS a known fingerprint signal — but Patchright
@@ -427,7 +475,8 @@ async def launch_session(profile_dir: Path, headless: bool = False,
     page = context.pages[0] if context.pages else await context.new_page()
     sess = BrowserSession(pw=pw, context=context, page=page, mode="launch",
                           profile_dir=profile_dir, owns_pw=owns_pw,
-                          headless=headless, timezone_id=timezone_id)
+                          headless=headless, timezone_id=timezone_id,
+                          gpu=bool(gpu and headless), gpu_node=effective_node)
     _wire_page_tracking(sess)
     return sess
 

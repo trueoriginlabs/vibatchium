@@ -191,6 +191,11 @@ class Daemon:
         "proxy_set", "proxy_clear", "proxy_info",
         # 0.6.11: timezone/locale coherence — profile-dir config, no session.
         "geo_set", "geo_clear", "geo_info",
+        # 0.13.0: headless GPU WebGL — profile-dir config; gpu_info touches the live
+        # page but takes entry.lock ITSELF (like geo_info), so it must be a registry
+        # verb — otherwise the dispatcher pre-holds entry.lock and the internal
+        # acquire deadlocks (asyncio.Lock is non-reentrant).
+        "gpu_set", "gpu_clear", "gpu_info",
         # 0.7.0: session leases (registry-class — they mutate the entry's lease
         # field under the contextvar; no per-session page lock needed).
         "session_lease", "session_release", "session_lease_info",
@@ -218,6 +223,9 @@ class Daemon:
     LEASE_GUARDED_REGISTRY_VERBS = frozenset({
         "stop", "session_close", "session_delete",
         "proxy_set", "proxy_clear", "geo_set", "geo_clear",
+        # 0.13.0: gpu_set/gpu_clear mutate persisted per-session config (gpu_info is
+        # a read, so it's absent — mirrors geo_info/proxy_info).
+        "gpu_set", "gpu_clear",
     })
 
     def __init__(self) -> None:
@@ -555,11 +563,13 @@ class Daemon:
             return {"id": req_id, "ok": True, "result": result}
         except Exception as exc:  # noqa: BLE001
             log.exception("handler %s failed (session=%s)", cmd, session_name)
-            from .handlers import SessionNotStarted
-            # SessionNotStarted carries a user-facing message that already
-            # matches the dispatcher-level format — emit it bare so wait_*
-            # and other UNLOCKED_VERBS see the same error string as click/fill.
-            if isinstance(exc, SessionNotStarted):
+            from .handlers import HeadedNoDisplayError, SessionNotStarted
+            # These carry a user-facing message that already matches the
+            # dispatcher-level format — emit it bare (no `ClassName:` prefix) so
+            # the caller sees the actionable text verbatim. SessionNotStarted so
+            # wait_*/UNLOCKED_VERBS match click/fill; HeadedNoDisplayError so the
+            # "use vb show" guidance isn't buried behind a type name.
+            if isinstance(exc, (SessionNotStarted, HeadedNoDisplayError)):
                 return {"id": req_id, "ok": False, "error": str(exc)}
             return {"id": req_id, "ok": False, "error": f"{type(exc).__name__}: {exc}"}
         finally:

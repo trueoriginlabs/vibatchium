@@ -85,6 +85,30 @@ def test_session_list_shows_default_running():
     assert default_row["running"] is True
 
 
+def test_close_delete_registered_underscore_session():
+    """Regression (the _iv-1783253040 leak): internal underscore-prefixed sessions
+    (_ex- explore, _iv- interactive-view) are creatable via `start`/the `_session`
+    field — which does NOT validate the name — but validate_name rejects a leading
+    underscore. So session_close/session_delete must operate on an ALREADY-REGISTERED
+    session by exact name WITHOUT re-validating, or such sessions can't be closed and
+    leak (headed, holding a slot). Only `stop` could close them before this fix."""
+    name = "_iv-testclose"
+    call("start", {"headless": True}, session=name)     # bypasses validation, like _iv-
+    assert name in [s["name"] for s in call("session_list")["sessions"]]
+    res = call("session_close", {"name": name})          # previously raised 'bad session name'
+    assert res["closed"] is True and res["name"] == name
+    assert call("session_delete", {"name": name})["deleted"] is True   # on-disk profile too
+
+
+def test_session_close_still_rejects_unknown_bad_name():
+    """The fix is scoped: a name that is NOT a live session (or on-disk profile) is
+    still validated, so a malformed/never-existed name gets a clean error."""
+    with pytest.raises(DaemonError):
+        call("session_close", {"name": "_iv-neverexisted"})   # underscore + not a session
+    with pytest.raises(DaemonError):
+        call("session_close", {"name": "../evil"})            # path-traversal still blocked
+
+
 def test_two_parallel_sessions_isolate_cookies(local_server):
     """Run two sessions in parallel; cookies in one don't leak to the other."""
     name_a, name_b = "vibatchium_test_w5_a", "vibatchium_test_w5_b"

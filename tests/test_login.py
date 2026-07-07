@@ -149,3 +149,81 @@ def test_run_login_no_display_raises(monkeypatch):
     import pytest
     with pytest.raises(login.NoDisplayError):
         login.run_login("acct", url=None, base_env={"XDG_RUNTIME_DIR": "/run/user/1000"})
+
+
+# ─── honesty: headed launch on a display-less daemon refuses, doesn't lie ────
+
+def test_headed_no_display_msg_names_vb_show():
+    from vibatchium.daemon import handlers
+    w = handlers.headed_no_display_msg(False, {}, "shopscout")
+    assert w is not None
+    assert "vb show shopscout" in w        # points at the command that shows a window
+    assert "DISPLAY" in w                  # names why (no display)
+    assert "headless" in w                 # offers the background alternative
+
+
+def test_headed_no_display_msg_silent_when_visible_or_headless():
+    from vibatchium.daemon import handlers
+    # headless launch never triggers (no window was ever expected)
+    assert handlers.headed_no_display_msg(True, {}, "x") is None
+    # headed WITH a display: the window will actually appear → allow
+    assert handlers.headed_no_display_msg(False, {"DISPLAY": ":0"}, "x") is None
+    # an empty DISPLAY string is "no display" → still refuses
+    assert handlers.headed_no_display_msg(False, {"DISPLAY": ""}, "x") is not None
+
+
+def test_headed_no_display_error_is_bare_emitted_by_server():
+    # The guard raises HeadedNoDisplayError; the server must emit it WITHOUT the
+    # "ClassName:" prefix (like SessionNotStarted) so the guidance reads clean.
+    from vibatchium.daemon import handlers
+    assert issubclass(handlers.HeadedNoDisplayError, RuntimeError)
+    import inspect
+    from vibatchium.daemon import server
+    src = inspect.getsource(server)
+    assert "HeadedNoDisplayError" in src, "server must special-case bare emission"
+
+
+# ─── `vb show` — discoverable alias of `vb login`, same impl ──────────────────
+
+def _invoke(args, monkeypatch):
+    """Invoke the CLI with run_login/close_login stubbed (no daemon/IO)."""
+    from click.testing import CliRunner
+    from vibatchium import cli as _cli
+    seen = {}
+    monkeypatch.setattr(
+        "vibatchium.login.run_login",
+        lambda name, url=None: seen.update(run=(name, url)) or {
+            "profile": f"/p/{name}", "sock": f"/s/{name}"})
+    monkeypatch.setattr(
+        "vibatchium.login.close_login",
+        lambda name: seen.update(close=name) or {"session": name, "closed": True})
+    res = CliRunner().invoke(_cli.cli, args)
+    return res, seen
+
+
+def test_show_command_is_registered():
+    from vibatchium.cli import cli
+    assert "show" in cli.commands, "vb show must be listed (discoverable in --help)"
+    assert "login" in cli.commands
+
+
+def test_show_opens_via_the_login_impl(monkeypatch):
+    res, seen = _invoke(["show", "shopscout", "--url", "https://ali/x"], monkeypatch)
+    assert res.exit_code == 0, res.output
+    assert seen["run"] == ("shopscout", "https://ali/x")
+    assert "Visible window opened" in res.output
+
+
+def test_show_and_login_echo_the_verb_the_user_typed(monkeypatch):
+    # teardown hint must match the command actually invoked, since they're aliases
+    res_show, _ = _invoke(["show", "p"], monkeypatch)
+    assert "vb show --close p" in res_show.output
+    res_login, _ = _invoke(["login", "p"], monkeypatch)
+    assert "vb login --close p" in res_login.output
+
+
+def test_show_close_routes_to_teardown(monkeypatch):
+    res, seen = _invoke(["show", "--close", "shopscout"], monkeypatch)
+    assert res.exit_code == 0, res.output
+    assert seen.get("close") == "shopscout"
+    assert seen.get("run") is None  # --close must NOT open a window

@@ -104,10 +104,13 @@ async def launch_patchright_session(
     pw: Playwright | None = None,
     proxy: dict | None = None,
     timezone_id: str | None = None,
+    gpu: bool = False,
+    gpu_node: str | None = None,
 ) -> BrowserSession:
     """Canonical Patchright launch (current default)."""
     return await launch_session(profile_dir, headless=headless, pw=pw,
-                                proxy=proxy, timezone_id=timezone_id)
+                                proxy=proxy, timezone_id=timezone_id, gpu=gpu,
+                                gpu_node=gpu_node)
 
 
 async def launch_nodriver_session(
@@ -117,6 +120,7 @@ async def launch_nodriver_session(
     pw: Playwright | None = None,
     proxy: dict | None = None,
     timezone_id: str | None = None,
+    gpu: bool = False,
 ) -> BrowserSession:
     """Launch Chrome via nodriver, then connect Patchright over CDP.
 
@@ -140,6 +144,13 @@ async def launch_nodriver_session(
     profile_dir.mkdir(parents=True, exist_ok=True)
     log.info("nodriver launch persistent context profile=%s headless=%s",
              profile_dir, headless)
+    if gpu:
+        # 0.13.0: GPU WebGL mode is patchright-only in v1 — nodriver builds its own
+        # argv here (uc.start below), so the launch_session injection doesn't reach
+        # it. Best-effort: WARN and proceed unchanged rather than hard-fail.
+        # TODO(gpu-v2): add GPU_ANGLE_ARGS to extra_args (browser_args) on this path.
+        log.warning("GPU WebGL mode requested but the nodriver backend ignores it "
+                    "in this version (patchright-only); launching without it")
 
     # Pick a free port via OS — nodriver wants a concrete port
     import socket as _sk
@@ -238,6 +249,8 @@ async def launch(
     pw: Playwright | None = None,
     proxy: dict | None = None,
     timezone_id: str | None = None,
+    gpu: bool = False,
+    gpu_node: str | None = None,
 ) -> BrowserSession:
     """Dispatch to the requested backend's launcher."""
     if backend not in VALID_BACKENDS:
@@ -247,11 +260,13 @@ async def launch(
     if backend in ("patchright", "auto"):
         return await launch_patchright_session(profile_dir, headless=headless,
                                                 pw=pw, proxy=proxy,
-                                                timezone_id=timezone_id)
+                                                timezone_id=timezone_id, gpu=gpu,
+                                                gpu_node=gpu_node)
     if backend == "nodriver":
+        # nodriver ignores gpu (WARNs) in v1, so gpu_node is moot there too.
         return await launch_nodriver_session(profile_dir, headless=headless,
                                               pw=pw, proxy=proxy,
-                                              timezone_id=timezone_id)
+                                              timezone_id=timezone_id, gpu=gpu)
     raise AssertionError(f"unreachable backend: {backend}")
 
 
