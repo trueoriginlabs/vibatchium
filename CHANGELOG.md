@@ -4,9 +4,35 @@ All notable changes to vibatchium are documented here. Versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Until 1.0,
 minor bumps may include breaking changes; we'll always call them out here.
 
+## [0.13.2] — 2026-07-07
+
+### Follow-up hardening of the 0.13.1 headed-window changes (fresh-eyes review)
+
+An adversarial fresh-eyes review of 0.13.1 found gaps that re-opened the "I don't
+see a headed session" trap on paths the cold-launch guard didn't cover:
+
+- **`start --headed` on an ALREADY-RUNNING session is now honest.** The
+  already-running early return preceded the no-display guard, so `--headed` on a
+  live session was silently dropped. It now returns `headed_ignored: true` + a
+  note that `--headed` can't upgrade a live browser and points at `vb show`
+  (mirrors the `gpu_pending` note).
+- **The walled-page advice no longer recommends a command the same daemon
+  refuses.** On a display-less daemon the "automatic retry" path drops
+  `start --headed` (which the guard rejects there) and offers only
+  `--backend nodriver`; the headed option appears only when a `DISPLAY` is present.
+- **The advice is copy-paste-safe.** The walled URL is `shlex.quote`d (bare `&`/`?`
+  in query-string walls no longer break the `&&` command), and `vb show` targets
+  the session's real profile dir (a divergent `--profile` no longer lands the
+  human's cookies in the wrong profile).
+- **Real tests for the guard.** The bare-emit test now asserts the actual
+  `isinstance` tuple in `dispatch` (not a tautological source grep), and a new
+  integration test drives the `start` handler through the guard raise.
+- Docs: scoped the 0.13.1 claim below — the guard hard-refuses only display-less
+  daemons; the invisible-Xvfb case is handled by the advice + `vb show`.
+
 ## [0.13.1] — 2026-07-07
 
-### Stop `--headed` from silently painting to nothing; add `vb show`
+### Stop `--headed` from silently failing on a display-less daemon; add `vb show`
 
 Third agent in two weeks reinvented the headed-window recipe by hand and got it
 wrong — one landed Chrome on an invisible Xvfb display, so the human never saw
