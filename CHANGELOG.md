@@ -4,7 +4,9 @@ All notable changes to vibatchium are documented here. Versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Until 1.0,
 minor bumps may include breaking changes; we'll always call them out here.
 
-## [Unreleased]
+## [0.13.3] — 2026-07-08
+
+### `vb update` under uv
 
 - **`vb update` now handles `uv tool install` correctly.** A field report from a
   pre-0.12.0 install surfaced the gap: uv tool venvs ship without pip, and the
