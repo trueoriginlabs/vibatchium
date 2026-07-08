@@ -1149,8 +1149,9 @@ def setup(ctx, agents, check, no_docs):
 def update(ctx, version, no_restart):
     """Upgrade vibatchium, then restart the daemon.
 
-    Detects a pipx install (`pipx upgrade` / `pipx install --force`) else
-    `pip install -U` with a PEP-668 `--break-system-packages` fallback, then
+    Detects a pipx install (`pipx upgrade` / `pipx install --force`), a
+    `uv tool install` (`uv tool upgrade`), a pip-less uv venv (`uv pip
+    install`), else `pip install -U` with a PEP-668 fallback, then
     stops the running daemon so the next command loads the new version (the
     long-running daemon keeps serving old code until it's bounced).
 
@@ -3871,6 +3872,19 @@ def _is_uv_venv() -> bool:
     return importlib.util.find_spec("pip") is None
 
 
+def _is_uv_tool_install() -> bool:
+    """True when vibatchium runs from a ``uv tool install`` venv (its prefix is
+    under ``.../uv/tools/<app>``). Those must be upgraded with ``uv tool
+    upgrade`` — it keeps the original install spec (extras included) and
+    re-links the ``vb`` executable, neither of which a bare ``uv pip install``
+    into the tool venv guarantees."""
+    try:
+        parts = Path(sys.prefix).resolve().parts
+    except Exception:  # noqa: BLE001
+        return False
+    return "uv" in parts and "tools" in parts
+
+
 def _is_editable_install() -> bool:
     """True when vibatchium is installed editable (`pip/uv pip install -e .`) — a
     dev tree. `vb update` must NOT run a package install there (it would shadow
@@ -3968,12 +3982,25 @@ def _update_dist(version: str | None) -> tuple[int, str]:
                else ["pipx", "upgrade", "vibatchium"])
         rc = _run(cmd, capture=False).returncode
         return rc, "pipx detected — " + " ".join(cmd)
+    if _is_uv_tool_install():
+        # `uv tool upgrade` keeps the original spec (extras) and re-links the
+        # `vb` executable — a bare `uv pip install` into the tool venv doesn't.
+        cmd = (["uv", "tool", "install", "--force", target] if version
+               else ["uv", "tool", "upgrade", "vibatchium"])
+        try:
+            rc = _run(cmd, capture=False).returncode
+        except FileNotFoundError:
+            return 127, "`uv` not on PATH — run manually: " + " ".join(cmd)
+        return rc, "uv tool install detected — " + " ".join(cmd)
     if _is_uv_venv():
         # uv venvs ship without pip → `python -m pip` is broken; use `uv pip`.
         exe = sys.executable
         cmd = (["uv", "pip", "install", "--python", exe, target] if version
                else ["uv", "pip", "install", "--python", exe, "-U", "vibatchium"])
-        rc = _run(cmd, capture=False).returncode
+        try:
+            rc = _run(cmd, capture=False).returncode
+        except FileNotFoundError:
+            return 127, "`uv` not on PATH — run manually: " + " ".join(cmd)
         return rc, "uv venv detected — " + " ".join(cmd)
     pip_args = ["install", target] if version else ["install", "-U", "vibatchium"]
     rc, _, note = _pip_with_pep668_fallback(pip_args)

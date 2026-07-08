@@ -4,6 +4,17 @@ All notable changes to vibatchium are documented here. Versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Until 1.0,
 minor bumps may include breaking changes; we'll always call them out here.
 
+## [Unreleased]
+
+- **`vb update` now handles `uv tool install` correctly.** A field report from a
+  pre-0.12.0 install surfaced the gap: uv tool venvs ship without pip, and the
+  canonical upgrade for them is `uv tool upgrade vibatchium` (keeps the original
+  spec incl. extras and re-links the `vb` executable), not `uv pip install` into
+  the tool venv. `_update_dist` now detects the `.../uv/tools/<app>` prefix and
+  shells out to `uv tool upgrade` (or `uv tool install --force vibatchium==X`
+  when pinning). Both uv branches also fail gracefully (rc 127 + the exact
+  manual command) when the `uv` binary isn't on PATH instead of tracebacking.
+
 ## [0.13.2] — 2026-07-07
 
 ### Follow-up hardening of the 0.13.1 headed-window changes (fresh-eyes review)

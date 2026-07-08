@@ -34,12 +34,13 @@ vb update                  # upgrade to the latest PyPI release + restart the da
 vb update --version 0.6.8  # or pin a specific version
 ```
 
-`vb update` detects how vibatchium was installed (pipx or pip, with a PEP-668
-`--break-system-packages` fallback) and then **stops the running daemon** so the
-next command loads the new code. Manual equivalent:
+`vb update` detects how vibatchium was installed (pipx, `uv tool install`,
+a pip-less uv venv, or pip with a PEP-668 `--break-system-packages` fallback)
+and then **stops the running daemon** so the next command loads the new code.
+Manual equivalent:
 
 ```bash
-pipx upgrade vibatchium    # or: pip install -U vibatchium
+pipx upgrade vibatchium    # or: uv tool upgrade vibatchium / pip install -U vibatchium
 vb shutdown                # bounce the daemon — it serves old code until you do
 vb --version               # confirm
 ```

@@ -285,6 +285,7 @@ def test_update_dist_editable_is_noop(monkeypatch):
 def test_update_dist_uv_branch(monkeypatch):
     monkeypatch.setattr(cli, "_is_editable_install", lambda: False)
     monkeypatch.setattr(cli, "_is_pipx_install", lambda: False)
+    monkeypatch.setattr(cli, "_is_uv_tool_install", lambda: False)
     monkeypatch.setattr(cli, "_is_uv_venv", lambda: True)
     seen = {}
 
@@ -300,6 +301,53 @@ def test_update_dist_uv_branch(monkeypatch):
     assert rc == 0
     assert seen["cmd"][:3] == ["uv", "pip", "install"]
     assert "uv venv detected" in note
+
+
+def test_update_dist_uv_tool_branch(monkeypatch):
+    monkeypatch.setattr(cli, "_is_editable_install", lambda: False)
+    monkeypatch.setattr(cli, "_is_pipx_install", lambda: False)
+    monkeypatch.setattr(cli, "_is_uv_tool_install", lambda: True)
+    seen = {}
+
+    class _CP:
+        returncode = 0
+
+    def _run(cmd, *, capture):
+        seen["cmd"] = cmd
+        return _CP()
+
+    monkeypatch.setattr(cli, "_run", _run)
+    rc, note = cli._update_dist(None)
+    assert rc == 0
+    assert seen["cmd"] == ["uv", "tool", "upgrade", "vibatchium"]
+    assert "uv tool install detected" in note
+
+    rc, note = cli._update_dist("0.6.2")
+    assert rc == 0
+    assert seen["cmd"] == ["uv", "tool", "install", "--force", "vibatchium==0.6.2"]
+
+
+def test_update_dist_uv_missing_binary(monkeypatch):
+    monkeypatch.setattr(cli, "_is_editable_install", lambda: False)
+    monkeypatch.setattr(cli, "_is_pipx_install", lambda: False)
+    monkeypatch.setattr(cli, "_is_uv_tool_install", lambda: True)
+
+    def _run(cmd, *, capture):
+        raise FileNotFoundError("uv")
+
+    monkeypatch.setattr(cli, "_run", _run)
+    rc, note = cli._update_dist(None)
+    assert rc == 127
+    assert "uv tool upgrade vibatchium" in note
+
+
+def test_is_uv_tool_install_detects_tools_prefix(monkeypatch, tmp_path):
+    prefix = tmp_path / ".local" / "share" / "uv" / "tools" / "vibatchium"
+    prefix.mkdir(parents=True)
+    monkeypatch.setattr(cli.sys, "prefix", str(prefix))
+    assert cli._is_uv_tool_install() is True
+    monkeypatch.setattr(cli.sys, "prefix", str(tmp_path / "plain-venv"))
+    assert cli._is_uv_tool_install() is False
 
 
 # ─── MCP instructions: concurrency guidance (C1) ──────────────────────────────

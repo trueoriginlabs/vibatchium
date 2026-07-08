@@ -331,6 +331,7 @@ def test_update_pip_latest(monkeypatch):
     # the pip path — pin both to False so this test exercises the pip branch
     # regardless of the dev environment it runs in (the repo's own venv is uv).
     monkeypatch.setattr(cli, "_is_uv_venv", lambda: False)
+    monkeypatch.setattr(cli, "_is_uv_tool_install", lambda: False)
     monkeypatch.setattr(cli, "_is_editable_install", lambda: False)
     calls: list[list[str]] = []
 
@@ -377,6 +378,7 @@ def test_update_pip_pinned_pep668_fallback(monkeypatch):
     # See test_update_pip_latest: pin the new uv/editable predicates to False so
     # the pip (PEP-668 fallback) branch is exercised in any dev environment.
     monkeypatch.setattr(cli, "_is_uv_venv", lambda: False)
+    monkeypatch.setattr(cli, "_is_uv_tool_install", lambda: False)
     monkeypatch.setattr(cli, "_is_editable_install", lambda: False)
     calls: list[list[str]] = []
 
