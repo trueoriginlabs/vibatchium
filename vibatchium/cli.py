@@ -1635,33 +1635,77 @@ def diff_cmd(ctx, subcmd):
     click.echo(result.get("text", ""))
 
 
+@cli.command(name="detect-forms")
+@click.option("--target", default=None,
+              help="Optional @eN / @text: / CSS root to scope the walk to a subtree.")
+@click.option("--values", is_flag=True,
+              help="Include non-sensitive free-text values (secrets stay redacted).")
+@click.option("--max-forms", type=int, default=50, show_default=True)
+@click.option("--max-fields", type=int, default=100, show_default=True)
+@click.option("--max-options", type=int, default=100, show_default=True)
+@click.option("--max-chars", type=int, default=200, show_default=True,
+              help="Cap each label/value length.")
+@click.pass_context
+def detect_forms_cmd(ctx, target, values, max_forms, max_fields, max_options, max_chars):
+    """Structured map of every form on the page → ready-to-use field locators.
+
+    Each field carries a `locator` you can pipe into `fill`/`click`. Credential/
+    payment fields are redacted by a best-effort heuristic; don't pass --values
+    on a page whose free-text fields you don't trust.
+    """
+    args = {"values": values, "max_forms": max_forms, "max_fields": max_fields,
+            "max_options": max_options, "max_chars": max_chars}
+    if target:
+        args["target"] = target
+    _emit(call("detect_forms", args), ctx.obj["json"])
+
+
+@cli.command(name="candidates")
+@click.argument("target")
+@click.option("--limit", type=int, default=50, show_default=True,
+              help="Cap how many matches to describe.")
+@click.pass_context
+def candidates_cmd(ctx, target, limit):
+    """List every element TARGET resolves to, so an ambiguous locator can be
+    disambiguated — then act on one with `click/fill … --index N`."""
+    _emit(call("candidates", {"target": target, "limit": limit}), ctx.obj["json"])
+
+
 @cli.command(name="click")
 @click.argument("target")
 @click.option("--timeout", "timeout_ms", default=30_000, type=int)
+@click.option("--index", type=int, default=None,
+              help="Act on the Nth match (0-based, from `vb candidates`) when TARGET is ambiguous.")
 @click.option("--auto-dismiss-banners", is_flag=True,
               help="On 'intercepted' failure, try to dismiss banners and retry once.")
 @click.pass_context
-def click_cmd(ctx, target, timeout_ms, auto_dismiss_banners):
+def click_cmd(ctx, target, timeout_ms, index, auto_dismiss_banners):
     """Click an @eN ref or selector."""
-    _emit(call("click", {"target": target, "timeout_ms": timeout_ms,
-                          "auto_dismiss_banners": auto_dismiss_banners}),
-          ctx.obj["json"], "clicked")
+    args = {"target": target, "timeout_ms": timeout_ms,
+            "auto_dismiss_banners": auto_dismiss_banners}
+    if index is not None:
+        args["index"] = index
+    _emit(call("click", args), ctx.obj["json"], "clicked")
 
 
 @cli.command()
 @click.argument("target")
 @click.argument("text_arg", metavar="TEXT", required=False)
 @click.option("--timeout", "timeout_ms", default=30_000, type=int)
+@click.option("--index", type=int, default=None,
+              help="Fill the Nth match (0-based, from `vb candidates`) when TARGET is ambiguous.")
 @click.option("--use-secret", "use_secret", default=None,
               help="Resolve value from vault: 'site:key' (or 'site:totp' for TOTP).")
 @click.pass_context
-def fill(ctx, target, text_arg, timeout_ms, use_secret):
+def fill(ctx, target, text_arg, timeout_ms, index, use_secret):
     """Clear an input and fill it with text (React-input-safe via Locator.fill).
 
     With --use-secret site:key, value comes from the encrypted vault — never
     appears in command line, response, or logs.
     """
     args = {"target": target, "timeout_ms": timeout_ms}
+    if index is not None:
+        args["index"] = index
     if use_secret:
         args["use_secret"] = use_secret
     else:
@@ -1676,19 +1720,28 @@ def fill(ctx, target, text_arg, timeout_ms, use_secret):
 @click.argument("target")
 @click.argument("text_arg", metavar="TEXT")
 @click.option("--delay", "delay_ms", default=0, type=int, help="Per-keystroke delay (ms).")
+@click.option("--index", type=int, default=None,
+              help="Type into the Nth match (0-based, from `vb candidates`).")
 @click.pass_context
-def type_cmd(ctx, target, text_arg, delay_ms):
+def type_cmd(ctx, target, text_arg, delay_ms, index):
     """Type text (key-by-key) into an element."""
-    _emit(call("type", {"target": target, "text": text_arg, "delay_ms": delay_ms}),
-          ctx.obj["json"], "typed")
+    args = {"target": target, "text": text_arg, "delay_ms": delay_ms}
+    if index is not None:
+        args["index"] = index
+    _emit(call("type", args), ctx.obj["json"], "typed")
 
 
 @cli.command()
 @click.argument("target")
+@click.option("--index", type=int, default=None,
+              help="Hover the Nth match (0-based, from `vb candidates`).")
 @click.pass_context
-def hover(ctx, target):
+def hover(ctx, target, index):
     """Hover over an element."""
-    _emit(call("hover", {"target": target}), ctx.obj["json"], "hovered")
+    args = {"target": target}
+    if index is not None:
+        args["index"] = index
+    _emit(call("hover", args), ctx.obj["json"], "hovered")
 
 
 @cli.command()

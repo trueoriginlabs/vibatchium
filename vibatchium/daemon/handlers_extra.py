@@ -64,6 +64,20 @@ except Exception:  # noqa: BLE001
 _MAP_BBOX_MAX = 200
 _MAP_BBOX_CONCURRENCY = 24
 
+# candidates: cap how many matches we describe for an ambiguous target.
+_CANDIDATES_MAX = 50
+# one isolated-context describe of a single candidate element (no DOM mutation).
+_CANDIDATE_DESCRIBE_JS = r"""(el) => {
+  const t = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 120);
+  return {
+    tag: el.tagName ? el.tagName.toLowerCase() : null,
+    role: el.getAttribute ? (el.getAttribute('role') || null) : null,
+    name: (el.getAttribute && (el.getAttribute('aria-label') || el.getAttribute('name')
+           || el.getAttribute('placeholder') || '') || '').slice(0, 120) || null,
+    text: t,
+  };
+}"""
+
 
 def _session(d):
     if d.session is None:
@@ -75,6 +89,21 @@ def _surface(d):
     """Active page-or-frame. All locator-class verbs use this so iframe
     switching is transparent."""
     return _session(d).target
+
+
+_REF_TARGET_RE = re.compile(r"^\s*(?:@e\d+|e\d+|\[ref=e\d+\])\s*$")
+
+
+def _guarded_locator(d, surface, target):
+    """resolve_target with the stale-@eN-ref guard the base action verbs enforce:
+    a ref can't resolve once a navigation invalidated the last snapshot, so give the
+    same actionable 'run `vb map`' error instead of a raw Playwright aria-ref failure."""
+    if _REF_TARGET_RE.match(target) and getattr(d, "_snapshot", None) is None:
+        raise RuntimeError(
+            f"ref {target!r} cannot be resolved — last `map` was invalidated by a "
+            f"navigation. Run `vb map` to refresh the snapshot first."
+        )
+    return elements.resolve_target(surface, getattr(d, "_snapshot", None), target)
 
 
 def register_extra(daemon) -> None:
@@ -1933,3 +1962,85 @@ def register_extra(daemon) -> None:
             "count": len(pairs),
             "text": "\n".join(line for _ref, line in pairs),
         }
+
+    # ─── form detection (0.15.0 agent-forms) ─────────────────────────────
+
+    @daemon.handler("detect_forms")
+    async def _detect_forms(d, args):
+        """Structured form map: every ``<form>`` (plus a ``formless`` group for the
+        many SPAs that skip ``<form>``) with per-field ``{tag,type,name,id,label,
+        required,disabled,locator,options,checked,filled}`` and a ready-to-use
+        ``locator`` string (``#id`` → ``tag[name=…]`` → ``@label:…``) an agent can
+        pipe straight into ``fill``/``click``.
+
+        0.15.0. Read-only, retry-safe, runs in the ISOLATED context — NO DOM is
+        mutated (obscura stamps a ``data-*-ref``; we emit a resolver locator instead,
+        so there is no fingerprint/diff tell on an authed page). Credential-safe:
+        a free-text field's live typed value is withheld unless ``values=true`` (only
+        a ``filled`` boolean otherwise), and even then it's redacted whenever a
+        type/name/autocomplete heuristic flags the field as a password / credential /
+        payment secret (``sensitive:true``); select ``options`` and checkbox/radio
+        ``checked`` state (never typed secrets) are always kept. The heuristic is
+        best-effort, not a guarantee — an unusual secret field name can slip past it,
+        so don't pass ``values=true`` on a page whose free-text fields you don't
+        trust. Optional ``target`` (@eN / @text: / CSS) scopes the walk to a subtree.
+        Output is not run through the prompt-injection scanner (same as extract_fields
+        / dump modes). Compounds the moat: it runs on the authenticated / CF-gated /
+        JS-hydrated forms a stateless HTTP scraper can't load.
+        """
+        from ..dom_js import FORMS_PAGE, FORMS_EL
+        s = _session(d)
+        timeout = int(args.get("timeout_ms", 30_000))
+        jarg = {
+            "values": bool(args.get("values", False)),
+            "maxForms": int(args.get("max_forms", 50)),
+            "maxFields": int(args.get("max_fields", 100)),
+            "maxOptions": int(args.get("max_options", 100)),
+            "maxChars": int(args.get("max_chars", 200)),
+        }
+        target = args.get("target") or args.get("selector")
+        # wait_for so a wedged renderer frees the session lock (mirrors extract_fields).
+        if target:
+            loc = _guarded_locator(d, s.page, target)
+            return await asyncio.wait_for(loc.evaluate(FORMS_EL, jarg), timeout / 1000)
+        return await asyncio.wait_for(s.page.evaluate(FORMS_PAGE, jarg), timeout / 1000)
+
+    # ─── locator disambiguation (0.15.0 agent-forms) ─────────────────────
+
+    @daemon.handler("candidates")
+    async def _candidates(d, args):
+        """List every element a target resolves to, so an ambiguous locator can be
+        disambiguated instead of failing Playwright strict mode.
+
+        Returns ``{target, count, candidates:[{index,tag,role,name,text,bbox?}],
+        truncated}``. Each candidate's ``index`` is usable as ``click``/``fill``/
+        ``type``/``hover`` with ``index=N`` to act on exactly that match. Read-only,
+        retry-safe. 0.15.0.
+
+        Resolves against the top-level page (the SAME surface click/fill/type/hover
+        act on), so the enumerated index maps 1:1 to what an ``index=N`` action hits.
+        """
+        page = _session(d).page
+        target = args["target"]
+        loc = _guarded_locator(d, page, target)
+        timeout = int(args.get("timeout_ms", 15_000))
+        limit = min(int(args.get("limit", _CANDIDATES_MAX)), _CANDIDATES_MAX)
+        n = await asyncio.wait_for(loc.count(), timeout / 1000)
+        cap = min(n, max(limit, 0))
+        cands = []
+        for i in range(cap):
+            item = loc.nth(i)
+            try:
+                desc = await asyncio.wait_for(
+                    item.evaluate(_CANDIDATE_DESCRIBE_JS), timeout / 1000)
+            except Exception:  # noqa: BLE001 — detached/odd node → minimal descriptor
+                desc = {"tag": None, "role": None, "name": None, "text": ""}
+            desc["index"] = i
+            try:
+                b = await item.bounding_box(timeout=2000)
+                if b and b.get("width", 0) > 0 and b.get("height", 0) > 0:
+                    desc["bbox"] = [int(b["x"]), int(b["y"]), int(b["width"]), int(b["height"])]
+            except Exception:  # noqa: BLE001 — off-screen/detached → no box
+                pass
+            cands.append(desc)
+        return {"target": target, "count": n, "candidates": cands, "truncated": n > cap}

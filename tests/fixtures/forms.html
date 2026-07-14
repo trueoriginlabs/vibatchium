@@ -1,0 +1,57 @@
+<!doctype html>
+<html>
+<head><title>Forms</title></head>
+<body>
+  <h1>Account</h1>
+
+  <!-- login form: secrets to redact, a label[for], a wrapping label, a checkbox -->
+  <form id="login" name="loginForm" action="/session" method="post">
+    <label for="user">Username</label>
+    <input id="user" name="username" type="text" required value="alice">
+    <label>Password
+      <input name="password" type="password" required>
+    </label>
+    <input type="hidden" name="csrf" value="tok_secret_123">
+    <label><input type="checkbox" name="remember" checked> Remember me</label>
+    <button type="submit">Sign in</button>
+  </form>
+
+  <!-- prefs form: a select, radios, aria-label / placeholder labels, a cc field -->
+  <form id="prefs" action="/prefs" method="get">
+    <label for="country">Country</label>
+    <select id="country" name="country">
+      <option value="us">United States</option>
+      <option value="au" selected>Australia</option>
+      <option value="uk">United Kingdom</option>
+    </select>
+    <fieldset>
+      <label><input type="radio" name="plan" value="free" checked> Free</label>
+      <label><input type="radio" name="plan" value="pro"> Pro</label>
+    </fieldset>
+    <input type="text" aria-label="Promo code" name="promo">
+    <input type="text" placeholder="Referrer" name="ref">
+    <input type="text" name="cardNumber" autocomplete="cc-number">
+    <!-- widened-heuristic sensitive names: must redact under --values -->
+    <input type="text" name="apiKey" value="sk_live_deadbeef">
+    <!-- sensitive-NAMED select: options are UI state, must still be emitted -->
+    <select name="cardType">
+      <option value="visa" selected>Visa</option>
+      <option value="mc">Mastercard</option>
+    </select>
+    <button>Save</button>
+  </form>
+
+  <!-- HTML5 form= association: lives OUTSIDE #prefs but belongs to it -->
+  <input name="coupon" form="prefs" value="SAVE10">
+
+  <!-- formless (SPA-style) control: no <form> ancestor -->
+  <input type="search" id="q" placeholder="Search">
+  <!-- formless, placeholder-only (no id, no name) → @placeholder: locator -->
+  <input type="search" placeholder="Search products">
+
+  <!-- ambiguous: three identical "Delete" buttons for candidates / --index tests -->
+  <button class="del" data-i="0" onclick="document.title='del-'+this.dataset.i">Delete</button>
+  <button class="del" data-i="1" onclick="document.title='del-'+this.dataset.i">Delete</button>
+  <button class="del" data-i="2" onclick="document.title='del-'+this.dataset.i">Delete</button>
+</body>
+</html>

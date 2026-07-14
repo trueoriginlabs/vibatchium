@@ -152,10 +152,14 @@ def resolve_target(page, snap: Snapshot | None, target: str):
     """
     t = target.strip()
 
-    # 1. @eN ref
+    # 1. @eN / eN / [ref=eN] ref — all three spellings resolve via the aria-ref
+    # engine (not a CSS `[ref=...]` attribute match), so ref-taking verbs and the
+    # semantic `find`/`candidates`/`detect_forms` scoping agree on every spelling.
     if t.startswith("@e") and len(t) > 2 and t[2].isdigit():
         return resolve(page, snap, t)
     if t.startswith("e") and len(t) > 1 and t[1:].isdigit():
+        return resolve(page, snap, t)
+    if REF_RE.fullmatch(t):
         return resolve(page, snap, t)
 
     # 2-9. @prefix:value semantic shortcuts

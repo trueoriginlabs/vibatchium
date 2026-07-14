@@ -4,6 +4,41 @@ All notable changes to vibatchium are documented here. Versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Until 1.0,
 minor bumps may include breaking changes; we'll always call them out here.
 
+## [0.15.0] — 2026-07-14
+
+### `agent-forms` — structured form detection + locator disambiguation
+
+Third obscura-mined adoption. Where a stateless HTTP scraper sees a login wall,
+these run on the real authenticated / CF-gated / JS-hydrated DOM.
+
+- **New `detect_forms` verb.** One isolated-context walk over every `<form>` (plus
+  a `formless` group for the many SPAs that skip `<form>`) → per-field
+  `{tag,type,name,id,label,required,disabled,locator,options,checked,filled}` and a
+  per-form `submit`. Each field carries a **ready-to-use `locator`** string
+  (`#id` → `tag[name=…]` → `@label:…`) you can pipe straight into `fill`/`click`.
+  - **Credential-safe (the divergence from obscura, which returns raw values):**
+    a free-text field's live typed value is withheld unless `values=true` (only a
+    `filled` boolean otherwise), and even then it's redacted whenever a
+    **type/name/autocomplete heuristic** flags the field as a password / credential /
+    payment secret (`sensitive:true`). The heuristic is best-effort, not a guarantee —
+    an unusual secret field name can slip past it, so don't pass `values=true` on a
+    page whose free-text fields you don't trust. Select `options` (with `selected`)
+    and checkbox/radio `checked` state are always kept (UI state, not typed secrets),
+    while a checkbox/radio's static `value` is dropped when the field is flagged.
+    (Like `extract_fields`/dump-modes, output is not run through the injection scanner.)
+  - **No DOM mutation:** we emit a resolver locator, never a persisted `data-*-ref`
+    attribute (obscura stamps one — a fingerprint/diff tell on an authed page).
+  - Read-only, retry-safe, `wait_for`-guarded, capped (forms/fields/options/chars);
+    optional `target` scopes the walk to a subtree.
+- **Locator disambiguation.** New `candidates` verb lists **every** element a target
+  resolves to — `{index,tag,role,name,text,bbox}` per match — so an ambiguous
+  locator can be resolved instead of failing Playwright strict mode. `click`, `fill`,
+  `type`, `hover` and `dblclick` gain an optional `index=N` to act on exactly that
+  match, and `click` now turns a strict-mode violation into an actionable hint
+  (“run `candidates`, then re-issue with `index=N`”) instead of a bare stack trace.
+- CLI: `vb detect-forms [--values] [--target …]`, `vb candidates <target>`,
+  and `--index` on `click`/`fill`/`type`/`hover`.
+
 ## [0.14.2] — 2026-07-14
 
 ### `map_compact` — fresh-eyes fix: stop the tail-anchor dropping elements

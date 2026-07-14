@@ -192,6 +192,30 @@ def _resolve_target(daemon, target: str):
     return elements.resolve_target(s.page, daemon._snapshot, target)
 
 
+async def _resolve_action_target(daemon, args):
+    """Resolve ``args['target']`` to a Locator, applying an optional ``index``
+    (0.15.0 disambiguation): with ``index=N`` the action targets the Nth match
+    (``loc.nth(N)``) — the way to act on one element from a `candidates` list when
+    a locator is ambiguous. Without it, behaviour is unchanged (an ambiguous
+    target still raises Playwright strict mode, which click surfaces with a hint).
+
+    An out-of-range index is caught here with an actionable error rather than
+    letting ``loc.nth(N)`` resolve to nothing and burn the full action timeout.
+    """
+    loc = _resolve_target(daemon, args["target"])
+    idx = args.get("index")
+    if idx is not None:
+        idx = int(idx)
+        n = await loc.count()
+        if idx < 0 or idx >= n:
+            raise RuntimeError(
+                f"index {idx} out of range — {args['target']!r} matched {n} element(s) "
+                f"(valid indices 0..{n - 1 if n else 0}). Run `candidates {args['target']!r}` to list them."
+            )
+        loc = loc.nth(idx)
+    return loc
+
+
 # ─── 0.14.0 agent-extract: structured extract + dump-mode shaping ─────────
 _MAX_FIELDS = 64                 # extract_fields: cap the field-map size
 _MAIN_MIN_RATIO = 0.10           # extract --mode main: densest block must be
@@ -2302,7 +2326,7 @@ def register_all(daemon) -> None:
         auto_dismiss = bool(args.get("auto_dismiss_banners", False))
         entry = d.registry.get(current_session_ctx.get())
         humanize = bool(entry.flags.get("humanize")) if entry else False
-        loc = _resolve_target(d, target)
+        loc = await _resolve_action_target(d, args)
 
         async def _do_click(loc):
             # When humanize is on, add a Bezier approach + dwell, but the actual
@@ -2323,6 +2347,13 @@ def register_all(daemon) -> None:
             return {"clicked": target, "humanized": humanize}
         except Exception as exc:  # noqa: BLE001
             msg = str(exc).lower()
+            # 0.15.0: an ambiguous target trips Playwright strict mode — point the
+            # agent at the disambiguation path rather than a bare stack trace.
+            if "strict mode violation" in msg and args.get("index") is None:
+                raise RuntimeError(
+                    f"{exc}\n\n`{target}` matched multiple elements — run "
+                    f"`candidates {target!r}` to list them, then re-issue with `index=N`."
+                ) from exc
             intercepted = "intercepts pointer events" in msg or "subtree intercepts" in msg \
                           or "element is not stable" in msg or "is not visible" in msg
             if not auto_dismiss or not intercepted:
@@ -2335,13 +2366,13 @@ def register_all(daemon) -> None:
             except Exception:  # noqa: BLE001
                 pass
             # Re-resolve (snapshot may have been invalidated by the banner click)
-            loc = _resolve_target(d, target)
+            loc = await _resolve_action_target(d, args)
             await _do_click(loc)
             return {"clicked": target, "auto_dismissed": True, "humanized": humanize}
 
     @daemon.handler("dblclick")
     async def _dblclick(d, args):
-        loc = _resolve_target(d, args["target"])
+        loc = await _resolve_action_target(d, args)
         await loc.dblclick(timeout=int(args.get("timeout_ms", 30_000)))
         return {"dblclicked": args["target"]}
 
@@ -2350,7 +2381,7 @@ def register_all(daemon) -> None:
         """Fill an input. Wave 6.3a: `use_secret: 'site:key'` resolves the
         secret from the vault at fill time. The resolved value NEVER appears
         in the response, the daemon log, or any cache."""
-        loc = _resolve_target(d, args["target"])
+        loc = await _resolve_action_target(d, args)
         if args.get("use_secret"):
             from .. import secrets as _secrets
             ref = args["use_secret"]
@@ -2363,7 +2394,7 @@ def register_all(daemon) -> None:
 
     @daemon.handler("type")
     async def _type(d, args):
-        loc = _resolve_target(d, args["target"])
+        loc = await _resolve_action_target(d, args)
         timeout = int(args.get("timeout_ms", 30_000))
         entry = d.registry.get(current_session_ctx.get())
         humanize = bool(entry.flags.get("humanize")) if entry else False
@@ -2379,7 +2410,7 @@ def register_all(daemon) -> None:
 
     @daemon.handler("hover")
     async def _hover(d, args):
-        loc = _resolve_target(d, args["target"])
+        loc = await _resolve_action_target(d, args)
         await loc.hover(timeout=int(args.get("timeout_ms", 30_000)))
         return {"hovered": args["target"]}
 

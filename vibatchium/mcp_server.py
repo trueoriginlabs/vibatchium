@@ -191,6 +191,34 @@ TOOLS: list[tuple[str, str, dict, str, Any]] = [
          "node_cap": _int("Cap nodes read per array field.", 1_000),
      }, "required": ["fields"]},
      "extract_fields", None),
+    ("detect_forms",
+     "Structured map of every <form> on the page (plus a formless-controls group "
+     "for SPAs) — against our real authenticated Chrome DOM. Each field carries a "
+     "ready-to-use `locator` string (pipe straight into fill/click), plus type, "
+     "name, label, required, options and checked/filled state. A free-text field's "
+     "typed value is withheld unless `values=true`, and even then it's redacted when "
+     "a type/name/autocomplete heuristic flags it as a password/credential/payment "
+     "secret (best-effort — don't pass values=true on untrusted pages). Returns "
+     "{forms, count}.",
+     {"type": "object", "properties": {
+         "target": _str("Optional @eN / @text: / CSS root to scope the walk to a subtree."),
+         "values": _bool("Include non-sensitive free-text field values (still redacts secrets).", False),
+         "max_forms": _int("Cap number of forms.", 50),
+         "max_fields": _int("Cap fields per form.", 100),
+         "max_options": _int("Cap options per <select>.", 100),
+         "max_chars": _int("Cap each label/value length.", 200),
+     }},
+     "detect_forms", None),
+    ("candidates",
+     "List EVERY element a target resolves to, so an ambiguous locator can be "
+     "disambiguated instead of failing strict mode. Returns {target, count, "
+     "candidates:[{index, tag, role, name, text, bbox}], truncated}. Act on one "
+     "with click/fill/type/hover passing `index=N`.",
+     {"type": "object", "properties": {
+         "target": _str("@eN / @text: / @label: / CSS whose matches to enumerate."),
+         "limit": _int("Cap how many matches to describe.", 50),
+     }, "required": ["target"]},
+     "candidates", None),
     ("attr", "Get an HTML attribute value from an element.",
      {"type": "object", "properties": {
          "target": _str("@eN / @text: / @label: / CSS."),
@@ -218,6 +246,7 @@ TOOLS: list[tuple[str, str, dict, str, Any]] = [
      {"type": "object",
       "properties": {"target": _str("@eN ref or selector."),
                      "timeout_ms": _int("Timeout in ms.", 30_000),
+                     "index": _int("Act on the Nth match (0-based, from `candidates`) when the target is ambiguous."),
                      "auto_dismiss_banners": _bool(
                          "On 'intercepted' failure, try dismiss_banners once and retry.",
                          False)},
@@ -226,7 +255,8 @@ TOOLS: list[tuple[str, str, dict, str, Any]] = [
     ("dblclick", "Double-click an @eN ref or CSS selector.",
      {"type": "object",
       "properties": {"target": _str("@eN ref or selector."),
-                     "timeout_ms": _int("Timeout in ms.", 30_000)},
+                     "timeout_ms": _int("Timeout in ms.", 30_000),
+                     "index": _int("Act on the Nth match (0-based, from `candidates`).")},
       "required": ["target"]},
      "dblclick", None),
     ("focus", "Focus an element (without clicking).",
@@ -248,6 +278,7 @@ TOOLS: list[tuple[str, str, dict, str, Any]] = [
       "properties": {"target": _str("@eN ref or selector."),
                      "text": _str("Text to fill (or use use_secret)."),
                      "use_secret": _str("Vault reference 'site:key' (or 'site:totp')."),
+                     "index": _int("Fill the Nth match (0-based, from `candidates`) when the target is ambiguous."),
                      "timeout_ms": _int("Timeout in ms.", 30_000)},
       "required": ["target"]},
      "fill", None),
@@ -255,11 +286,13 @@ TOOLS: list[tuple[str, str, dict, str, Any]] = [
      {"type": "object",
       "properties": {"target": _str("@eN ref or selector."),
                      "text": _str("Text to type."),
+                     "index": _int("Type into the Nth match (0-based, from `candidates`)."),
                      "delay_ms": _int("Per-keystroke delay (ms).", 0)},
       "required": ["target", "text"]},
      "type", None),
     ("hover", "Hover over an element.",
-     {"type": "object", "properties": {"target": _str("@eN ref or selector.")},
+     {"type": "object", "properties": {"target": _str("@eN ref or selector."),
+                     "index": _int("Hover the Nth match (0-based, from `candidates`).")},
       "required": ["target"]},
      "hover", None),
     ("press", "Press a key on a specific element (e.g. Enter on @e3).",
