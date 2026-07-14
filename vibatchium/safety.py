@@ -29,7 +29,9 @@ from __future__ import annotations
 import re
 
 # Verb → list of response-dict keys whose values are content worth scanning
-# for prompt injection.
+# for prompt injection. A field's value may be a str OR a nested dict/list of
+# strings (extract_fields/detect_forms/candidates/extract-dump-modes): scan_response
+# walks the structure and scans every string leaf (see _scan_value).
 CONTENT_FIELDS: dict[str, tuple[str, ...]] = {
     "text": ("text",),
     "html": ("html",),
@@ -42,7 +44,18 @@ CONTENT_FIELDS: dict[str, tuple[str, ...]] = {
     "wait_response": ("text",),
     "title": ("title",),
     "find": ("first_text",),
+    # 0.15.1: the structured-extract / form / disambiguation verbs egress
+    # attacker-controllable page text nested inside dicts/lists — scanned by
+    # recursing into the string leaves of these fields.
+    "extract": ("markdown", "text", "links", "assets"),
+    "extract_fields": ("fields",),
+    "detect_forms": ("forms",),
+    "candidates": ("candidates",),
 }
+
+# Cap recursion into nested content so a pathological response can't blow the
+# stack; real extract/form payloads nest only a few levels.
+_MAX_SCAN_DEPTH = 6
 
 
 # ─── pattern library ───────────────────────────────────────────────────
@@ -540,6 +553,41 @@ def scan_and_apply(text: str, mode: str) -> tuple[str, dict]:
     return redacted, meta
 
 
+_RISK_ORDER = {"none": 0, "low": 1, "high": 2}
+
+
+def _scan_value(val, mode: str, depth: int = 0) -> tuple[object, str, list[str]]:
+    """Recursively scan/mutate the string leaves of a value that may be a str,
+    or a dict/list nesting strings (extract_fields' `fields`, detect_forms'
+    `forms`, candidates' `candidates`, extract's `links`/`assets`). Strings are
+    scanned + policy-applied in place; non-string scalars pass through. Returns
+    (new_value, aggregate_risk, aggregate_signals)."""
+    if isinstance(val, str):
+        if not val:
+            return val, "none", []
+        new_text, meta = scan_and_apply(val, mode)
+        return new_text, meta["prompt_injection_risk"], list(meta.get("signals", []))
+    if depth >= _MAX_SCAN_DEPTH:
+        return val, "none", []
+    if isinstance(val, dict):
+        pairs = list(val.items())
+    elif isinstance(val, list):
+        pairs = list(enumerate(val))
+    else:
+        return val, "none", []
+    agg_risk = "none"
+    agg_sigs: list[str] = []
+    for key, item in pairs:
+        new_item, r, sigs = _scan_value(item, mode, depth + 1)
+        val[key] = new_item
+        if _RISK_ORDER.get(r, 0) > _RISK_ORDER[agg_risk]:
+            agg_risk = r
+        for s in sigs:
+            if s not in agg_sigs:
+                agg_sigs.append(s)
+    return val, agg_risk, agg_sigs
+
+
 def scan_response(verb: str, result: dict, mode: str) -> dict:
     """Mutate a daemon-response dict in place: scan each known content field
     for the verb, apply the policy, and stash metadata.
@@ -550,26 +598,32 @@ def scan_response(verb: str, result: dict, mode: str) -> dict:
     visible body is clean. Costs ~30% extra on html responses; closes
     the only attack class the text-only auto-fire path cannot see.
 
+    0.15.1: a content field may be a nested dict/list (extract_fields' `fields`,
+    detect_forms' `forms`, candidates' `candidates`, extract's `links`/`assets`) —
+    such fields are walked via `_scan_value` so a payload smuggled into a form
+    label / option / candidate text is scanned, not silently egressed.
+
     Returns the same dict (for chaining)."""
     fields = CONTENT_FIELDS.get(verb)
     if not fields or not isinstance(result, dict):
         return result
     aggregated_signals: list[str] = []
     aggregated_risk = "none"
-    risk_order = {"none": 0, "low": 1, "high": 2}
     use_html_scan = verb == "html"
     for field in fields:
         val = result.get(field)
-        if not isinstance(val, str) or not val:
+        if val is None or val == "":
             continue
         if use_html_scan:
-            new_text, meta = _scan_and_apply_html(val, mode)
+            if not isinstance(val, str):
+                continue
+            result[field], meta = _scan_and_apply_html(val, mode)
+            risk, sigs = meta["prompt_injection_risk"], meta["signals"]
         else:
-            new_text, meta = scan_and_apply(val, mode)
-        result[field] = new_text
-        if risk_order.get(meta["prompt_injection_risk"], 0) > risk_order[aggregated_risk]:
-            aggregated_risk = meta["prompt_injection_risk"]
-        for sig in meta["signals"]:
+            result[field], risk, sigs = _scan_value(val, mode)
+        if _RISK_ORDER.get(risk, 0) > _RISK_ORDER[aggregated_risk]:
+            aggregated_risk = risk
+        for sig in sigs:
             if sig not in aggregated_signals:
                 aggregated_signals.append(sig)
     if aggregated_signals:

@@ -4,6 +4,21 @@ All notable changes to vibatchium are documented here. Versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Until 1.0,
 minor bumps may include breaking changes; we'll always call them out here.
 
+## [0.15.1] — 2026-07-14
+
+### Security: the prompt-injection scanner now covers structured/extract output
+
+The safety middleware (`safety_set` flag-only / wrap / redact) scanned only flat
+top-level string response fields, so content that egresses **nested** — a form
+field's label from `detect_forms`, a value from `extract_fields`, a `candidates`
+entry's text, `extract --mode links/assets` — slipped past the injection classifier
+even with a safety mode enabled. `scan_response` now recurses into the string leaves
+of a content field (`_scan_value`, depth-capped), and `extract` / `extract_fields` /
+`detect_forms` / `candidates` are registered in `CONTENT_FIELDS`. A payload smuggled
+into a form label or scraped field is now flagged / wrapped / redacted like any
+`text`/`html` read. (Redaction of the *typed value* of credential fields already
+happened in-page; this closes the separate injection-scan gap.)
+
 ## [0.15.0] — 2026-07-14
 
 ### `agent-forms` — structured form detection + locator disambiguation
