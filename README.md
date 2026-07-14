@@ -1,5 +1,7 @@
 # vibatchium
 
+<!-- mcp-name: io.github.trueoriginlabs/vibatchium -->
+
 **Agent-piloted browser automation that clears Cloudflare.**
 Patched Playwright + multi-session daemon + credential vault + vision clicking + prompt-injection safety. One MCP server, N parallel Chromes, persistent per-session profiles.
 
