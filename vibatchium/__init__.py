@@ -1,4 +1,4 @@
-__version__ = "0.14.1"
+__version__ = "0.14.2"
 
 # Lazy SDK exports (0.11.0): `import vibatchium as vb; vb.session(...)` /
 # `vb.isolated_daemon(...)`. Resolved on first access via PEP 562 so a bare

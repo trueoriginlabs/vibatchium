@@ -80,6 +80,43 @@ def test_compact_escaped_quote_in_name_not_truncated():
     assert d["e13"].endswith("[disabled]")       # state after an escaped-quote name
 
 
+# ─── PURE: fresh-eyes review (0.14.2) — trailing-token drops the tail-anchor missed ─
+# The 0.14.1 fix only tolerated a trailing `[cursor=pointer]` bracket after the ref;
+# a fresh-eyes pass reproduced two MORE trailing forms real Playwright emits that the
+# end-anchored regex still dropped. Anchoring on the `[ref=eN]` MARKER fixes the class.
+def test_compact_inline_text_value_after_ref_not_dropped():
+    # Single-text-child nodes render `- role [ref=eN]: value` — the ref sits BEFORE
+    # the inline value (unlike the old synthetic fixture). The `: value` tail used to
+    # defeat the end-anchor and drop the element; it must now survive (value discarded).
+    d = _by_ref(
+        "- paragraph [ref=e20]: Some prose text\n"
+        "- cell [ref=e21]: 42\n"
+    )
+    assert d["e20"] == "@e20 paragraph"
+    assert d["e21"] == "@e21 cell"
+
+
+def test_compact_yaml_single_quoted_key_not_dropped():
+    # When an accessible name contains a colon+space (or {}, backtick), Playwright
+    # YAML-single-quotes the WHOLE key — INCLUDING the ref — so the line is
+    # `- 'role "name" [ref=eN]'` with a trailing `'` after the ref. The old anchor
+    # rejected the `'`; interactive controls with colon labels must now survive.
+    d = _by_ref(
+        '- \'button "Time: 10:30" [ref=e22]\'\n'
+        '- \'checkbox "Sort: Newest" [checked] [ref=e23]\'\n'
+    )
+    assert d["e22"] == '@e22 button "Time: 10:30"'
+    assert d["e23"] == '@e23 checkbox "Sort: Newest" [checked]'   # state survives the quote too
+
+
+def test_compact_yaml_quoted_colon_label_survives_interactive_filter():
+    # the colon-labelled button is actionable — it must NOT be filtered out either
+    refs = {r for r, _ in compact_lines(
+        Snapshot(url="u", raw_yaml='- \'button "Re: reply" [ref=e24]\'\n'),
+        interactive_only=True)}
+    assert "e24" in refs
+
+
 def test_compact_plain_and_nameless():
     d = _by_ref()
     assert d["e5"] == '@e5 button "Sign in"'
@@ -123,6 +160,11 @@ def test_map_compact_preserves_live_state(local_server):
     # the link (cursor:pointer in real Chrome) MUST survive — regression guard
     # for the [cursor=pointer]-after-ref drop the 0.14.1 review caught.
     assert "Home" in m["text"] and "link" in m["text"]
+    # the paragraph (inline `: value` after the ref) and the colon-labelled button
+    # (YAML-single-quoted key) MUST survive too — the two trailing-token drops the
+    # 0.14.2 fresh-eyes review caught. This is the REAL-Chrome guard for that class.
+    assert "paragraph" in m["text"]
+    assert "Sort: Newest" in m["text"]
     assert all(ln.startswith("@e") for ln in m["text"].splitlines() if ln.strip())
 
 

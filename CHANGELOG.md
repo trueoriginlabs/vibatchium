@@ -4,6 +4,39 @@ All notable changes to vibatchium are documented here. Versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Until 1.0,
 minor bumps may include breaking changes; we'll always call them out here.
 
+## [0.14.2] — 2026-07-14
+
+### `map_compact` — fresh-eyes fix: stop the tail-anchor dropping elements
+
+A fresh-eyes review of the 0.14.0+0.14.1 stack found the 0.14.1 `[cursor=pointer]`
+fix was **incomplete**: `compact_lines` still anchored the ref to the line END, so
+two *other* trailing tokens real Playwright emits silently dropped the element.
+
+- **Fixed: `map_compact` dropped nodes with an inline text value.** Single-text-child
+  nodes render `- role [ref=eN]: value` — the ref sits *before* the `: value`, which
+  the end-anchored regex rejected, dropping paragraphs / cells / generic text from the
+  compact map.
+- **Fixed: `map_compact` dropped controls whose name forced YAML quoting.** When an
+  accessible name contains `: ` (or `{`, `}`, a backtick) Playwright single-quotes the
+  whole key — `- 'role "name" [ref=eN]'` — and the trailing `'` after the ref defeated
+  the anchor. This silently hid *interactive* controls with colon labels ("Time: 10:30",
+  "Sort: Newest", "Price: $X").
+- **Root cause / fix.** `compact_lines` now anchors on the real `[ref=eN]` **marker** in
+  the raw snapshot and takes everything before it as the head, discarding whatever trails
+  (cursor token, inline value, closing quote). No trailing token can drop an element, and
+  the phantom-ref guard is no longer needed — page text that looks like `@eN` was never a
+  marker. Line form is unchanged (`@eN role "name" [state…]`). Tests gain the real
+  inline-value and YAML-quoted forms, both pure and live against real Chrome.
+
+### Docs
+
+- **Fixed a self-contradicting claim** in the "Real Chrome vs fake Chrome" table: it
+  implied a hardware GPU (`ANGLE (Intel …)`) was vibatchium's *baseline* WebGL renderer.
+  The default is Chrome's software renderer (SwiftShader) — itself real and deterministic;
+  a hardware GPU string needs the opt-in `--gpu` flag. The table now says "a real ANGLE
+  renderer" with a footnote, aligning it with `gpu.py`, the section's own caveat, and the
+  stealth-tiers table. The stability/determinism axis the section argues holds either way.
+
 ## [0.14.1] — 2026-07-13
 
 ### `agent-ground` — map_compact state fix + geometry

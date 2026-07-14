@@ -195,18 +195,20 @@ def resolve_target(page, snap: Snapshot | None, target: str):
 
 # ─── compact one-liner render (0.14.1) ──────────────────────────────────────
 #
-# Parses each aria-snapshot line into `@eN role "name" [state…]`, PRESERVING the
+# Renders each aria-snapshot node as `@eN role "name" [state…]`, PRESERVING the
 # state brackets ([checked]/[disabled]/[expanded]/[selected]/[level=N]) that the
-# old regex-scrape silently dropped. The `@eN` ref sits at the LINE END (before an
-# optional `:` when the node has children), so we anchor on it and parse the head
-# backward — robust to `@`, quotes and brackets appearing inside a name.
-
-# The ref may be FOLLOWED by non-state bracket tokens Playwright appends in
-# mode='ai' — notably `[cursor=pointer]` (emitted for every `<a href>` and any
-# cursor:pointer element) and an optional `:` when the node has children. If the
-# anchor demanded the ref be line-final it would silently drop every link/styled
-# button, so tolerate trailing `[...]` groups + an optional colon after the ref.
-_COMPACT_TAIL_RE = re.compile(r"\s*@(?P<ref>e\d+)(?:\s*\[[^\]]*\])*:?\s*$")
+# old regex-scrape silently dropped.
+#
+# We anchor on the real `[ref=eN]` MARKER in the RAW YAML (not the `@eN`-rewritten
+# text) and take everything BEFORE it as the head. Playwright's mode='ai' key ends
+# in `[ref=eN]`, so the head carries the role, name and state brackets, while the
+# tail carries only decoration the compact form discards — a `[cursor=pointer]`
+# token, an inline `: value` when the node has a single text child, and (when the
+# accessible name forces YAML to single-quote the whole key) a closing `'`. Cutting
+# at the marker means NO trailing token can drop the element (the class of bug that
+# `[cursor=pointer]`, and before it the state brackets, kept reopening) and page
+# text that merely looks like `@eN` is never mistaken for a ref — it isn't a marker.
+#
 # name tolerates backslash-escaped quotes (Playwright renders names via JSON.stringify).
 _COMPACT_HEAD_RE = re.compile(r'^(?P<role>\S+)(?:\s+"(?P<name>(?:[^"\\]|\\.)*)")?(?P<rest>.*)$')
 _COMPACT_STATE_RE = re.compile(r"\[([^\]]+)\]")
@@ -226,29 +228,26 @@ def compact_lines(snap: Snapshot, *, interactive_only: bool = False) -> list[tup
     per-ref data (e.g. a bounding box). Only lines carrying an ``@eN`` ref are
     emitted; with ``interactive_only`` non-actionable roles are skipped.
     """
-    # Ground "addressable" in the TRUE `[ref=eN]` markers (from the raw YAML,
-    # before _to_vibium rewrote them) — so literal `@eN`-looking page text at a
-    # line end is not mistaken for a ref (phantom-ref guard).
-    real_refs = set(REF_RE.findall(snap.raw_yaml))
     out: list[tuple[str, str]] = []
-    for raw in snap.text(indent=True).splitlines():
-        tail = _COMPACT_TAIL_RE.search(raw)
-        if not tail:
-            continue                                  # no ref → not addressable
-        ref = tail.group("ref")
-        if ref not in real_refs:
-            continue                                  # literal '@eN' text, not a marker
-        body = raw[: tail.start()].strip()
-        if body.startswith("-"):
-            body = body[1:].lstrip()
-        head = _COMPACT_HEAD_RE.match(body)
-        if not head:
+    for raw in snap.raw_yaml.splitlines():
+        marks = list(REF_RE.finditer(raw))
+        if not marks:
+            continue                                  # no [ref=eN] marker → not addressable
+        mark = marks[-1]                              # the ref terminates the key
+        ref = mark.group(1)
+        head = raw[: mark.start()].strip()            # everything before the marker
+        if head.startswith("-"):
+            head = head[1:].lstrip()                  # YAML list bullet
+        if head.startswith("'"):
+            head = head[1:].lstrip()                  # opening quote of a YAML-quoted key
+        parsed = _COMPACT_HEAD_RE.match(head)
+        if not parsed:
             continue
-        role = head.group("role").rstrip(":")
+        role = parsed.group("role").rstrip(":")
         if interactive_only and role not in _INTERACTIVE_ROLES:
             continue
-        name = head.group("name")
-        states = _COMPACT_STATE_RE.findall(head.group("rest") or "")
+        name = parsed.group("name")
+        states = _COMPACT_STATE_RE.findall(parsed.group("rest") or "")
         parts = [f"@{ref}", role]
         if name is not None:
             parts.append(f'"{name}"')

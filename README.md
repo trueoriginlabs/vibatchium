@@ -83,8 +83,10 @@ one session:
 | | vibatchium (real Chrome) | synthesized-fingerprint engines |
 |---|---|---|
 | canvas hash, page A → page B | **identical** | reseeded per navigation |
-| WebGL `readPixels` | real GPU pixels, deterministic | often `Math.random()` |
-| WebGL renderer | real GPU (e.g. `ANGLE (Intel …)`) | stub / zeros |
+| WebGL `readPixels` | real, **deterministic** pixels | often `Math.random()` |
+| WebGL renderer | a real ANGLE renderer¹ | stub / zeros |
+
+<sub>¹ Chrome's own software renderer (SwiftShader) by default — still a coherent, deterministic Chrome value, not a stub. A hardware-GPU string (e.g. `ANGLE (Intel …)`) needs the opt-in `--gpu` flag.</sub>
 
 A real device returns the same fingerprint every page load; a fingerprint keyed
 off `Date.now()` does not — and *that inconsistency* is exactly what lie-detection
