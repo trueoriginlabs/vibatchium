@@ -193,6 +193,70 @@ def resolve_target(page, snap: Snapshot | None, target: str):
     return page.locator(t)
 
 
+# ─── compact one-liner render (0.14.1) ──────────────────────────────────────
+#
+# Parses each aria-snapshot line into `@eN role "name" [state…]`, PRESERVING the
+# state brackets ([checked]/[disabled]/[expanded]/[selected]/[level=N]) that the
+# old regex-scrape silently dropped. The `@eN` ref sits at the LINE END (before an
+# optional `:` when the node has children), so we anchor on it and parse the head
+# backward — robust to `@`, quotes and brackets appearing inside a name.
+
+# The ref may be FOLLOWED by non-state bracket tokens Playwright appends in
+# mode='ai' — notably `[cursor=pointer]` (emitted for every `<a href>` and any
+# cursor:pointer element) and an optional `:` when the node has children. If the
+# anchor demanded the ref be line-final it would silently drop every link/styled
+# button, so tolerate trailing `[...]` groups + an optional colon after the ref.
+_COMPACT_TAIL_RE = re.compile(r"\s*@(?P<ref>e\d+)(?:\s*\[[^\]]*\])*:?\s*$")
+# name tolerates backslash-escaped quotes (Playwright renders names via JSON.stringify).
+_COMPACT_HEAD_RE = re.compile(r'^(?P<role>\S+)(?:\s+"(?P<name>(?:[^"\\]|\\.)*)")?(?P<rest>.*)$')
+_COMPACT_STATE_RE = re.compile(r"\[([^\]]+)\]")
+
+# Actionable roles surfaced by `interactive=True` (state-bearing controls + links).
+_INTERACTIVE_ROLES = frozenset({
+    "button", "link", "textbox", "searchbox", "checkbox", "radio",
+    "combobox", "listbox", "option", "switch", "slider", "spinbutton",
+    "menuitem", "menuitemcheckbox", "menuitemradio", "tab", "treeitem",
+})
+
+
+def compact_lines(snap: Snapshot, *, interactive_only: bool = False) -> list[tuple[str, str]]:
+    """Render a snapshot as `@eN role "name" [state…]` one-liners.
+
+    Returns ``[(ref, line)]`` (ref without the ``@``) so a caller can attach
+    per-ref data (e.g. a bounding box). Only lines carrying an ``@eN`` ref are
+    emitted; with ``interactive_only`` non-actionable roles are skipped.
+    """
+    # Ground "addressable" in the TRUE `[ref=eN]` markers (from the raw YAML,
+    # before _to_vibium rewrote them) — so literal `@eN`-looking page text at a
+    # line end is not mistaken for a ref (phantom-ref guard).
+    real_refs = set(REF_RE.findall(snap.raw_yaml))
+    out: list[tuple[str, str]] = []
+    for raw in snap.text(indent=True).splitlines():
+        tail = _COMPACT_TAIL_RE.search(raw)
+        if not tail:
+            continue                                  # no ref → not addressable
+        ref = tail.group("ref")
+        if ref not in real_refs:
+            continue                                  # literal '@eN' text, not a marker
+        body = raw[: tail.start()].strip()
+        if body.startswith("-"):
+            body = body[1:].lstrip()
+        head = _COMPACT_HEAD_RE.match(body)
+        if not head:
+            continue
+        role = head.group("role").rstrip(":")
+        if interactive_only and role not in _INTERACTIVE_ROLES:
+            continue
+        name = head.group("name")
+        states = _COMPACT_STATE_RE.findall(head.group("rest") or "")
+        parts = [f"@{ref}", role]
+        if name is not None:
+            parts.append(f'"{name}"')
+        parts.extend(f"[{s}]" for s in states)
+        out.append((ref, " ".join(parts)))
+    return out
+
+
 # ─── diff ──────────────────────────────────────────────────────────────────
 
 

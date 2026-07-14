@@ -58,6 +58,12 @@ try:  # pragma: no cover - depends on whether pillow is installed
 except Exception:  # noqa: BLE001
     _HAS_PILLOW = False
 
+# map_compact bbox=True resolves+measures each ref (a CDP round-trip); cap the
+# total fan-out (_MAX) and smooth the concurrent burst (_CONCURRENCY) so a huge
+# page can't spawn hundreds of simultaneous bounding_box calls on the shared box.
+_MAP_BBOX_MAX = 200
+_MAP_BBOX_CONCURRENCY = 24
+
 
 def _session(d):
     if d.session is None:
@@ -1878,28 +1884,52 @@ def register_extra(daemon) -> None:
 
     @daemon.handler("map_compact")
     async def _map_compact(d, args):
-        """Map but rendered in browser-use-style one-liner per actionable element."""
+        """Map rendered one-liner-per-element: ``@eN role "name" [state…]``.
+
+        0.14.1: uses a structured renderer (elements.compact_lines) that PRESERVES
+        the element state Playwright annotates — ``[checked]`` / ``[disabled]`` /
+        ``[expanded]`` / ``[selected]`` / ``[level=N]`` — which the old regex-scrape
+        silently dropped. `interactive`=only actionable roles; `bbox`=append real
+        ``bounding_box()`` coords (``bbox=x,y,w,h``) — genuine layout an HTTP-only,
+        layout-free scraper structurally cannot produce.
+
+        Note: `interactive` is a deliberately narrow ARIA control/widget filter
+        (button/link/textbox/checkbox/combobox/…). On tabular or calendar UIs
+        where cells or sortable headers carry click semantics, omit `interactive`
+        (or use plain `map`) — the role-only filter can't tell a clickable cell
+        from a read-only one.
+        """
         s = _session(d)
         snap = await elements.take_snapshot(s.page, depth=args.get("depth"))
         d._prev_snapshot = getattr(d, "_snapshot", None)
         d._snapshot = snap
-        # Walk the YAML and pull just lines that have a ref + a quoted name
-        lines = []
-        ref_role_name = re.compile(
-            r'^\s*-\s+(?P<role>\S+)\s+"(?P<name>[^"]+)"[^@]*@(?P<ref>e\d+)'
-        )
-        # also handle: `- link @eN`, no name
-        ref_role_only = re.compile(r'^\s*-\s+(?P<role>\S+)\s+@(?P<ref>e\d+)')
-        for line in snap.text(indent=True).splitlines():
-            m = ref_role_name.search(line)
-            if m:
-                lines.append(f'@{m["ref"]} {m["role"]} "{m["name"]}"')
-                continue
-            m = ref_role_only.search(line)
-            if m:
-                lines.append(f'@{m["ref"]} {m["role"]}')
+        pairs = elements.compact_lines(snap, interactive_only=bool(args.get("interactive", False)))
+
+        if bool(args.get("bbox", False)) and pairs:
+            capped = pairs[:_MAP_BBOX_MAX]
+            sem = asyncio.Semaphore(_MAP_BBOX_CONCURRENCY)
+
+            async def _box(ref):
+                async with sem:
+                    try:
+                        b = await elements.resolve(s.page, snap, ref).bounding_box(timeout=5000)
+                    except Exception:  # noqa: BLE001 — off-screen/detached → no box
+                        return None
+                if not b or b.get("width", 0) <= 0 or b.get("height", 0) <= 0:
+                    return None
+                return (int(b["x"]), int(b["y"]), int(b["width"]), int(b["height"]))
+
+            boxes = await asyncio.gather(*[_box(ref) for ref, _ in capped])
+            merged = []
+            for (ref, line), box in zip(capped, boxes, strict=True):
+                if box:
+                    line = f"{line} bbox={box[0]},{box[1]},{box[2]},{box[3]}"
+                merged.append((ref, line))
+            merged.extend(pairs[_MAP_BBOX_MAX:])   # any beyond the cap keep no bbox
+            pairs = merged
+
         return {
             "url": snap.url,
-            "count": len(lines),
-            "text": "\n".join(lines),
+            "count": len(pairs),
+            "text": "\n".join(line for _ref, line in pairs),
         }

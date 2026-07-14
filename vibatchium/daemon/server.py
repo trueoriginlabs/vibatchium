@@ -210,7 +210,7 @@ class Daemon:
     # recovered but NOT retried (the caller re-issues it).
     RETRY_SAFE_VERBS = frozenset({
         "go", "reload", "back", "forward",      # navigation (didn't commit on crash)
-        "text", "html", "extract", "pdf",       # pure reads (NOT `content` = set_content)
+        "text", "html", "extract", "extract_fields", "pdf",  # pure reads (NOT `content` = set_content)
         "screenshot", "map", "observe",         # read-only page analysis
         "url", "title", "frames",
         "console_dump",                          # reads the in-memory ring buffer

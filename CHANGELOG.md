@@ -4,6 +4,64 @@ All notable changes to vibatchium are documented here. Versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Until 1.0,
 minor bumps may include breaking changes; we'll always call them out here.
 
+## [0.14.1] — 2026-07-13
+
+### `agent-ground` — map_compact state fix + geometry
+
+Second obscura-mined adoption (the compact a11y index). The mining also surfaced a
+real bug in our own code, fixed here.
+
+- **Fixed: `map_compact` silently dropped element state.** It rebuilt each line by
+  regex-scraping the rendered aria-snapshot YAML with a pattern whose `[^@]*`
+  swallowed Playwright's state annotations — so `[checked]` / `[disabled]` /
+  `[expanded]` / `[selected]` / `[level=N]` never reached the agent. It now uses a
+  structured renderer (`elements.compact_lines`) that parses each line from the
+  trailing `@eN` backward and **preserves the state brackets**. Line form is
+  `@eN role "name" [state…]`.
+- **`map_compact interactive=true`** filters to actionable roles (button / link /
+  textbox / checkbox / radio / combobox / …) for a tighter action list.
+- **`map_compact bbox=true`** appends real `bounding_box()` coordinates
+  (`bbox=x,y,w,h`) per element — genuine layout geometry a layout-free HTTP scraper
+  structurally cannot produce. Opt-in, capped at 200 refs, each measured with a
+  bounded timeout; off-screen/detached elements simply carry no box.
+- We keep Playwright's `aria-ref` engine and **stamp no marker attribute on the
+  DOM** — a mutated DOM is a fingerprint/diff tell on authenticated pages.
+
+## [0.14.0] — 2026-07-13
+
+### `agent-extract` — structured extract + dump modes
+
+Competitive-mining lesson (obscura, the Rust "fake-Chrome" scraper): its browser
+engine is weaker than ours, but its *output/agent-ergonomics* layer had ideas
+worth taking. These land them on our **real-Chrome** stack, where they run on the
+authenticated / JS-hydrated / hardened pages a stateless HTTP scraper can't reach
+— so each is a reach-multiplier, not parity.
+
+- **New `extract_fields` verb — declarative structured extract.** Pass a
+  `{name: selector}` map and get back one JSON object of values in a single call:
+  `{fields, matched, misses, errors}`. Grammar (agent-portable): `name[]` → array,
+  `sel@attr` → attribute, `sel@html` → innerHTML, bare → text; optional `target`
+  scopes every selector to a subtree (`@eN` / `@text:` / CSS). Selectors are parsed
+  in Python (`extract.parse_field_specs`, pure) and passed to the page as a
+  serialized **arg** — no caller string is ever interpolated into JS source. Reads
+  text / attribute / innerHTML **only, never `element.value`**, so it stays
+  retry-safe and can't leak typed input. In the `content` (lean) cap bucket.
+- **`extract --mode`** gains `links | assets | main` alongside `markdown`:
+  - `links` → deduped `{url, text}`; `url` is the browser-resolved ABSOLUTE href
+    over the live post-hydration DOM (beats a static `base.join`);
+  - `assets` → sub-resources `{url, type, rel?}` (img/script/link/media/iframe);
+    `data:` URIs dropped (our no-base64 rule);
+  - `main` → main-content markdown via a text-density scorer, falling back to the
+    whole page when no dense block is found (never silently drops content);
+    document-level, so it rejects a `target` rather than silently ignoring it.
+- All new in-page reads are wrapped in `wait_for(timeout)` so a wedged renderer
+  frees the session lock (matching the markdown path), and mutate no DOM.
+- **`extract` now surfaces a `forms` count + hint.** `<form>` subtrees are still
+  dropped from markdown (interaction, not prose), but instead of swallowing them
+  silently `extract` reports `forms` and points the agent at `map` / `extract_fields`.
+- All modes run through Patchright's isolated context (the `eval` stealth default)
+  and **mutate no DOM** — unlike obscura's `data-*-ref` stamping, which is a tell.
+
 ## [0.13.3] — 2026-07-08
 
 ### `vb update` under uv

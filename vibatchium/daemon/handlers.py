@@ -192,6 +192,39 @@ def _resolve_target(daemon, target: str):
     return elements.resolve_target(s.page, daemon._snapshot, target)
 
 
+# ─── 0.14.0 agent-extract: structured extract + dump-mode shaping ─────────
+_MAX_FIELDS = 64                 # extract_fields: cap the field-map size
+_MAIN_MIN_RATIO = 0.10           # extract --mode main: densest block must be
+                                 # >=10% of body text, else return the whole page
+
+
+def _markdown_response(md: str, sig: dict, max_chars: int) -> dict:
+    """Shape the shared markdown-verb response — truncation, structure-loss, and
+    the forms hint. Used by both `extract` (default) and `extract --mode main`."""
+    truncated = False
+    if max_chars and len(md) > max_chars:
+        md = md[:max_chars]
+        truncated = True
+    out: dict = {"markdown": md, "chars": len(md)}
+    if sig.get("structure_loss"):
+        out["structure_loss"] = True
+        out["structure_signals"] = {
+            k: sig[k] for k in ("tables", "table_rows", "table_cells",
+                                "svg", "canvas", "img")
+        }
+    if sig.get("forms"):
+        # forms are dropped from markdown (interaction, not prose) — surface a
+        # cue to the ref path instead of silently swallowing the page's forms.
+        out["forms"] = sig["forms"]
+        out["forms_hint"] = (
+            f"{sig['forms']} form(s) present but dropped from markdown — run `map` for "
+            f"@eN refs (or `extract_fields` for specific values)."
+        )
+    if truncated:
+        out["truncated"] = True
+    return out
+
+
 # ─── Wave 7.8: housekeeping helpers (used by the `clean` handler) ─────────
 
 def _file_size(p: Path) -> int:
@@ -1924,41 +1957,88 @@ def register_all(daemon) -> None:
 
     @daemon.handler("extract")
     async def _extract(d, args):
-        """LLM-ready Markdown of the page (or a target subtree).
+        """LLM-ready Markdown of the page (or a target subtree), or a dump mode.
 
         0.9.0: a drop-in for Crawl4AI/Firecrawl-style scraping on the
         AUTHENTICATED pages those stateless tools can't reach. Returns clean
-        markdown text (boilerplate stripped) — never a base64 screenshot — so it
-        stays token-frugal. `max_chars` caps the output (default 40000).
+        markdown text (boilerplate stripped) — never a base64 screenshot.
+
+        0.14.0 `mode` (default "markdown"):
+          * markdown — clean markdown (unchanged);
+          * links    — deduped {url, text}; `url` is the browser-resolved ABSOLUTE
+                       href over the live post-hydration DOM (beats a static parse);
+          * assets   — sub-resources {url, type, rel?} (img/script/link/media/
+                       iframe); `data:` URIs dropped (our no-base64 rule);
+          * main     — main-content markdown via a text-density scorer, falling
+                       back to the WHOLE page when no dense block is found
+                       (document-level only — rejects a target/selector).
+        `max_chars` caps markdown output (default 40000). structure_loss + a
+        forms hint are surfaced on the markdown modes.
         """
+        import asyncio as _asyncio
         from ..extract import extract_with_signals
+        mode = str(args.get("mode") or "markdown").lower()
         timeout = int(args.get("timeout_ms", 30_000))
         sel = args.get("target") or args.get("selector")
+        # Every evaluate/content read below is wrapped in wait_for(timeout) so a
+        # wedged renderer raises TimeoutError, the handler returns, and the
+        # session lock is RELEASED (patchright's page.evaluate has no timeout of
+        # its own, and JS is single-threaded so an isolated-world eval still
+        # can't run past a hung main thread). Matches the markdown-path guard.
+
+        # ── dump modes: links / assets (run in the isolated context) ─────────
+        if mode in ("links", "assets"):
+            from ..dom_js import LINKS_PAGE, LINKS_EL, ASSETS_PAGE, ASSETS_EL
+            jarg = {"maxLinks": int(args.get("max_links", 500)),
+                    "maxAssets": int(args.get("max_assets", 500))}
+            page_fn, el_fn = (LINKS_PAGE, LINKS_EL) if mode == "links" else (ASSETS_PAGE, ASSETS_EL)
+            if sel:
+                loc = _resolve_target(d, sel)
+                res = await _asyncio.wait_for(loc.evaluate(el_fn, jarg), timeout / 1000)
+            else:
+                s = _need_session(d)
+                res = await _asyncio.wait_for(s.page.evaluate(page_fn, jarg), timeout / 1000)
+            res["mode"] = mode
+            return res
+
+        # ── main-content mode: whole-page density pick + safe full-page fallback
+        if mode == "main":
+            # main is a document-level density heuristic — it has no subtree
+            # variant. Reject a target rather than silently ignore it (the CLI /
+            # MCP `target` is advertised for the other modes).
+            if sel:
+                raise ValueError(
+                    "extract mode=main is document-level (whole page) and does not accept a "
+                    "target/selector — drop it, or use the default markdown mode to scope a subtree."
+                )
+            from ..dom_js import MAIN_PAGE
+            s = _need_session(d)
+            picked = await _asyncio.wait_for(s.page.evaluate(MAIN_PAGE), timeout / 1000)
+            raw_html = picked.get("html")
+            ratio = picked.get("ratio") or 0
+            fallback = (not raw_html) or ratio < _MAIN_MIN_RATIO
+            if fallback:
+                raw_html = await _asyncio.wait_for(s.page.content(), timeout / 1000)
+            md, sig = extract_with_signals(raw_html or "")
+            out = _markdown_response(md, sig, int(args.get("max_chars", 40_000)))
+            out["mode"] = "main"
+            out["main_content"] = not fallback
+            if fallback:
+                out["main_fallback"] = True   # no dense block → returned full page
+            out["url"] = s.page.url
+            return out
+
+        # ── default: whole-page / subtree markdown (unchanged behavior) ──────
         if sel:
             loc = _resolve_target(d, sel)
             raw_html = await loc.inner_html(timeout=timeout)
             url = None
         else:
             s = _need_session(d)
-            import asyncio as _asyncio
             raw_html = await _asyncio.wait_for(s.page.content(), timeout / 1000)
             url = s.page.url
         md, sig = extract_with_signals(raw_html)
-        max_chars = int(args.get("max_chars", 40_000))
-        truncated = False
-        if max_chars and len(md) > max_chars:
-            md = md[:max_chars]
-            truncated = True
-        out = {"markdown": md, "chars": len(md)}
-        # 0.10.0: surface structure-loss so a caller can tell when the markdown
-        # dropped/flattened visual signal (tables, svg/canvas charts) and may
-        # want to `screenshot --tiles` and read the tiles with its own vision.
-        if sig.get("structure_loss"):
-            out["structure_loss"] = True
-            out["structure_signals"] = {
-                k: sig[k] for k in ("tables", "table_rows", "table_cells",
-                                    "svg", "canvas", "img")
-            }
+        out = _markdown_response(md, sig, int(args.get("max_chars", 40_000)))
         if url is not None:
             out["url"] = url
             s = _need_session(d)
@@ -1966,9 +2046,49 @@ def register_all(daemon) -> None:
                 out["title"] = await s.page.title()
             except Exception:  # noqa: BLE001
                 pass
-        if truncated:
-            out["truncated"] = True
         return out
+
+    @daemon.handler("extract_fields")
+    async def _extract_fields(d, args):
+        """Declarative structured extract: a {name: selector} map → ONE JSON
+        object of values, in a single call, against our REAL authenticated
+        Chrome DOM (a gated/SPA page a stateless HTTP scraper can't reach).
+
+        0.14.0. Grammar (see extract.parse_field_specs): `name[]` → array,
+        `sel@attr` → attribute, `sel@html` → innerHTML, bare → text. Optional
+        `target` (@eN / @text: / CSS) scopes selectors to a subtree (obscura's
+        equivalent is document-global only). Selectors are parsed in Python and
+        passed as a serialized arg — NEVER interpolated into JS source.
+
+        Returns {fields, matched, misses, errors}: `misses` (matched nothing) and
+        `errors` (invalid selector → value null) let an agent fix a selector
+        without re-reading the page. Reads text / attribute / innerHTML only —
+        NEVER element.value — so it's retry-safe and can't leak typed credentials.
+        """
+        import asyncio as _asyncio
+        from ..extract import parse_field_specs
+        from ..dom_js import FIELDS_PAGE, FIELDS_EL
+        fields = args.get("fields")
+        if not isinstance(fields, dict) or not fields:
+            raise ValueError("extract_fields requires a non-empty `fields` map {name: selector}")
+        if len(fields) > _MAX_FIELDS:
+            raise ValueError(
+                f"extract_fields: too many fields ({len(fields)} > {_MAX_FIELDS})"
+            )
+        timeout = int(args.get("timeout_ms", 30_000))
+        specs = parse_field_specs(fields)
+        jarg = {
+            "specs": specs,
+            "maxChars": int(args.get("max_chars", 2_000)),
+            "nodeCap": int(args.get("node_cap", 1_000)),
+        }
+        target = args.get("target") or args.get("selector")
+        # wait_for so a wedged renderer frees the session lock (see _extract note).
+        if target:
+            loc = _resolve_target(d, target)
+            return await _asyncio.wait_for(loc.evaluate(FIELDS_EL, jarg), timeout / 1000)
+        s = _need_session(d)
+        return await _asyncio.wait_for(s.page.evaluate(FIELDS_PAGE, jarg), timeout / 1000)
 
     @daemon.handler("eval")
     async def _eval(d, args):

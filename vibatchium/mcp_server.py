@@ -162,12 +162,35 @@ TOOLS: list[tuple[str, str, dict, str, Any]] = [
      "(nav/footer/aside/scripts) stripped, headings/links/lists/code preserved. "
      "A drop-in for Crawl4AI/Firecrawl-style scraping on the AUTHENTICATED pages "
      "those stateless tools can't reach. Returns markdown TEXT (never a base64 "
-     "screenshot), capped by max_chars to stay token-frugal.",
+     "screenshot), capped by max_chars. `mode`: markdown (default) | links "
+     "(deduped {url,text}, absolute post-hydration URLs) | assets ({url,type,rel?}"
+     ", data: dropped) | main (main-content only via density scorer).",
      {"type": "object", "properties": {
-         "target": _str("Optional @eN / @text: / @label: / CSS to scope extraction to a subtree."),
+         "target": _str("Optional @eN / @text: / @label: / CSS to scope extraction to a subtree "
+                        "(honored by markdown/links/assets; mode=main is whole-page and rejects it)."),
          "max_chars": _int("Cap the returned markdown length (truncates beyond it).", 40_000),
+         "mode": {"type": "string", "enum": ["markdown", "links", "assets", "main"],
+                  "description": "Output mode (default markdown)."},
+         "max_links": _int("mode=links: cap the number of links.", 500),
+         "max_assets": _int("mode=assets: cap the number of assets.", 500),
      }},
      "extract", None),
+    ("extract_fields",
+     "Declarative STRUCTURED extract: pass a {name: selector} map and get back "
+     "ONE JSON object of values in a single call — against our real authenticated "
+     "Chrome DOM (a login-walled / SPA page stateless scrapers can't reach). "
+     "Grammar: `name[]`=array, `sel@attr`=attribute, `sel@html`=innerHTML, bare="
+     "text. Optional `target` scopes selectors to a subtree. Returns {fields, "
+     "matched, misses, errors} — `misses`/`errors` let you fix a selector without "
+     "re-reading the page. Reads text/attr/innerHTML only, never input values.",
+     {"type": "object", "properties": {
+         "fields": {"type": "object", "additionalProperties": {"type": "string"},
+                    "description": "Map of field name → CSS selector (with optional @attr / @html / name[] array suffix)."},
+         "target": _str("Optional @eN / @text: / @label: / CSS root to scope all selectors to a subtree."),
+         "max_chars": _int("Cap each field value's length.", 2_000),
+         "node_cap": _int("Cap nodes read per array field.", 1_000),
+     }, "required": ["fields"]},
+     "extract_fields", None),
     ("attr", "Get an HTML attribute value from an element.",
      {"type": "object", "properties": {
          "target": _str("@eN / @text: / @label: / CSS."),
@@ -494,8 +517,16 @@ TOOLS: list[tuple[str, str, dict, str, Any]] = [
                      "full_page": _bool("Capture full page.", False)},
       "required": ["path"]},
      "screenshot_annotate", None),
-    ("map_compact", "One-line-per-element rendering of the snapshot (token-efficient).",
-     {"type": "object", "properties": {"depth": _int("Limit snapshot depth.")}},
+    ("map_compact",
+     "One-line-per-element rendering of the snapshot (token-efficient): "
+     "`@eN role \"name\" [state…]`, preserving state ([checked]/[disabled]/"
+     "[expanded]/[level=N]). `interactive`=only actionable roles; `bbox`=append "
+     "real bounding_box() coords (bbox=x,y,w,h) — genuine layout geometry.",
+     {"type": "object", "properties": {
+         "depth": _int("Limit snapshot depth."),
+         "interactive": _bool("Only actionable roles (button/link/textbox/checkbox/…).", False),
+         "bbox": _bool("Append real-Chrome bounding-box coords per element.", False),
+     }},
      "map_compact", None),
     ("observe", "Plan a verb + target for an intent without executing.",
      {"type": "object",

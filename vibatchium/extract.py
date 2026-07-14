@@ -64,7 +64,7 @@ class _MarkdownExtractor(HTMLParser):
         # glyphs) so they don't masquerade as dropped chart content.
         self.sig: dict[str, int] = {
             "tables": 0, "table_rows": 0, "table_cells": 0,
-            "svg": 0, "svg_icon": 0, "canvas": 0, "img": 0,
+            "svg": 0, "svg_icon": 0, "canvas": 0, "img": 0, "forms": 0,
         }
 
     # ── emit helpers ────────────────────────────────────────────────────
@@ -91,6 +91,13 @@ class _MarkdownExtractor(HTMLParser):
                 self.sig[tag] += 1
                 if tag == "svg" and _svg_is_icon(attrs):
                     self.sig["svg_icon"] += 1
+            # 0.14.0: <form> is dropped from markdown (it's interaction, not prose)
+            # but count it so `extract` can HINT the agent to `map`/detect_forms
+            # instead of silently swallowing the page's forms. A form nested in an
+            # already-skipped subtree (nav>form) returns above, so only top-level
+            # content forms are tallied.
+            elif tag == "form":
+                self.sig["forms"] += 1
             self._skip_depth += 1
             return
         ad = dict(attrs)
@@ -223,9 +230,51 @@ def html_to_markdown(html: str) -> str:
 
 _EMPTY_SIGNALS: dict[str, object] = {
     "tables": 0, "table_rows": 0, "table_cells": 0, "svg": 0, "svg_icon": 0,
-    "canvas": 0, "img": 0, "text_chars": 0, "html_chars": 0,
+    "canvas": 0, "img": 0, "forms": 0, "text_chars": 0, "html_chars": 0,
     "structure_loss": False,
 }
+
+# A field-spec suffix after the last ``@`` is treated as the extraction mode only
+# when it's a bare ``html`` or attribute-name token — so an ``@`` inside an
+# attribute-value selector (``a[title="x@y"]``) is left intact.
+_FIELD_MODE_RE = re.compile(r"^(?:html|[A-Za-z_][\w:-]*)$")
+
+
+def parse_field_specs(fields: dict) -> list[dict]:
+    """Parse a declarative ``{name: selector}`` field map into a normalized
+    instruction list for the in-page extractor (:mod:`vibatchium.dom_js`).
+
+    Grammar (obscura-compatible so agent knowledge transfers, plus our ``@html``):
+
+      * a NAME ending in ``[]`` returns EVERY match as an array (``imgs[]``);
+        otherwise the first match, or ``null``.
+      * a SELECTOR may carry a trailing ``@<attr>`` to read that attribute or
+        ``@html`` to read ``innerHTML``; with no ``@`` suffix the element's text
+        (``innerText`` / ``textContent``) is returned.
+
+    Only the LAST ``@`` splits, and only when its suffix is a bare
+    attribute-name / ``html`` token. Pure — no I/O, unit-tested.
+
+    Returns a list of ``{name, selector, mode, array}`` dicts (``mode`` is
+    ``"text"``, ``"html"``, or an attribute name).
+    """
+    specs: list[dict] = []
+    for raw_name, raw_sel in fields.items():
+        name = str(raw_name)
+        array = False
+        if name.endswith("[]"):
+            array = True
+            name = name[:-2]
+        sel = str(raw_sel).strip()
+        mode = "text"
+        at = sel.rfind("@")
+        if at > 0:
+            suffix = sel[at + 1:]
+            if _FIELD_MODE_RE.match(suffix):
+                mode = suffix  # "html" is handled specially in JS; attrs pass through
+                sel = sel[:at].strip()
+        specs.append({"name": name, "selector": sel, "mode": mode, "array": array})
+    return specs
 
 
 def _structure_loss(sig: dict, text_chars: int, html_chars: int) -> bool:

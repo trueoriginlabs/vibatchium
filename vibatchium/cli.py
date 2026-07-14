@@ -1325,15 +1325,58 @@ def html(ctx, selector):
 
 @cli.command()
 @click.argument("selector", required=False)
+@click.option("--mode", type=click.Choice(["markdown", "links", "assets", "main"]),
+              default="markdown", show_default=True,
+              help="Output mode: markdown | links | assets | main-content.")
 @click.option("--max-chars", type=int, default=40000, show_default=True,
               help="Cap the returned markdown length.")
+@click.option("--max-links", type=int, default=500, show_default=True,
+              help="mode=links: cap the number of links.")
+@click.option("--max-assets", type=int, default=500, show_default=True,
+              help="mode=assets: cap the number of assets.")
 @click.pass_context
-def extract(ctx, selector, max_chars):
-    """LLM-ready Markdown of the page (or a selector subtree)."""
-    args = {"max_chars": max_chars}
+def extract(ctx, selector, mode, max_chars, max_links, max_assets):
+    """LLM-ready Markdown of the page — or links/assets/main-content (--mode)."""
+    args = {"max_chars": max_chars, "mode": mode,
+            "max_links": max_links, "max_assets": max_assets}
     if selector:
         args["selector"] = selector
-    _emit(call("extract", args), ctx.obj["json"], "markdown")
+    # markdown/main print the markdown plainly; links/assets are structured → JSON.
+    plain = "markdown" if mode in ("markdown", "main") else None
+    _emit(call("extract", args), ctx.obj["json"], plain)
+
+
+@cli.command("extract-fields")
+@click.option("--fields", "fields_json", default=None, metavar="JSON",
+              help="JSON map {name: selector}, e.g. '{\"title\":\"h1\",\"imgs[]\":\"img@src\"}'.")
+@click.option("--fields-file", type=click.Path(exists=True), default=None,
+              help="Read the {name: selector} map from a JSON file.")
+@click.option("--target", default=None,
+              help="Optional @eN / @text: / CSS root to scope every selector to a subtree.")
+@click.option("--max-chars", type=int, default=2000, show_default=True,
+              help="Cap each field value's length.")
+@click.option("--node-cap", type=int, default=1000, show_default=True,
+              help="Cap nodes read per array (name[]) field.")
+@click.pass_context
+def extract_fields(ctx, fields_json, fields_file, target, max_chars, node_cap):
+    """Structured extract: a {name: selector} map → one JSON object of values.
+
+    Grammar: `name[]`=array, `sel@attr`=attribute, `sel@html`=innerHTML, bare=text.
+    Runs against the real authenticated Chrome DOM. Returns {fields, matched,
+    misses, errors}.
+    """
+    import json as _json
+    if fields_file:
+        with open(fields_file) as fh:
+            fields = _json.load(fh)
+    elif fields_json:
+        fields = _json.loads(fields_json)
+    else:
+        raise click.UsageError("provide --fields '<json>' or --fields-file <path>")
+    args = {"fields": fields, "max_chars": max_chars, "node_cap": node_cap}
+    if target:
+        args["target"] = target
+    _emit(call("extract_fields", args), ctx.obj["json"])
 
 
 @cli.command()
@@ -1549,18 +1592,28 @@ def screenshot(ctx, output, full_page, annotate, tiles, tile_height, max_tiles,
 @click.option("--indent/--no-indent", default=True, help="Preserve YAML indent (on by default).")
 @click.option("--compact", is_flag=True,
               help="One-liner per actionable element (token-efficient).")
+@click.option("--interactive", is_flag=True,
+              help="(with --compact) only actionable roles (button/link/textbox/…).")
+@click.option("--bbox", is_flag=True,
+              help="(with --compact) append real bounding-box coords (bbox=x,y,w,h).")
 @click.option("--depth", default=None, type=int, help="Limit snapshot depth.")
 @click.pass_context
-def map_cmd(ctx, indent, compact, depth):
+def map_cmd(ctx, indent, compact, interactive, bbox, depth):
     """Snapshot the page's actionable elements and assign @eN refs.
 
     Default output is Playwright's aria_snapshot YAML with `@eN` ref notation.
-    `--compact` switches to browser-use-style one-liner output (~3x cheaper in tokens).
+    `--compact` switches to browser-use-style one-liner output (~3x cheaper in
+    tokens); it preserves element state and takes `--interactive` / `--bbox`.
     """
     args = {"indent": indent}
     if depth is not None:
         args["depth"] = depth
     cmd = "map_compact" if compact else "map"
+    if compact:
+        if interactive:
+            args["interactive"] = True
+        if bbox:
+            args["bbox"] = True
     result = call(cmd, args)
     if ctx.obj["json"]:
         _emit(result, True)
