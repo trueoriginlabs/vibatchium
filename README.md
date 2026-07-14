@@ -68,6 +68,37 @@ vb --version               # confirm
 | Bearer-token REST shim + caps gating | ❌ | ❌ | manual | ✅ |
 | `research` command (parallel fan-out) | ❌ | ❌ | ❌ | ✅ |
 
+## Real Chrome vs fake Chrome
+
+A wave of "headless browser for AI agents" tools rebuild the browser from scratch
+(Rust + V8, no Blink/Skia) to hit tiny memory and sub-100ms page loads. The catch
+is structural: **with no rendering engine, they can't produce a real device's
+fingerprint — they synthesize one.** And synthetic fingerprints don't hold still.
+
+vibatchium drives *real* Google Chrome, so its fingerprints are real — and, more
+to the point, **stable**. The single test that separates the two is fingerprint
+stability across navigations. Run the same canvas + WebGL probe on two pages in
+one session:
+
+| | vibatchium (real Chrome) | synthesized-fingerprint engines |
+|---|---|---|
+| canvas hash, page A → page B | **identical** | reseeded per navigation |
+| WebGL `readPixels` | real GPU pixels, deterministic | often `Math.random()` |
+| WebGL renderer | real GPU (e.g. `ANGLE (Intel …)`) | stub / zeros |
+
+A real device returns the same fingerprint every page load; a fingerprint keyed
+off `Date.now()` does not — and *that inconsistency* is exactly what lie-detection
+fingerprinters (CreepJS and friends) flag. Measured: vibatchium's canvas hash and
+WebGL readback are byte-identical across navigations, and CreepJS reports **0 %
+stealth-tampering** (no synthetic-environment signatures).
+
+**This is not a claim of invisibility.** The moat is fingerprint *authenticity*,
+not hiding that a browser is automated — vibatchium still reads as headless on the
+headless-specific tells (see [Honest limits](#honest-limits)), and real-GPU WebGL
+(`--gpu`) is opt-in. But real, consistent fingerprints pass the consistency tier
+that synthetic ones fail *by construction* — and that tier is what stands between
+you and a login wall.
+
 ## Multi-session in 10 lines
 
 ```
