@@ -1,0 +1,50 @@
+name: publish-mcp
+
+# 0.15.1: list vibatchium on the official MCP registry
+# (registry.modelcontextprotocol.io) under the io.github.trueoriginlabs/*
+# namespace. We authenticate with GitHub Actions OIDC — because the workflow
+# runs in a repo owned by `trueoriginlabs`, the registry grants that org
+# namespace automatically. This deliberately sidesteps the interactive
+# `mcp-publisher login github` OAuth flow, which the org's third-party OAuth
+# App access policy blocks (the registry app is unapproved, so GitHub hides
+# org membership from it even for public members).
+#
+# Triggers:
+#   - release: published  -> auto-list every tagged release once the GitHub
+#                            Release is cut by publish.yml's `release` job.
+#   - workflow_dispatch    -> run standalone against the current server.json
+#                            (e.g. to backfill an already-shipped version).
+#
+# NOTE: server.json's `version` is the source of truth for what gets listed;
+# bump it alongside vibatchium/__init__.py when cutting a release.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  id-token: write   # required for OIDC
+  contents: read
+
+jobs:
+  registry:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install mcp-publisher
+        run: |
+          curl -sSL \
+            "https://github.com/modelcontextprotocol/registry/releases/download/v1.8.0/mcp-publisher_linux_amd64.tar.gz" \
+            | tar -xz mcp-publisher
+          ./mcp-publisher --help >/dev/null
+
+      - name: Validate server.json
+        run: ./mcp-publisher validate server.json
+
+      - name: Authenticate via GitHub OIDC
+        run: ./mcp-publisher login github-oidc
+
+      - name: Publish to the MCP registry
+        run: ./mcp-publisher publish server.json
