@@ -1678,6 +1678,7 @@ def register_extra(daemon) -> None:
         """Find a UI element matching the verbal description via Claude vision,
         then click it. Cache hit on identical (screenshot, intent) → no API call.
         """
+        from .registry import current_session_ctx as _ctx
         s, result = await _vision_locate(d, args)
         # devicePixelRatio scaling: Claude sees screenshot at the device px;
         # our screenshots are NOT scaled (they're the raw device pixels), so
@@ -1685,9 +1686,24 @@ def register_extra(daemon) -> None:
         dpr = result.get("devicePixelRatio", 1) or 1
         cx = result["x"] / dpr
         cy = result["y"] / dpr
-        await s.page.mouse.click(cx, cy, button=args.get("button", "left"))
+        button = args.get("button", "left")
+        # Honour humanize like every other click path. A bare mouse.click() is
+        # a teleport with zero dwell and no trajectory — the shape that
+        # session-lifetime behavioural scoring is built to catch, and the most
+        # likely tell on a hardened target. This used to be the one click verb
+        # that bypassed the humanization layer entirely.
+        entry = d.registry.get(_ctx.get())
+        humanize = bool(entry.flags.get("humanize")) if entry else False
+        if humanize:
+            from ..humanize import humanized_click
+            entry.flags["_cursor"] = await humanized_click(
+                s.page, cx, cy, button=button,
+                cursor_pos=entry.flags.get("_cursor"),
+            )
+        else:
+            await s.page.mouse.click(cx, cy, button=button)
         return {
-            "clicked": True, "x": cx, "y": cy,
+            "clicked": True, "x": cx, "y": cy, "humanized": humanize,
             "confidence": result["confidence"],
             "via": result["via"], "rationale": result.get("rationale", ""),
         }

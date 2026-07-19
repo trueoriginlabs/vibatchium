@@ -4,6 +4,24 @@ All notable changes to vibatchium are documented here. Versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Until 1.0,
 minor bumps may include breaking changes; we'll always call them out here.
 
+## [0.16.2] — 2026-07-20
+
+### vision_click no longer bypasses humanize
+
+`vision_click` ended in a bare `page.mouse.click(cx, cy)` — a teleport with no
+trajectory and no dwell. It was the only click verb that skipped the
+humanization layer, and it is the verb most likely to be used on a hardened
+target, so it was the worst one to leave unhumanized. This matters more than it
+did a quarter ago: Cloudflare Precursor, DataDome Agent Trust, Arkose Agent
+Trust Manager and HUMAN all shipped session-lifetime *behavioural* scoring
+inside one quarter, and none of them care about canvas or `Runtime.enable`.
+
+It now routes through `humanized_click` with the same cursor bookkeeping as the
+`mouse` verb, and the response carries a `humanized` field. Measured in-page on
+a real site: humanize on → **31 mousemove events, 103.7 ms dwell**; humanize
+off → 1 move, 0.5 ms. Unchanged when humanize is off, and the click still lands
+on target.
+
 ## [0.16.1] — 2026-07-20
 
 ### Security: the live-view WebSocket is authenticated (CSWSH)
