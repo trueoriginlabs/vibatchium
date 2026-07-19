@@ -9,9 +9,37 @@ from __future__ import annotations
 import http.server
 import os
 import socketserver
+import tempfile
 import threading
 import time
 from pathlib import Path
+
+# ── Socket isolation: the whole pytest session runs against its own runtime
+# dir. Without this, _daemon_lifecycle's "ensure no prior daemon" shutdown
+# below goes to the USER'S default socket and kills a live shared daemon —
+# on the shared box that tore down the running bot sessions (2026-07-15
+# incident). paths.SOCK_PATH is frozen at import, so this MUST run before any
+# vibatchium import. XDG_STATE_HOME is isolated too so test-daemon churn
+# doesn't pollute the real persistent daemon.log. Kept short: AF_UNIX paths
+# cap at ~107 bytes.
+#
+# The isolated runtime dir SYMLINKS the real one's entries (minus vibatchium/):
+# a bare dir changes EGL/Wayland device discovery — on a dual-GPU host the
+# un-pinned headless GPU session flips Intel→NVIDIA and the de-twin test
+# breaks. Linking wayland/dbus/etc. back preserves graphics behavior while the
+# vibatchium socket namespace stays private.
+_iso_rt = tempfile.mkdtemp(prefix="vbtest-rt-")
+_real_rt = os.environ.get("XDG_RUNTIME_DIR")
+if _real_rt and os.path.isdir(_real_rt):
+    for _ent in os.listdir(_real_rt):
+        if _ent != "vibatchium":
+            try:
+                os.symlink(os.path.join(_real_rt, _ent),
+                           os.path.join(_iso_rt, _ent))
+            except OSError:
+                pass
+os.environ["XDG_RUNTIME_DIR"] = _iso_rt
+os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp(prefix="vbtest-st-")
 
 import pytest
 

@@ -1458,6 +1458,11 @@ def register_all(daemon) -> None:
             # Chrome renderer crash, and when (epoch seconds, None if never).
             "recovered": entry.recovered if entry else 0,
             "last_recovered_at": entry.last_recovered_at if entry else None,
+            # 0.16.0 idle-freeze: whether this session's pages are currently
+            # lifecycle-frozen for being parked (status is an UNLOCKED verb —
+            # it reports truthfully and does not thaw; the next session verb
+            # thaws before running).
+            "idle_frozen": entry.frozen if entry else False,
             # 0.7.0 cap relief: persistent + ephemeral budget usage.
             "budgets": d.registry.budgets(),
         }

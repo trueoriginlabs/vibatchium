@@ -4,6 +4,46 @@ All notable changes to vibatchium are documented here. Versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Until 1.0,
 minor bumps may include breaking changes; we'll always call them out here.
 
+## [0.16.0] — 2026-07-15
+
+### Idle-freeze: parked sessions can no longer burn the box (default-on)
+
+A headless page is never "hidden" and the stealth launch posture keeps Chrome's
+anti-throttle flags on, so a session parked on a page with WebGL / CSS
+animations / rAF loops rendered at full speed forever — under software GL
+(SwiftShader) a single parked session pegged 4+ CPU cores on a shared box
+(2026-07-13 and 2026-07-15 incidents, both a THREE.js background).
+
+The daemon now SIGSTOPs the renderer processes of sessions that have served no
+verb for `VIBATCHIUM_IDLE_FREEZE_AFTER` seconds (default 90;
+`VIBATCHIUM_IDLE_FREEZE=0` disables) — burn drops to literally zero. The next
+verb on the session SIGCONTs them — under the same per-session lock — before
+running, so an actively-driven session is never frozen. Only renderers are
+stopped: browser process, GPU process, and CDP stay live (registry ops,
+`vb status`, self-heal keep working), and a stopped renderer submits no
+frames, so GPU burn stops with it. Renderers are matched by
+`--user-data-dir=<profile>` cmdline and recorded as (pid, starttime) pairs so
+a recycled pid is never signalled; `close()` thaws before Chrome teardown.
+Only launched + headless + patchright sessions are eligible — attach-mode
+(possibly a human's real browser), headed windows (possibly human-driven with
+zero daemon traffic), and nodriver sessions are never touched. `vb status`
+now reports `idle_frozen`; a self-heal relaunch resets freeze bookkeeping.
+
+Kernel-level stop is the only mechanism that measurably works — all the CDP
+routes were probed on chromium-1217 and rejected on data: a rAF/JS burn page
+(156 ticks/4s) drops to ~0 under `Emulation.setScriptExecutionDisabled` and
+SIGSTOP, but a CSS-animation burn page (198 ticks/4s) is untouched by
+`setScriptExecutionDisabled` (190) AND by `Page.setWebLifecycleState frozen`
+(206) — only SIGSTOP zeroes both. `Emulation.setCPUThrottlingRate(10)` is
+actively harmful: it emulates a slow CPU for the page while its
+suspend/resume machinery burns MORE host CPU than the unthrottled page
+(27% → 105% of a core).
+
+Also: `tests/conftest.py` now isolates the whole pytest session onto a temp
+`XDG_RUNTIME_DIR`/`XDG_STATE_HOME` — previously the autouse daemon fixture
+sent `shutdown` to the USER'S default socket, killing a live shared daemon
+(and its bot sessions) on every suite run.
+
 ## [0.15.1] — 2026-07-14
 
 ### Security: the prompt-injection scanner now covers structured/extract output

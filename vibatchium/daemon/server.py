@@ -40,6 +40,7 @@ from .paths import (
     CACHE_DIR, DEFAULT_SESSION_NAME, LOCK_PATH, LOG_PATH, PID_PATH, SOCK_PATH,
     get_active_session_name,
 )
+from . import freeze as _freeze
 from .registry import SessionEntry, SessionRegistry, current_session_ctx
 
 log = logging.getLogger("vibatchium.server")
@@ -597,9 +598,14 @@ class Daemon:
         if os.environ.get("VIBATCHIUM_SELF_HEAL", "1").lower() in (
                 "0", "false", "no", "off"):
             async with entry.lock:
+                await _freeze.lift(entry)
                 return await handler(self, args)
         from .browser import is_crash_error, revive_page
         async with entry.lock:
+            # 0.16.0: a parked (idle-frozen) session thaws before its verb
+            # runs — under the same lock, so the freezer can't re-apply
+            # mid-verb.
+            await _freeze.lift(entry)
             try:
                 return await handler(self, args)
             except Exception as exc:  # noqa: BLE001
@@ -735,6 +741,50 @@ class Daemon:
                 self._stopping.set()
                 return
 
+    async def _idle_freezer(self) -> None:
+        """0.16.0 (default-on): lifecycle-freeze sessions that have served no
+        verb for VIBATCHIUM_IDLE_FREEZE_AFTER seconds, so a page parked on
+        WebGL / CSS-animation / rAF content can't burn cores indefinitely (see
+        freeze.py). The next verb on a session thaws it in the dispatcher.
+        Like the reaper, this task is kept OUT of the FIRST_COMPLETED wait
+        set — a disabled freezer returns immediately and must not end the
+        daemon."""
+        if not _freeze.freeze_enabled():
+            log.info("idle-freeze disabled (VIBATCHIUM_IDLE_FREEZE)")
+            return
+        after = _freeze.freeze_after()
+        poll = min(30.0, max(5.0, after / 4))
+        log.info("idle-freeze armed: after=%.0fs poll=%.0fs", after, poll)
+        while not self._stopping.is_set():
+            await asyncio.sleep(poll)
+            now = time.time()
+            for name in self.registry.list_running():
+                # peek(), NOT get() — get() stamps activity and would reset
+                # the idle clock this loop is measuring.
+                entry = self.registry.peek(name)
+                if entry is None or not _freeze.eligible(entry):
+                    continue
+                if now - entry.last_used_at < after:
+                    continue
+                if entry.lock.locked():
+                    continue  # verb in flight — not idle
+                async with entry.lock:
+                    # Re-check under the lock: a verb may have just finished
+                    # (fresh activity) or be the reason the lock was held.
+                    idle_for = time.time() - entry.last_used_at
+                    if idle_for < after:
+                        continue
+                    try:
+                        fresh = await _freeze.apply(entry)
+                    except Exception:  # noqa: BLE001 — never kill the loop
+                        log.exception("idle-freeze: apply failed session=%s",
+                                      name)
+                        continue
+                    if fresh:
+                        log.info("idle-freeze: froze session=%s "
+                                 "(%d renderer(s), idle %.0fs)",
+                                 name, fresh, idle_for)
+
     async def run(self) -> None:
         # 0.9.1: race-free singleton — hold an exclusive flock for life.
         if not self._acquire_singleton_lock():
@@ -787,12 +837,15 @@ class Daemon:
             # observes. (A disabled reaper returns immediately — that must NOT
             # end the daemon, so it's kept out of the wait set.)
             reaper = asyncio.create_task(self._idle_reaper())
+            # 0.16.0: idle-freeze poll loop — same out-of-wait-set contract
+            # as the reaper (returns immediately when disabled).
+            freezer = asyncio.create_task(self._idle_freezer())
             try:
                 await asyncio.wait(
                     {stopper, serving}, return_when=asyncio.FIRST_COMPLETED
                 )
             finally:
-                for t in (stopper, serving, reaper):
+                for t in (stopper, serving, reaper, freezer):
                     t.cancel()
                     with contextlib.suppress(asyncio.CancelledError, Exception):
                         await t

@@ -301,6 +301,13 @@ class SessionEntry:
     # today's behavior). Otherwise {'owner','token','expires_at','acquired_at'}.
     # Reaped lazily — see lease_active().
     lease: dict | None = None
+    # 0.16.0 idle-freeze (see daemon/freeze.py): whether this session's
+    # renderer processes are currently SIGSTOPped for being parked, and the
+    # (pid, starttime) pairs recorded while they are — starttime-checked so a
+    # recycled pid is never signalled. The dispatcher thaws (SIGCONT + clear)
+    # before running any verb; close() thaws before Chrome teardown.
+    frozen: bool = False
+    freeze_pids: list = field(default_factory=list)
 
     def touch(self) -> None:
         self.last_used_at = time.time()
@@ -500,6 +507,12 @@ class SessionRegistry:
         if entry is not None:
             entry.touch()
         return entry
+
+    def peek(self, name: str) -> SessionEntry | None:
+        """Lookup WITHOUT stamping activity — for maintenance loops (the
+        0.16.0 idle-freezer) whose periodic reads must not reset the very
+        idleness they're measuring. Verb dispatch uses get()."""
+        return self._entries.get(name)
 
     def has(self, name: str) -> bool:
         return name in self._entries
@@ -843,6 +856,11 @@ class SessionRegistry:
             sess.nav_allowlist = old.nav_allowlist
             await ensure_nav_guard(sess)
         entry.session = sess
+        # 0.16.0: drop idle-freeze state — the recorded renderers died with the
+        # old context (lift() would starttime-skip them anyway, but a relaunched
+        # session must never START in a half-frozen bookkeeping state).
+        entry.freeze_pids.clear()
+        entry.frozen = False
         # Drop stale handles/snapshot — their execution contexts died with the
         # old renderer.
         for h in list(entry.handles.values()):
@@ -922,6 +940,11 @@ class SessionRegistry:
         if entry is None:
             return False
         profile_dir = entry.profile_dir
+        # 0.16.0: thaw a frozen session before teardown — SIGKILL works on a
+        # stopped process, but Chrome's graceful shutdown IPC would stall
+        # waiting on a SIGSTOPped renderer until the force-kill timeout.
+        from . import freeze as _freeze
+        await _freeze.lift(entry)
         # Best-effort dispose handles before closing the browser
         for h in list(entry.handles.values()):
             try:

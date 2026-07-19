@@ -211,6 +211,8 @@ VIBATCHIUM_SKILLS=1             # surface per-host skill notes on go/explore (op
 VIBATCHIUM_PLUGINS=0            # disable plugin discovery at daemon startup
 VIBATCHIUM_AUTO_INSTALL=0       # disable one-time Chrome auto-install on first launch (offline/CI)
 VIBATCHIUM_DAEMON_IDLE_TIMEOUT=0  # seconds; >0 self-shuts an idle (0-session) daemon; 0/unset = disabled (default)
+VIBATCHIUM_IDLE_FREEZE=1        # lifecycle-freeze parked headless sessions (default on; 0 disables)
+VIBATCHIUM_IDLE_FREEZE_AFTER=90 # idle seconds before a parked session's pages freeze (default 90, min 5)
 VIBATCHIUM_LOG_FILE=<path>      # full daemon-log path (default: a persistent state dir, see below)
 VIBATCHIUM_LOG_MAX_BYTES=10485760 # rotate the daemon log past this size (0 = never rotate)
 VIBATCHIUM_LOG_BACKUPS=5        # how many rotated daemon-log backups to keep
