@@ -56,7 +56,17 @@ from pathlib import Path
 log = logging.getLogger("vibatchium.secrets")
 
 
-VAULT_PATH = Path.home() / ".config" / "vibatchium" / "secrets.enc"
+# `VIBATCHIUM_VAULT_PATH` relocates the vault. This exists so the TEST SUITE
+# can stop writing to the real user vault: conftest forces a fixed test
+# encryption key, and `save_vault` re-encrypts the WHOLE file under whatever
+# key is active — so a suite run against the default path silently re-keys a
+# real user's vault and makes every existing entry permanently undecryptable.
+# Unique per-test site names (the previous mitigation) do not help, because the
+# damage is to the file's key, not to the entries.
+VAULT_PATH = Path(
+    os.environ.get("VIBATCHIUM_VAULT_PATH")
+    or Path.home() / ".config" / "vibatchium" / "secrets.enc"
+)
 KEY_SERVICE = "vibatchium"
 KEY_ACCOUNT = "secrets-key"
 ENV_KEY = "VIBATCHIUM_SECRETS_KEY"

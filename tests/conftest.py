@@ -60,6 +60,15 @@ def _daemon_lifecycle():
     # tests can encrypt/decrypt. Real users use keyring or their own env value.
     import base64 as _b64
     os.environ["VIBATCHIUM_SECRETS_KEY"] = _b64.b64encode(b"\x02" * 32).decode()
+    # ...and point the vault somewhere disposable. The key above is FIXED, and
+    # save_vault re-encrypts the whole file under the active key, so running
+    # the suite against the default ~/.config/vibatchium/secrets.enc silently
+    # re-keys the user's real vault and makes every pre-existing entry
+    # permanently undecryptable. Per-test unique site names never fixed this —
+    # the damage is to the file's key, not to the entries.
+    os.environ["VIBATCHIUM_VAULT_PATH"] = str(
+        Path(tempfile.mkdtemp(prefix="vbtest-vault-")) / "secrets.enc"
+    )
     # ensure no prior daemon is around
     if daemon_is_running():
         try:
