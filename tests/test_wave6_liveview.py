@@ -37,6 +37,17 @@ def _stop_lv():
         pass
 
 
+def _tok(res):
+    """Pull the watch token out of a liveview_start/url response.
+
+    Every endpoint is token-gated (CSWSH defence), and the token is ephemeral
+    per server, so tests read it back off the returned link rather than
+    hardcoding one.
+    """
+    from urllib.parse import urlparse, parse_qs
+    return parse_qs(urlparse(res["url"]).query)["token"][0]
+
+
 def test_liveview_requires_aiohttp_installed():
     """aiohttp is in our test venv; if not, the start call must error clearly."""
     try:
@@ -85,10 +96,11 @@ def test_liveview_refuses_public_bind_without_flag():
 def test_liveview_index_lists_running_sessions(local_server):
     """The / page should mention the default session that's running from conftest."""
     _stop_lv()
-    _start_lv()
+    res = _start_lv()
     try:
         import urllib.request
-        with urllib.request.urlopen(f"http://127.0.0.1:{PORT}/sessions.json", timeout=2) as r:
+        url = f"http://127.0.0.1:{PORT}/sessions.json?token={_tok(res)}"
+        with urllib.request.urlopen(url, timeout=2) as r:
             data = json.loads(r.read())
         names = [s["name"] for s in data["sessions"]]
         assert "default" in names
@@ -98,13 +110,15 @@ def test_liveview_index_lists_running_sessions(local_server):
 
 def test_liveview_viewer_404s_for_unknown_session():
     _stop_lv()
-    _start_lv()
+    res = _start_lv()
     try:
         import urllib.request
         import urllib.error
+        # Token must be present, else this 403s before it can 404.
         with pytest.raises(urllib.error.HTTPError) as exc:
-            urllib.request.urlopen(f"http://127.0.0.1:{PORT}/viewer/no-such-session",
-                                   timeout=2)
+            urllib.request.urlopen(
+                f"http://127.0.0.1:{PORT}/viewer/no-such-session?token={_tok(res)}",
+                timeout=2)
         assert exc.value.code == 404
     finally:
         _stop_lv()
@@ -134,12 +148,12 @@ def test_liveview_websocket_streams_frames(local_server):
     _stop_lv()
     # navigate first so the screenshot has actual content
     call("go", {"url": f"{local_server}/simple.html"})
-    _start_lv({"fps": 20})
+    res = _start_lv({"fps": 20})
     try:
         from aiohttp import ClientSession, WSMsgType
 
         async def collect():
-            url = f"http://127.0.0.1:{PORT}/ws/default"
+            url = f"http://127.0.0.1:{PORT}/ws/default?token={_tok(res)}"
             frames = 0
             hello_seen = False
             async with ClientSession() as cs:
@@ -173,12 +187,12 @@ def test_liveview_frames_are_jpeg(local_server):
     """Verify the binary frames are actually JPEG (start with FF D8 FF)."""
     _stop_lv()
     call("go", {"url": f"{local_server}/simple.html"})
-    _start_lv({"fps": 10})
+    res = _start_lv({"fps": 10})
     try:
         from aiohttp import ClientSession, WSMsgType
 
         async def get_one():
-            url = f"http://127.0.0.1:{PORT}/ws/default"
+            url = f"http://127.0.0.1:{PORT}/ws/default?token={_tok(res)}"
             async with ClientSession() as cs:
                 async with cs.ws_connect(url) as ws:
                     deadline = time.time() + 2.0

@@ -1579,10 +1579,13 @@ def register_extra(daemon) -> None:
         """
         if getattr(d, "_liveview_server", None) is not None:
             srv = d._liveview_server
-            return {"already_running": True,
-                    "url": srv.url(),
-                    "host": srv.host, "port": srv.port,
-                    "takeover": srv.takeover, "fps": srv.fps}
+            out = {"already_running": True,
+                   "url": srv.url(),
+                   "host": srv.host, "port": srv.port,
+                   "takeover": srv.takeover, "fps": srv.fps}
+            if srv.control_token:
+                out["control_url"] = srv.url(control=True)
+            return out
         from ..liveview import LiveViewServer
         host = args.get("host", "127.0.0.1")
         port = int(args.get("port", 9223))
@@ -1599,8 +1602,13 @@ def register_extra(daemon) -> None:
                              jpeg_quality=jpeg_quality, takeover=takeover)
         await srv.start()
         d._liveview_server = srv
-        return {"started": True, "url": srv.url(),
-                "host": host, "port": port, "takeover": takeover, "fps": fps}
+        out = {"started": True, "url": srv.url(),
+               "host": host, "port": port, "takeover": takeover, "fps": fps}
+        if srv.control_token:
+            # Two links: `url` streams frames read-only, `control_url` also
+            # forwards input. Hand out the watch link unless input is wanted.
+            out["control_url"] = srv.url(control=True)
+        return out
 
     @daemon.handler("liveview_stop")
     async def _liveview_stop(d, args):
@@ -1623,8 +1631,11 @@ def register_extra(daemon) -> None:
         if not d.registry.has(name):
             return {"running": True, "url": srv.url(), "session_url": None,
                     "note": f"no session {name!r} — pass a name or start one"}
-        return {"running": True, "url": srv.url(),
-                "session_url": srv.url(name)}
+        out = {"running": True, "url": srv.url(),
+               "session_url": srv.url(name)}
+        if srv.control_token:
+            out["session_control_url"] = srv.url(name, control=True)
+        return out
 
     # ─── Wave 6.3d: vision-first primitive ───────────────────────────────
 

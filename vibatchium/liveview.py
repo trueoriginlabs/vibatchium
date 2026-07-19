@@ -14,7 +14,21 @@ Endpoints (default port 9223, bound to 127.0.0.1):
 
 Security: binds 127.0.0.1 by default. `--bind 0.0.0.0` requires the explicit
 `--insecure-public` flag because exposing this on a LAN gives whoever connects
-full control of your browser. No auth — local-only by design.
+full control of your browser.
+
+Loopback is NOT sufficient auth on its own. WebSockets are exempt from the
+same-origin policy and from CORS preflight, so any page the operator happens to
+load in their ORDINARY browser can open `ws://127.0.0.1:<port>/ws/<session>` —
+session names are guessable — and read frames from a session logged into their
+real accounts, or drive input into it when takeover is on. Every endpoint
+therefore requires a per-server ephemeral token (`?token=`, the same shape
+`rest.py` uses because browsers cannot set an Authorization header on a
+WebSocket), and the WS upgrade additionally rejects any request carrying a
+foreign `Origin`. Tokens live and die with the server; they are never persisted.
+
+Takeover is a SEPARATE grant: `token` streams frames read-only, `control_token`
+(minted only when the server is started with takeover) is what unlocks input.
+So a watch-only link can be handed out without also handing over the keyboard.
 
 Threading: the frame loop does NOT acquire `entry.lock` because Playwright's
 `page.screenshot()` is safe to call concurrently with other CDP operations
@@ -30,6 +44,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import secrets
 from collections import defaultdict
 from typing import TYPE_CHECKING
 
@@ -68,8 +83,12 @@ INDEX_HTML = """<!doctype html>
 <p class="meta">Running sessions (auto-refresh every 5s):</p>
 <ul id="sessions"></ul>
 <script>
+// Carry this page's token onto the API call and the per-session links.
+const TOKEN = new URLSearchParams(location.search).get('token') || '';
+const Q = TOKEN ? ('?token=' + encodeURIComponent(TOKEN)) : '';
+
 async function refresh() {
-  const r = await fetch('/sessions.json');
+  const r = await fetch('/sessions.json' + Q);
   const data = await r.json();
   const ul = document.getElementById('sessions');
   if (data.sessions.length === 0) {
@@ -77,7 +96,7 @@ async function refresh() {
     return;
   }
   ul.innerHTML = data.sessions.map(s =>
-    `<li><a href="/viewer/${s.name}">${s.name}</a> <span class="tag">${s.backend || 'patchright'}</span> <span class="meta">${s.url || '(blank)'}</span></li>`
+    `<li><a href="/viewer/${s.name}${Q}">${s.name}</a> <span class="tag">${s.backend || 'patchright'}</span> <span class="meta">${s.url || '(blank)'}</span></li>`
   ).join('');
 }
 refresh();
@@ -110,6 +129,9 @@ VIEWER_HTML = """<!doctype html>
 <script>
 const NAME = {name_json};
 const TAKEOVER = {takeover};
+// The link IS the credential — carry the token from this page's URL onto the
+// socket. Browsers cannot set an Authorization header on a WebSocket.
+const TOKEN = new URLSearchParams(location.search).get('token') || '';
 const img = document.getElementById('frame');
 const status = document.getElementById('status');
 let ws;
@@ -120,7 +142,7 @@ let currentBlobUrl = null;
 
 function connect() {{
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  ws = new WebSocket(`${{proto}}://${{location.host}}/ws/${{NAME}}`);
+  ws = new WebSocket(`${{proto}}://${{location.host}}/ws/${{NAME}}?token=${{encodeURIComponent(TOKEN)}}`);
   ws.binaryType = 'arraybuffer';
 
   ws.onopen = () => {{
@@ -232,13 +254,19 @@ class LiveViewServer:
 
     def __init__(self, registry: SessionRegistry, *, host: str = "127.0.0.1",
                  port: int = 9223, fps: int = 5, jpeg_quality: int = 60,
-                 takeover: bool = False) -> None:
+                 takeover: bool = False, token: str | None = None) -> None:
         self.registry = registry
         self.host = host
         self.port = port
         self.fps = fps
         self.jpeg_quality = jpeg_quality
         self.takeover = takeover
+        # Watch token: required by EVERY endpoint. Ephemeral — regenerated per
+        # server, never written to disk (unlike the REST shim's persisted one).
+        self.token = token or secrets.token_urlsafe(32)
+        # Control token: minted ONLY in takeover mode. Holding `token` streams
+        # frames but cannot send input, so a read-only link is safe to share.
+        self.control_token = secrets.token_urlsafe(32) if takeover else None
         self.app = None
         self.runner = None
         self.site = None
@@ -299,18 +327,64 @@ class LiveViewServer:
         self.app = None
         log.info("live-view stopped")
 
-    def url(self, session_name: str | None = None) -> str:
+    def url(self, session_name: str | None = None, *, control: bool = False) -> str:
+        """Viewer URL WITH the token embedded — the link is the credential.
+
+        `control=True` returns the takeover link (only distinct when the server
+        was started in takeover mode); otherwise the watch-only link.
+        """
+        tok = self.control_token if (control and self.control_token) else self.token
         base = f"http://{self.host}:{self.port}"
-        return f"{base}/viewer/{session_name}" if session_name else base
+        path = f"{base}/viewer/{session_name}" if session_name else f"{base}/"
+        return f"{path}?token={tok}"
+
+    # ─── auth ───────────────────────────────────────────────────────
+
+    def _origin_ok(self, request) -> bool:
+        """Reject a WS upgrade carrying a FOREIGN Origin.
+
+        A browser always sets Origin on a cross-site WebSocket, so this is what
+        actually stops the drive-by. A non-browser client (curl, our tests, a
+        script) sends no Origin at all — and cannot be a CSWSH vector, since
+        the attack requires a page running in the victim's browser — so an
+        absent Origin is allowed.
+        """
+        origin = request.headers.get("Origin")
+        if origin is None:
+            return True
+        allowed = {
+            f"http://{self.host}:{self.port}",
+            f"http://127.0.0.1:{self.port}",
+            f"http://localhost:{self.port}",
+            f"http://[::1]:{self.port}",
+        }
+        return origin in allowed
+
+    def _grant(self, request) -> str | None:
+        """'control' | 'watch' | None for this request's `?token=`."""
+        tok = request.query.get("token", "")
+        if not tok:
+            return None
+        if self.control_token and secrets.compare_digest(tok, self.control_token):
+            return "control"
+        if secrets.compare_digest(tok, self.token):
+            return "watch"
+        return None
 
     # ─── HTTP handlers ──────────────────────────────────────────────
 
     async def _handle_index(self, request):
         from aiohttp import web
+        if self._grant(request) is None:
+            return web.Response(text="forbidden — missing or bad ?token=", status=403)
         return web.Response(text=INDEX_HTML, content_type='text/html')
 
     async def _handle_sessions_json(self, request):
         from aiohttp import web
+        # Session names are the guessable half of a /ws/<name> URL — do not
+        # enumerate them to an unauthenticated caller.
+        if self._grant(request) is None:
+            return web.json_response({"error": "forbidden"}, status=403)
         sessions = []
         for name in self.registry.list_running():
             entry = self.registry.get(name)
@@ -330,14 +404,29 @@ class LiveViewServer:
     async def _handle_viewer(self, request):
         from aiohttp import web
         name = request.match_info['name']
+        grant = self._grant(request)
+        if grant is None:
+            return web.Response(text="forbidden — missing or bad ?token=", status=403)
         if not self.registry.has(name):
             return web.Response(text=f"no session {name!r}", status=404)
-        return web.Response(text=_render_viewer(name, self.takeover),
+        # Only a control-token viewer renders the input-forwarding JS.
+        return web.Response(text=_render_viewer(name, self.takeover and grant == "control"),
                             content_type='text/html')
 
     async def _handle_ws(self, request):
         from aiohttp import web, WSMsgType
         name = request.match_info['name']
+        # AUTH BEFORE prepare(): once the handshake completes the socket is
+        # live and frames start flowing, so the check has to happen here.
+        if not self._origin_ok(request):
+            log.warning("liveview: rejected ws upgrade for %s — foreign Origin %r",
+                        name, request.headers.get("Origin"))
+            return web.Response(text="forbidden — bad Origin", status=403)
+        grant = self._grant(request)
+        if grant is None:
+            log.warning("liveview: rejected ws upgrade for %s — missing/bad token", name)
+            return web.Response(text="forbidden — missing or bad ?token=", status=403)
+        can_control = (grant == "control")
         if not self.registry.has(name):
             return web.Response(text="no session", status=404)
 
@@ -362,7 +451,7 @@ class LiveViewServer:
                 "type": "hello",
                 "viewport_width": vp.get("width", 1280),
                 "viewport_height": vp.get("height", 720),
-                "takeover": self.takeover,
+                "takeover": self.takeover and can_control,
             })
         except Exception as exc:  # noqa: BLE001
             log.warning("liveview hello failed for %s: %s", name, exc)
@@ -375,7 +464,9 @@ class LiveViewServer:
         try:
             async for msg in ws:
                 if msg.type == WSMsgType.TEXT:
-                    if self.takeover:
+                    # Server must be in takeover mode AND this connection must
+                    # hold the control token — a watch grant is inert.
+                    if self.takeover and can_control:
                         await self._handle_takeover(name, msg.data)
                 elif msg.type == WSMsgType.ERROR:
                     log.warning("ws error for %s: %s", name, ws.exception())

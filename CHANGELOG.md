@@ -4,6 +4,40 @@ All notable changes to vibatchium are documented here. Versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Until 1.0,
 minor bumps may include breaking changes; we'll always call them out here.
 
+## [0.16.1] — 2026-07-20
+
+### Security: the live-view WebSocket is authenticated (CSWSH)
+
+Live-view bound to loopback and treated that as sufficient — the module said
+so in as many words ("No auth — local-only by design"). It isn't. WebSockets
+are exempt from the same-origin policy and from CORS preflight, so **any page
+the operator happened to load in their ordinary browser could open
+`ws://127.0.0.1:9223/ws/<session>`** — session names are guessable — and read
+frames from a session logged into their real accounts, or drive clicks and
+keystrokes into it whenever the daemon had been started with `--takeover`.
+`/sessions.json` handed out the session names to enumerate.
+
+Every endpoint (`/`, `/sessions.json`, `/viewer/<name>`, `/ws/<name>`) now
+requires a per-server token supplied as `?token=` — the same shape `rest.py`
+already uses, because a browser cannot set an `Authorization` header on a
+WebSocket. The token is `secrets.token_urlsafe(32)`, minted at server start
+and **never written to disk** (unlike the REST shim's persisted token), so it
+dies with the server. The WS upgrade additionally rejects any request carrying
+a foreign `Origin`, checked *before* `ws.prepare()` — a request with no Origin
+at all is allowed, since that is a non-browser client and CSWSH structurally
+requires a victim's browser.
+
+Takeover is now a **separate grant** rather than a server-wide mode. A server
+started with `takeover: true` mints a second `control_token`; the plain token
+streams frames read-only and its input messages are ignored. `liveview_start`
+and `liveview_url` return both links (`url`, `control_url`), so a watch-only
+link can be shared without also handing over the keyboard.
+
+Verified against a live daemon: an anonymous connect, a foreign-Origin
+connect, and a foreign-Origin connect *holding a valid token* are all refused
+403; a valid token streams real JPEG frames; a watch-only connection cannot
+move the page.
+
 ## [0.16.0] — 2026-07-15
 
 ### Idle-freeze: parked sessions can no longer burn the box (default-on)
