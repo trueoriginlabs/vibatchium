@@ -4,6 +4,42 @@ All notable changes to vibatchium are documented here. Versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Until 1.0,
 minor bumps may include breaking changes; we'll always call them out here.
 
+## [0.16.3] — 2026-07-20
+
+### Security: vault secrets no longer readable off screenshots
+
+`fill --use-secret` was careful that the resolved value never reached the
+response, the daemon log or any cache — and then rendered it as plain text in
+the page. Several paths turn the viewport into bytes that leave the process:
+the `screenshot` verb, the tiles lane, explore's fallback shot, live-view
+frames, and `vision_*`, which **POSTs the PNG to the Anthropic API**. Password
+inputs render as dots, so the exposure was on ordinary text fields — which is
+exactly where TOTP codes, recovery codes and API keys go.
+
+The field is now masked **in the page** at fill time
+(`-webkit-text-security: disc`, set with `important` so a site stylesheet
+cannot override it) rather than post-processing PNG bytes at each call site.
+One mechanism covers every current and future screenshot path, and costs
+nothing per frame on the 5fps live-view loop. Only the *rendering* changes —
+`el.value` is untouched, so forms still submit the real secret. `fill` returns
+`render_masked` (`masked` / `password` / `failed`), and an explicit plaintext
+`fill` on the same element clears the mask.
+
+Proven without OCR: filling two different secrets of the *same length*
+produces byte-identical screenshots, where the unmasked control produces
+different ones.
+
+### Tests no longer re-key the user's real vault
+
+`VAULT_PATH` now honours `VIBATCHIUM_VAULT_PATH`, and conftest points the
+suite at a temp file. Previously the suite wrote to the real
+`~/.config/vibatchium/secrets.enc` under a **fixed test key**, and because
+`save_vault` re-encrypts the whole file under the active key, one suite run
+would silently re-key a real user's vault and make every existing entry
+permanently undecryptable. Unique per-test site names — the previous
+mitigation — never addressed this, because the damage is to the file's key,
+not to its entries. Same class as the 0.16.0 conftest daemon-socket fix.
+
 ## [0.16.2] — 2026-07-20
 
 ### vision_click no longer bypasses humanize

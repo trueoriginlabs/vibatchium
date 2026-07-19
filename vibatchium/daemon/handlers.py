@@ -192,6 +192,54 @@ def _resolve_target(daemon, target: str):
     return elements.resolve_target(s.page, daemon._snapshot, target)
 
 
+# ─── secret-render masking (0.16.3) ──────────────────────────────────────
+#
+# A vault secret filled into an ordinary text input renders as readable text,
+# and several paths turn the viewport into bytes that leave the process — the
+# `screenshot` verb, tiles, explore's fallback shot, live-view frames, and
+# `vision_*`, which POSTs the PNG to a third-party API. Masking at the point
+# of the fill covers all of them at once and costs nothing per frame.
+#
+# `-webkit-text-security: disc` is what Chrome uses to render a password
+# input. It changes only the RENDERING — `el.value` is untouched, so the form
+# still submits the real secret. Set with `important` so a site's own
+# stylesheet cannot override it back to visible.
+
+_MASK_JS = """el => {
+  if (el.type === 'password') return 'password';   // already dots
+  try {
+    el.style.setProperty('-webkit-text-security', 'disc', 'important');
+    el.setAttribute('data-vb-secret', '1');
+    return 'masked';
+  } catch (e) { return 'failed'; }
+}"""
+
+_UNMASK_JS = """el => {
+  if (el.getAttribute && el.getAttribute('data-vb-secret')) {
+    el.style.removeProperty('-webkit-text-security');
+    el.removeAttribute('data-vb-secret');
+  }
+}"""
+
+
+async def _mask_secret_render(loc):
+    """Hide a just-filled secret from every screenshot path. Returns the
+    outcome ('masked' | 'password' | 'failed' | 'error') — never the value."""
+    try:
+        return await loc.evaluate(_MASK_JS)
+    except Exception:  # noqa: BLE001
+        # Masking is defence in depth; never fail the fill over it. The caller
+        # sees the outcome in `render_masked` and can decide.
+        return "error"
+
+
+async def _unmask_secret_render(loc):
+    try:
+        await loc.evaluate(_UNMASK_JS)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 async def _resolve_action_target(daemon, args):
     """Resolve ``args['target']`` to a Locator, applying an optional ``index``
     (0.15.0 disambiguation): with ``index=N`` the action targets the Nth match
@@ -2385,7 +2433,22 @@ def register_all(daemon) -> None:
     async def _fill(d, args):
         """Fill an input. Wave 6.3a: `use_secret: 'site:key'` resolves the
         secret from the vault at fill time. The resolved value NEVER appears
-        in the response, the daemon log, or any cache."""
+        in the response, the daemon log, or any cache.
+
+        0.16.3: it no longer appears in SCREENSHOTS either. Keeping the value
+        out of the response was only half the problem — a secret typed into an
+        ordinary (non-password) field renders as plain text, and we take
+        screenshots on several paths that egress: `screenshot`, the tiles
+        lane, explore's fallback shot, live-view frames, and `vision_*`, which
+        POSTs the PNG to the Anthropic API. So the field is masked IN THE PAGE
+        at fill time (`-webkit-text-security: disc`, the same rendering a
+        password input gets) rather than post-processing PNG bytes at each
+        call site: one mechanism, every current and future screenshot path
+        covered, and no per-frame cost on the 5fps live-view loop.
+
+        The DOM VALUE is untouched, so the form still submits correctly — only
+        the rendering changes.
+        """
         loc = await _resolve_action_target(d, args)
         if args.get("use_secret"):
             from .. import secrets as _secrets
@@ -2393,8 +2456,13 @@ def register_all(daemon) -> None:
             value = _secrets.resolve_secret_reference(ref)
             # Use a plain fill but mask the value from any logging
             await loc.fill(value, timeout=int(args.get("timeout_ms", 30_000)))
-            return {"filled": args["target"], "from_secret": ref}
+            masked = await _mask_secret_render(loc)
+            return {"filled": args["target"], "from_secret": ref,
+                    "render_masked": masked}
         await loc.fill(args["text"], timeout=int(args.get("timeout_ms", 30_000)))
+        # Explicitly overwriting with caller-supplied plaintext clears a mask
+        # left by an earlier secret fill — the caller knows this value.
+        await _unmask_secret_render(loc)
         return {"filled": args["target"]}
 
     @daemon.handler("type")
