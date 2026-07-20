@@ -29,7 +29,7 @@ dependencies = [
     # changes APIs we depend on. Bump these floors+ceilings deliberately,
     # not implicitly via uv lock.
     # NB: 1.59.0 was never published — the 1.59 line starts at 1.59.1.
-    "patchright>=1.59.1,<1.61",  # <1.61 until 1.61 clears the stealth gate (see tests/test_stealth_drift_gate.py)
+    "patchright>=1.59.1,<1.62",  # <1.62 until 1.62 clears the stealth gate (see tests/test_stealth_drift_gate.py)
     "click>=8.1.7,<9.0",
     "mcp>=1.0.0,<2.0",
 ]

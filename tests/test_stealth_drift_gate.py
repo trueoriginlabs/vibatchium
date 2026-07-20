@@ -26,7 +26,18 @@ import pytest
 # (major, minor) Patchright releases whose stealth posture has been verified
 # against test_wave7_stealth_gate.py. Bump deliberately after re-running that
 # suite — NOT implicitly via a lockfile refresh.
-_VETTED_PATCHRIGHT = {(1, 59), (1, 60)}
+#
+# (1, 61) added 2026-07-20 against patchright 1.61.2, vetted the way this
+# docstring demands rather than by inspection:
+#   - test_wave7_stealth_gate.py (the posture suite): 16 passed
+#   - full suite in a throwaway venv on 1.61.2: 1014 passed, 1 skipped
+#     (this gate deselected — it fails on an unvetted minor by construction)
+#   - CONTROL, same venv downgraded to 1.60.1: identical results
+# The control matters: an earlier vetting attempt showed ~79 failures that
+# looked like engine regressions and were entirely a broken harness
+# (pytest-asyncio absent). Swapping the version back reproduced the failures
+# exactly, which is what proved 1.61.2 innocent.
+_VETTED_PATCHRIGHT = {(1, 59), (1, 60), (1, 61)}
 
 
 def test_patchright_version_is_vetted():
