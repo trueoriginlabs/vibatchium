@@ -41,6 +41,20 @@ if _real_rt and os.path.isdir(_real_rt):
 os.environ["XDG_RUNTIME_DIR"] = _iso_rt
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp(prefix="vbtest-st-")
 
+# Vault isolation MUST run BEFORE any vibatchium import (same as SOCK_PATH above):
+# secrets.py freezes VAULT_PATH from this env at import time, and the fixed test key
+# re-keys the WHOLE vault file on every save. If VAULT_PATH froze to the real
+# ~/.config/vibatchium/secrets.enc (because the env was set later, in a fixture body),
+# an in-process test that imports secrets and calls set_secret would re-encrypt the
+# user's real vault under the test key and make every existing entry permanently
+# undecryptable. Setting it here — before pytest collects any test module — makes that
+# impossible in the test PROCESS, not just the daemon subprocess.
+import base64 as _b64
+os.environ["VIBATCHIUM_SECRETS_KEY"] = _b64.b64encode(b"\x02" * 32).decode()
+os.environ["VIBATCHIUM_VAULT_PATH"] = str(
+    Path(tempfile.mkdtemp(prefix="vbtest-vault-")) / "secrets.enc"
+)
+
 import pytest
 
 from vibatchium.client import call, daemon_is_running, spawn_daemon
@@ -56,19 +70,9 @@ def _daemon_lifecycle():
     # extra Chromes and confuse process-counting assertions. Tests that need
     # warm behavior set the env explicitly inside the test.
     os.environ["VIBATCHIUM_WARM"] = "off"
-    # Wave 6.3a: provide a deterministic test vault key so daemon-level vault
-    # tests can encrypt/decrypt. Real users use keyring or their own env value.
-    import base64 as _b64
-    os.environ["VIBATCHIUM_SECRETS_KEY"] = _b64.b64encode(b"\x02" * 32).decode()
-    # ...and point the vault somewhere disposable. The key above is FIXED, and
-    # save_vault re-encrypts the whole file under the active key, so running
-    # the suite against the default ~/.config/vibatchium/secrets.enc silently
-    # re-keys the user's real vault and makes every pre-existing entry
-    # permanently undecryptable. Per-test unique site names never fixed this —
-    # the damage is to the file's key, not to the entries.
-    os.environ["VIBATCHIUM_VAULT_PATH"] = str(
-        Path(tempfile.mkdtemp(prefix="vbtest-vault-")) / "secrets.enc"
-    )
+    # The fixed test vault key + disposable vault path are set at MODULE TOP (before
+    # any vibatchium import) so secrets.VAULT_PATH can't freeze to the real vault in
+    # the test process. See the block above the `import pytest` line.
     # ensure no prior daemon is around
     if daemon_is_running():
         try:

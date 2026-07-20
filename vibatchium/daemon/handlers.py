@@ -206,11 +206,15 @@ def _resolve_target(daemon, target: str):
 # stylesheet cannot override it back to visible.
 
 _MASK_JS = """el => {
-  if (el.type === 'password') return 'password';   // already dots
   try {
+    // Apply the disc mask UNCONDITIONALLY, including type=password. Native password
+    // dots vanish the instant a show-password toggle flips type=text, and the mask was
+    // never set — leaking the value on every screenshot path. -webkit-text-security on
+    // a password field is harmless (still dots) and survives the type flip. data-vb-secret
+    // also makes the AX-snapshot redaction cover password fields.
     el.style.setProperty('-webkit-text-security', 'disc', 'important');
     el.setAttribute('data-vb-secret', '1');
-    return 'masked';
+    return el.type === 'password' ? 'password' : 'masked';
   } catch (e) { return 'failed'; }
 }"""
 
@@ -220,6 +224,36 @@ _UNMASK_JS = """el => {
     el.removeAttribute('data-vb-secret');
   }
 }"""
+
+# The pixel mask (-webkit-text-security) hides a secret from SCREENSHOTS, but the DOM
+# value is untouched (so the form still submits) and the accessibility snapshot renders
+# it inline — so `map`/`diff_map` text would carry the plaintext secret straight into the
+# tool response / model. This pulls the live value of every masked field so we can strip
+# it from any snapshot/diff text before it egresses (0.16.3 masked pixels only).
+_SECRET_VALUES_JS = """() => {
+  const out = [];
+  for (const el of document.querySelectorAll('[data-vb-secret]')) {
+    if (el && el.value) out.push(el.value);
+  }
+  return out;
+}"""
+
+
+async def _redact_secret_values(surface, text: str) -> str:
+    """Strip any masked-secret VALUE out of snapshot/diff text before it leaves the
+    daemon. Targeted (only `data-vb-secret` field values), so non-secret input values in
+    `map` are unaffected. Best-effort: if the surface can't be evaluated we return the
+    text unchanged (the pixel mask still covers every screenshot path)."""
+    if not text:
+        return text
+    try:
+        vals = await surface.evaluate(_SECRET_VALUES_JS)
+    except Exception:  # noqa: BLE001
+        return text
+    for v in vals or []:
+        if v:
+            text = text.replace(v, "«secret»")
+    return text
 
 
 async def _mask_secret_render(loc):
@@ -2349,10 +2383,11 @@ def register_all(daemon) -> None:
         snap = await elements.take_snapshot(surface, depth=depth)
         d._prev_snapshot = d._snapshot
         d._snapshot = snap
+        text = snap.text(indent=bool(args.get("indent", True)))
         return {
             "url": snap.url,
             "count": len(snap.refs),
-            "text": snap.text(indent=bool(args.get("indent", True))),
+            "text": await _redact_secret_values(surface, text),
         }
 
     @daemon.handler("diff_map")
@@ -2363,7 +2398,7 @@ def register_all(daemon) -> None:
         new = await elements.take_snapshot(surface)
         d._prev_snapshot = prev
         d._snapshot = new
-        return {"text": elements.diff(prev, new)}
+        return {"text": await _redact_secret_values(surface, elements.diff(prev, new))}
 
     @daemon.handler("click")
     async def _click(d, args):

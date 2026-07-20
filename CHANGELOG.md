@@ -4,6 +4,33 @@ All notable changes to vibatchium are documented here. Versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Until 1.0,
 minor bumps may include breaking changes; we'll always call them out here.
 
+## [0.18.5] — 2026-07-20
+
+### security: close residual holes in the 0.16.x secret + vault fixes (found by review)
+
+A fresh-eyes adversarial review of the still-unpublished 0.16–0.17 stack found the
+secret-safety fixes had gaps that egress a live credential:
+
+- **Accessibility-snapshot leak (critical).** `-webkit-text-security` masks only the
+  PIXELS; the DOM value is intact (so the form still submits), and `map`/`diff_map`
+  return the aria snapshot, which renders a filled field's value inline. So
+  `fill --use-secret` followed by a routine `map` put the live secret straight into the
+  tool response — forwarded to the model, no OCR needed — fully bypassing the screenshot
+  mask. `map`/`diff_map` now strip the live value of every masked field from their text.
+- **Password-field leak (high).** The mask skipped `type=password`, trusting native
+  dots — but a show-password toggle flips the field to `type=text` and the value then
+  renders in cleartext (the mask was never applied). The disc mask is now applied to
+  password fields too (harmless — still dots — and toggle-proof), and they get
+  `data-vb-secret` so the snapshot redaction covers them.
+- **In-process vault re-key (high).** `secrets.VAULT_PATH` freezes from the env at
+  import, but conftest set the redirect in a fixture body — after collection had already
+  imported `secrets` — so an in-process test could still re-key the real vault under the
+  fixed test key and destroy it. The redirect (and test key) now set at conftest module
+  top, before any vibatchium import, with a guard test.
+
+Regression tests added: a secret is absent from `map`/`diff_map`, survives a
+show-password toggle, and `secrets.VAULT_PATH` resolves under a temp dir.
+
 ## [0.18.4] — 2026-07-20
 
 ### oracle: hardening from a fresh-eyes review

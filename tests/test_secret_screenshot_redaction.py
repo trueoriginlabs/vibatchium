@@ -128,6 +128,49 @@ def test_masking_survives_a_hostile_stylesheet(page, vault):
     assert a == b, "a site stylesheet was able to unmask the secret"
 
 
+def test_secret_is_redacted_from_the_accessibility_map(page, vault):
+    """The pixel mask hides the value from SCREENSHOTS, but map/diff_map return the
+    accessibility snapshot, which renders a filled field's value inline — so a masked
+    secret would still egress in cleartext in the tool response (forwarded to the
+    model). The value must be stripped from the snapshot + diff text."""
+    _build(FIELD)
+    call("fill", {"target": "#f", "use_secret": f"{vault}:a"})
+    m = call("map", {})["text"]
+    assert "AAAAAAAAAAAA" not in m, "secret leaked in the map (accessibility) response"
+    _build(FIELD)
+    call("fill", {"target": "#f", "use_secret": f"{vault}:b"})
+    dm = call("diff_map", {})["text"]
+    assert "BBBBBBBBBBBB" not in dm, "secret leaked in the diff_map response"
+
+
+def test_secret_survives_a_show_password_toggle(page, vault):
+    """A show-password 'eye' flips type=password -> text; native dots vanish. The disc
+    mask must be applied to password fields too (unconditionally) so the value stays
+    hidden after the flip. Two different secrets -> identical pixels iff still masked."""
+    _build(PW)
+    call("fill", {"target": "#f", "use_secret": f"{vault}:a"})
+    call("eval", {"expr": "document.getElementById('f').type='text';1"})
+    a = _shot_sha()
+    _build(PW)
+    call("fill", {"target": "#f", "use_secret": f"{vault}:b"})
+    call("eval", {"expr": "document.getElementById('f').type='text';1"})
+    b = _shot_sha()
+    assert a == b, "show-password toggle revealed the secret — the mask was not " \
+                   "applied to the password field"
+
+
+def test_vault_path_is_isolated_from_the_real_vault():
+    """Guard: the suite must never resolve secrets.VAULT_PATH to the real
+    ~/.config/vibatchium/secrets.enc — the fixed test key would re-key it and destroy
+    every real entry. The conftest module-top isolation must have frozen it to a temp
+    file at import (this is a pure assertion — no daemon needed)."""
+    import tempfile
+    from vibatchium import secrets
+    vp = str(secrets.VAULT_PATH)
+    assert "vbtest-vault-" in vp or vp.startswith(tempfile.gettempdir()), vp
+    assert not vp.endswith(".config/vibatchium/secrets.enc"), vp
+
+
 def test_plain_fill_clears_a_previous_mask(page, vault):
     """Explicitly overwriting with caller-supplied plaintext un-masks — the
     caller already knows that value, and a permanently dotted field would be
