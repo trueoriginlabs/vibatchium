@@ -171,6 +171,48 @@ def test_vault_path_is_isolated_from_the_real_vault():
     assert not vp.endswith(".config/vibatchium/secrets.enc"), vp
 
 
+def test_secret_is_masked_before_its_value_is_written(page, vault):
+    """0.18.6: the disc mask is applied to the EMPTY field FIRST, then the value
+    is written — so a concurrent screenshot / 5fps live-view frame can never
+    catch the plaintext in a gap (the old order filled, THEN masked a CDP
+    round-trip later). An in-page input listener records — synchronously, at the
+    moment the value is first written — whether the mask attribute is already
+    present. 'yes' proves mask-first; 'no' would be the plaintext window."""
+    _build(FIELD)
+    call("eval", {"expr": (
+        "const el=document.getElementById('f');"
+        "el.addEventListener('input',function(){"
+        " if(el.value && !el.hasAttribute('data-vb-write-seen')){"
+        "  el.setAttribute('data-vb-write-seen','1');"
+        "  el.setAttribute('data-vb-masked-at-write',"
+        "   el.hasAttribute('data-vb-secret')?'yes':'no');}});1")})
+    call("fill", {"target": "#f", "use_secret": f"{vault}:a"})
+    at_write = call("eval", {"expr":
+                    "document.getElementById('f')"
+                    ".getAttribute('data-vb-masked-at-write')"})["value"]
+    assert at_write == "yes", (
+        "secret value was written before the mask was applied — plaintext "
+        f"window open to screenshots/live-view (recorded={at_write!r})")
+
+
+def test_secret_fill_leaves_the_field_masked_and_submittable(page, vault):
+    """End state after a use_secret fill: the value reached the DOM (form still
+    submits) but the field renders masked and is tagged for snapshot redaction —
+    and the re-assert never reports a soft-failure (it fails closed instead)."""
+    import json
+    _build(FIELD)
+    res = call("fill", {"target": "#f", "use_secret": f"{vault}:a"})
+    assert res["render_masked"] in ("masked", "password")
+    st = json.loads(call("eval", {"expr":
+        "JSON.stringify({v:document.getElementById('f').value,"
+        "sec:document.getElementById('f').hasAttribute('data-vb-secret'),"
+        "ts:getComputedStyle(document.getElementById('f')).webkitTextSecurity})"
+        })["value"])
+    assert st["v"] == "AAAAAAAAAAAA"     # value intact — form still submits
+    assert st["sec"] is True             # tagged for AX-snapshot redaction
+    assert st["ts"] == "disc"            # rendered masked
+
+
 def test_plain_fill_clears_a_previous_mask(page, vault):
     """Explicitly overwriting with caller-supplied plaintext un-masks — the
     caller already knows that value, and a permanently dotted field would be

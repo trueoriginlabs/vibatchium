@@ -59,6 +59,43 @@ def test_meaningful_params_still_separate_entries():
            _cache_key("https://x.com/p", "go")
 
 
+def test_hash_router_routes_are_separate_entries():
+    """0.18.6: hash-router SPA views live under `#/…` / `#!/…` on one
+    scheme+host+path. Dropping the fragment collapsed them to one key, so
+    `act` on `#/invoices` could HIT the plan cached for `#/orders` and replay
+    its durable selector on the wrong view."""
+    from vibatchium.daemon.observe import _cache_key
+    assert _cache_key("https://app.x.com/#/orders", "click New") != \
+           _cache_key("https://app.x.com/#/invoices", "click New")
+    assert _cache_key("https://app.x.com/#!/orders", "click New") != \
+           _cache_key("https://app.x.com/#!/invoices", "click New")
+    # a route also differs from the bare path
+    assert _cache_key("https://app.x.com/#/orders", "click New") != \
+           _cache_key("https://app.x.com/", "click New")
+
+
+def test_scroll_anchor_fragment_still_collapses():
+    """A `#section` scroll anchor does NOT select content, so it must still
+    share one entry (the hit-rate win) — unlike a `#/route`."""
+    from vibatchium.daemon.observe import _cache_key
+    base = _cache_key("https://x.com/p", "go")
+    assert _cache_key("https://x.com/p#section", "go") == base
+    assert _cache_key("https://x.com/p#footer", "go") == base
+
+
+def test_ref_param_is_content_selecting_and_no_longer_stripped():
+    """0.18.6: bare `ref` selects content on real sites (GitHub
+    `?ref=<branch>`) — stripping it collapsed distinct pages. It stays in the
+    key now; the unambiguous referral/campaign markers are still dropped."""
+    from vibatchium.daemon.observe import _cache_key
+    assert _cache_key("https://github.com/o/r?ref=main", "open") != \
+           _cache_key("https://github.com/o/r?ref=dev", "open")
+    base = _cache_key("https://x.com/p", "go")
+    assert _cache_key("https://x.com/p?ref_src=twsrc", "go") == base
+    assert _cache_key("https://x.com/p?referrer=foo", "go") == base
+    assert _cache_key("https://x.com/p?source=newsletter", "go") == base
+
+
 def test_intent_still_separates_entries():
     from vibatchium.daemon.observe import _cache_key
     assert _cache_key("https://x.com/p", "buy") != _cache_key("https://x.com/p", "sell")

@@ -155,6 +155,24 @@ class Daemon:
         "explore",
     })
 
+    # 0.18.6 idle-freeze fix: the UNLOCKED verbs that DRIVE this session's
+    # renderer (wait on a selector/ref/url/load-state/function, or the explore
+    # orchestrator). They need the renderer RUNNING, but the idle-freezer only
+    # thaws on the LOCKED verb path — so a wait issued against a parked
+    # (SIGSTOPped) session, or one that crosses the idle threshold mid-wait,
+    # would stall on a stopped renderer. For these, the dispatcher thaws first
+    # and marks the session in-flight (see below). Deliberately EXCLUDED:
+    # `sleep` (asyncio.sleep — no renderer), `wait_email_code` (IMAP poll on a
+    # worker thread — no renderer), `wait_response` (coexists with the LOCKED
+    # action that triggers the response, which thaws) — freezing a renderer
+    # during any of those is harmless and keeps CPU-relief working; and
+    # `ping`/`status`/`verify_url`/`set_log_verbs` (no session, or `status`
+    # must report `idle_frozen` truthfully without thawing).
+    PAGE_WAIT_VERBS = frozenset({
+        "wait_selector", "wait_ref", "wait_url", "wait_load", "wait_fn",
+        "explore",
+    })
+
     # Wave 7.7.5: verbs that can auto-start a session when one isn't
     # running yet. The dispatcher's "no session" rejection is bypassed for
     # these — they handle the missing-session case themselves (typically
@@ -481,8 +499,36 @@ class Daemon:
                 async with self.registry.mutate_lock:
                     result = await self._handlers[cmd](self, args)
             elif lock_class == "unlocked":
-                # Cheap reads + waits — no lock.
-                result = await self._handlers[cmd](self, args)
+                # Cheap reads + waits — no lock. But the page-driving waits
+                # (and explore) need this session's renderer RUNNING: the
+                # idle-freezer only thaws on the LOCKED verb path
+                # (_run_session_verb_with_recovery), so a wait against a parked
+                # session — or one that crosses the idle threshold mid-wait —
+                # would stall on a SIGSTOPped renderer (0.18.6 fix).
+                if cmd in self.PAGE_WAIT_VERBS:
+                    # get() also stamps activity, so the wait's own start
+                    # resets the idle clock (a bare wait used to inherit the
+                    # PRIOR verb's timestamp and freeze mid-wait).
+                    entry = self.registry.get(session_name)
+                    if entry is not None:
+                        # Bump BEFORE the frozen check so the freezer — which
+                        # also consults inflight — can't slip a SIGSTOP in.
+                        entry.inflight += 1
+                        try:
+                            if entry.frozen:
+                                # Uncontended when frozen (no verb holds the
+                                # lock — that's WHY it froze), so this acquires
+                                # instantly and never serializes the wait
+                                # behind a concurrent locked action.
+                                async with entry.lock:
+                                    await _freeze.lift(entry)
+                            result = await self._handlers[cmd](self, args)
+                        finally:
+                            entry.inflight -= 1
+                    else:
+                        result = await self._handlers[cmd](self, args)
+                else:
+                    result = await self._handlers[cmd](self, args)
             else:
                 # Session-scoped verb — needs the per-session lock so concurrent
                 # mutations on the SAME session don't trash session.page / snapshot.
@@ -757,33 +803,43 @@ class Daemon:
         log.info("idle-freeze armed: after=%.0fs poll=%.0fs", after, poll)
         while not self._stopping.is_set():
             await asyncio.sleep(poll)
-            now = time.time()
             for name in self.registry.list_running():
-                # peek(), NOT get() — get() stamps activity and would reset
-                # the idle clock this loop is measuring.
-                entry = self.registry.peek(name)
-                if entry is None or not _freeze.eligible(entry):
-                    continue
-                if now - entry.last_used_at < after:
-                    continue
-                if entry.lock.locked():
-                    continue  # verb in flight — not idle
-                async with entry.lock:
-                    # Re-check under the lock: a verb may have just finished
-                    # (fresh activity) or be the reason the lock was held.
-                    idle_for = time.time() - entry.last_used_at
-                    if idle_for < after:
-                        continue
-                    try:
-                        fresh = await _freeze.apply(entry)
-                    except Exception:  # noqa: BLE001 — never kill the loop
-                        log.exception("idle-freeze: apply failed session=%s",
-                                      name)
-                        continue
-                    if fresh:
-                        log.info("idle-freeze: froze session=%s "
-                                 "(%d renderer(s), idle %.0fs)",
-                                 name, fresh, idle_for)
+                await self._freeze_if_idle(name, after)
+
+    async def _freeze_if_idle(self, name: str, after: float) -> int:
+        """One session's idle-freeze decision, factored out of the poll loop so
+        it's unit-testable. Returns renderers newly SIGSTOPped (0 = skipped or
+        none found). Never raises."""
+        # peek(), NOT get() — get() stamps activity and would reset the idle
+        # clock this loop is measuring.
+        entry = self.registry.peek(name)
+        if entry is None or not _freeze.eligible(entry):
+            return 0
+        if time.time() - entry.last_used_at < after:
+            return 0
+        if entry.lock.locked():
+            return 0  # locked verb in flight — not idle
+        if entry.inflight > 0:
+            return 0  # unlocked page-wait in flight (0.18.6) — not idle
+        async with entry.lock:
+            # Re-check under the lock: a verb may have just finished (fresh
+            # activity) or be the reason the lock was held.
+            idle_for = time.time() - entry.last_used_at
+            if idle_for < after:
+                return 0
+            if entry.inflight > 0:
+                # Raced a page-wait dispatch that bumped inflight after our
+                # guard above — leave the renderer running (0.18.6).
+                return 0
+            try:
+                fresh = await _freeze.apply(entry)
+            except Exception:  # noqa: BLE001 — never kill the loop
+                log.exception("idle-freeze: apply failed session=%s", name)
+                return 0
+            if fresh:
+                log.info("idle-freeze: froze session=%s "
+                         "(%d renderer(s), idle %.0fs)", name, fresh, idle_for)
+            return fresh
 
     async def run(self) -> None:
         # 0.9.1: race-free singleton — hold an exclusive flock for life.

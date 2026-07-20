@@ -283,7 +283,11 @@ _TRACKING_PARAMS = frozenset({
     "mc_cid", "mc_eid",                                # Mailchimp
     "_hsenc", "_hsmi", "hsCtaTracking",                # HubSpot
     "yclid", "_openstat",                              # Yandex
-    "ref", "ref_src", "referrer", "source",
+    # 0.18.6: dropped bare "ref" — it is CONTENT-SELECTING on real sites
+    # (GitHub `?ref=<branch>`, many "?ref=<page>" deep-links), so stripping it
+    # collapsed genuinely-distinct pages to one cache key. The unambiguous
+    # referral markers below stay.
+    "ref_src", "referrer", "source",
 })
 
 
@@ -292,8 +296,17 @@ def _normalize_url(url: str) -> str:
 
     Drops tracking params and sorts what remains, so links to the same page
     that differ only in campaign tagging or param ORDER share one entry.
-    The fragment goes too — it never reaches the server and does not change
-    which elements a plan targets.
+
+    0.18.6: a hash-ROUTE fragment (`#/orders`, `#!/invoices`) is KEPT. Client
+    hash-router SPAs put distinct app VIEWS under `#/…`/`#!/…` on one
+    scheme+host+path; dropping the fragment collapsed them to a single cache
+    key, so `act(intent)` on `#/invoices` could HIT the plan cached for
+    `#/orders` and replay its durable role+name selector on the wrong view
+    (silent — cache_status=hit, no error). A scroll-anchor fragment
+    (`#section`) is still dropped — it doesn't select content, and keeping the
+    collapse preserves the hit-rate win. (urlsplit strips the leading `#`, so a
+    route reads as `/…` or `!…`. Slashless hash routes like `#orders` remain
+    indistinguishable from anchors and still collapse — an accepted residual.)
 
     Deliberately conservative: everything that is not a known tracking key is
     KEPT, because `?id=42` or `?page=3` genuinely selects a different page and
@@ -305,8 +318,9 @@ def _normalize_url(url: str) -> str:
         kept = [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True)
                 if k.lower() not in _TRACKING_PARAMS]
         kept.sort()
+        frag = parts.fragment if parts.fragment.startswith(("/", "!")) else ""
         return urlunsplit((parts.scheme, parts.netloc, parts.path,
-                           urlencode(kept), ""))
+                           urlencode(kept), frag))
     except Exception:  # noqa: BLE001
         return url
 

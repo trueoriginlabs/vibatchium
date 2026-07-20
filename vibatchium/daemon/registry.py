@@ -308,6 +308,12 @@ class SessionEntry:
     # before running any verb; close() thaws before Chrome teardown.
     frozen: bool = False
     freeze_pids: list = field(default_factory=list)
+    # 0.18.6 idle-freeze fix: count of in-flight UNLOCKED page-driving verbs
+    # (wait_selector/…/explore) that need this session's renderer running but
+    # don't hold entry.lock. The idle-freezer skips a session with inflight>0
+    # so it can't SIGSTOP the renderer out from under an active wait. Plain int
+    # — safe under single-threaded asyncio (inc/dec never straddle an await).
+    inflight: int = 0
 
     def touch(self) -> None:
         self.last_used_at = time.time()

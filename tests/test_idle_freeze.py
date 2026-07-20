@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import signal
+import time
 import types
 from pathlib import Path
 
@@ -236,3 +237,114 @@ def test_peek_does_not_touch(monkeypatch):
     assert e.last_used_at == before
     d.registry.get("t")
     assert e.last_used_at >= before
+
+
+# ─── 0.18.6: unlocked page-wait / eval-verb thaw + inflight guard ─────────
+#
+# Bug: UNLOCKED page-driving verbs (wait_selector/…/explore) and the eval-based
+# registry verbs (gpu_info/geo_info) ran WITHOUT thawing a parked session, so a
+# wait or probe issued against a SIGSTOPped renderer stalled/wedged. The
+# dispatcher now thaws + marks the session in-flight for page-waits, the
+# freezer skips an in-flight session, and the eval verbs thaw before probing.
+
+def test_page_wait_verb_thaws_and_marks_inflight(monkeypatch):
+    monkeypatch.delenv("VIBATCHIUM_SELF_HEAL", raising=False)
+    fake = _wire(monkeypatch, {100: 5000})
+    d, e = _make_daemon_entry(monkeypatch)
+    asyncio.run(freeze.apply(e))
+    assert e.frozen
+    seen = {}
+
+    async def probe(daemon, args):
+        # Observed from INSIDE the wait: the renderer must already be thawed,
+        # and the session marked in-flight so the freezer leaves it alone.
+        seen["frozen"] = e.frozen
+        seen["inflight"] = e.inflight
+        return {"waited": True}
+
+    d._handlers["wait_selector"] = probe
+    out = asyncio.run(d.dispatch(
+        {"cmd": "wait_selector", "args": {"_session": "t"}, "id": "1"}))
+    assert out["ok"] and out["result"] == {"waited": True}
+    assert seen["frozen"] is False        # thawed before the wait ran
+    assert seen["inflight"] == 1          # in-flight during the wait
+    assert (100, signal.SIGCONT) in fake.signals
+    assert e.inflight == 0 and not e.frozen   # cleaned up after
+
+
+def test_page_wait_verb_stamps_the_idle_clock(monkeypatch):
+    # A bare wait used to inherit the PRIOR verb's timestamp, so a long wait
+    # could be frozen mid-flight; get() at dispatch now resets the clock.
+    _wire(monkeypatch, {100: 5000})
+    d, e = _make_daemon_entry(monkeypatch)
+    e.last_used_at = time.time() - 999
+
+    async def probe(daemon, args):
+        return {"waited": True}
+
+    d._handlers["wait_selector"] = probe
+    asyncio.run(d.dispatch(
+        {"cmd": "wait_selector", "args": {"_session": "t"}, "id": "1"}))
+    assert time.time() - e.last_used_at < 5
+
+
+def test_freezer_freezes_an_idle_session(monkeypatch):
+    fake = _wire(monkeypatch, {100: 5000})
+    d, e = _make_daemon_entry(monkeypatch)
+    e.last_used_at = time.time() - 999
+    fresh = asyncio.run(d._freeze_if_idle("t", after=5.0))
+    assert fresh == 1 and e.frozen
+    assert (100, signal.SIGSTOP) in fake.signals
+
+
+def test_freezer_skips_a_session_with_an_inflight_wait(monkeypatch):
+    fake = _wire(monkeypatch, {100: 5000})
+    d, e = _make_daemon_entry(monkeypatch)
+    e.last_used_at = time.time() - 999
+    e.inflight = 1                       # a page-wait is running unlocked
+    fresh = asyncio.run(d._freeze_if_idle("t", after=5.0))
+    assert fresh == 0 and not e.frozen
+    assert fake.signals == []            # renderer NOT SIGSTOPped
+
+
+def test_freezer_skips_a_recently_used_session(monkeypatch):
+    fake = _wire(monkeypatch, {100: 5000})
+    d, e = _make_daemon_entry(monkeypatch)
+    e.last_used_at = time.time()         # fresh activity
+    fresh = asyncio.run(d._freeze_if_idle("t", after=5.0))
+    assert fresh == 0 and not e.frozen and fake.signals == []
+
+
+def test_eval_verb_thaws_before_probing_the_page(monkeypatch):
+    # geo_info/gpu_info hold BOTH mutate_lock and entry.lock while
+    # page.evaluate (untimed) runs; on a frozen renderer that hung forever and
+    # wedged the whole daemon. They must thaw first.
+    fake = _wire(monkeypatch, {100: 5000})
+    d, e = _make_daemon_entry(monkeypatch)
+    seen = {}
+
+    async def fake_eval(expr):
+        seen["frozen_at_eval"] = e.frozen
+        return {"tz": "UTC", "offset": 0}
+
+    e.session.page = types.SimpleNamespace(url="about:blank", evaluate=fake_eval)
+    asyncio.run(freeze.apply(e))
+    assert e.frozen
+    out = asyncio.run(d.dispatch(
+        {"cmd": "geo_info", "args": {"_session": "t"}, "id": "1"}))
+    assert out["ok"]
+    assert seen.get("frozen_at_eval") is False   # thawed before the probe
+    assert (100, signal.SIGCONT) in fake.signals
+
+
+def test_non_page_wait_verbs_are_excluded_from_the_thaw_set():
+    # Guard the boundary: sleep/wait_email_code/wait_response don't touch the
+    # renderer (so freezing during them is fine), status must report truthfully
+    # without thawing, and the page-driving waits ARE covered.
+    from vibatchium.daemon.server import Daemon
+    for v in ("wait_selector", "wait_ref", "wait_url", "wait_load",
+              "wait_fn", "explore"):
+        assert v in Daemon.PAGE_WAIT_VERBS
+    for v in ("sleep", "wait_email_code", "wait_response", "status", "ping",
+              "verify_url", "set_log_verbs"):
+        assert v in Daemon.UNLOCKED_VERBS and v not in Daemon.PAGE_WAIT_VERBS

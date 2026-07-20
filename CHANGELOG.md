@@ -4,6 +4,46 @@ All notable changes to vibatchium are documented here. Versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Until 1.0,
 minor bumps may include breaking changes; we'll always call them out here.
 
+## [0.18.6] — 2026-07-20
+
+### fixes: idle-freeze concurrency, cache-key collisions, secret-mask timing, lockfile drift (found by review)
+
+The broad review of the unpublished 0.16–0.17 stack flagged four non-credential
+mediums. Each was deep-investigated and adversarially verified against the tree
+before fixing:
+
+- **idle-freeze could stall or wedge a live session — and the feature defaults
+  ON, so this was live, not latent.** The idle-freezer SIGSTOPs a parked
+  session's renderer and the dispatcher thaws it — but only on the *locked*
+  verb path. Unlocked page-driving waits (`wait_selector` / `wait_ref` /
+  `wait_url` / `wait_load` / `wait_fn` / `explore`) ran without thawing, so a
+  wait issued against a parked session (or one crossing the idle threshold
+  mid-wait) stalled on a stopped renderer; and `gpu_info` / `geo_info` ran an
+  untimed `page.evaluate` on a frozen renderer while holding *both* the registry
+  and per-session locks, hanging the whole daemon. The dispatcher now thaws and
+  marks those waits in-flight (the freezer skips an in-flight session), and the
+  eval verbs thaw before probing. (The `close`/freeze "orphaned Chrome" race the
+  review also flagged does **not** reproduce — `close` pops the entry before any
+  await and the freezer's decision is atomic — so nothing was needed there.)
+- **Cache served the wrong SPA route.** `observe`'s cache-key normalizer dropped
+  the URL fragment unconditionally, so hash-router views (`#/orders` vs
+  `#/invoices`) collapsed to one key and `act` could replay a durable selector
+  on the wrong view — silently (`cache_status=hit`, no error). Route-like
+  fragments (`#/…`, `#!/…`) are now kept; scroll anchors (`#section`) still
+  collapse (the hit-rate win). Also stopped stripping the bare `ref` param — it
+  selects content on real sites (GitHub `?ref=<branch>`).
+- **Secret mask had a plaintext window and failed open.** `fill --use-secret`
+  wrote the value, *then* masked it a CDP round-trip later, so a concurrent
+  screenshot / 5fps live-view frame could catch the plaintext; and a mask
+  failure returned success with the value left visible. The mask is now applied
+  to the **empty** field first (so it renders masked from the first paint) and
+  fails **closed** — the secret is never written, or is cleared, if the mask
+  cannot be confirmed.
+- **`uv.lock` was stale.** It disagreed with the `patchright` pin (and still
+  named the 0.6.10-era root version and lacked the `fetch` / curl_cffi extra),
+  so `uv lock --check` failed. Regenerated — `patchright` stays pinned at
+  1.60.0 and the venv is untouched.
+
 ## [0.18.5] — 2026-07-20
 
 ### security: close residual holes in the 0.16.x secret + vault fixes (found by review)

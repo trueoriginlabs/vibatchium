@@ -6,6 +6,7 @@ BrowserSession for most verbs; lifecycle verbs (start/attach/stop/status) are ex
 from __future__ import annotations
 
 import base64
+import contextlib
 import logging
 import os
 import shlex
@@ -13,6 +14,7 @@ import time
 from pathlib import Path
 
 from . import elements
+from . import freeze as _freeze
 from . import lease as _lease
 from .paths import (
     CACHE_DIR, DEFAULT_SESSION_NAME, PROFILES_DIR, get_active_session_name,
@@ -1037,6 +1039,12 @@ def register_all(daemon) -> None:
             # session verbs never acquire mutate_lock while holding entry.lock.
             try:
                 async with entry.lock:
+                    # 0.18.6: thaw a parked (idle-frozen) session before probing
+                    # its live page — page.evaluate has no timeout, so on a
+                    # SIGSTOPped renderer it would hang forever holding BOTH
+                    # mutate_lock and entry.lock and wedge the whole daemon
+                    # (session_close, another registry verb, would block too).
+                    await _freeze.lift(entry)
                     live = await entry.session.page.evaluate(
                         "() => ({tz: Intl.DateTimeFormat().resolvedOptions().timeZone,"
                         " offset: new Date().getTimezoneOffset()})")
@@ -1129,6 +1137,10 @@ def register_all(daemon) -> None:
             # Live renderer probe — same lock discipline as geo_info.
             try:
                 async with entry.lock:
+                    # 0.18.6: thaw first — an idle-frozen renderer would hang
+                    # this (untimed) evaluate forever under both locks. See
+                    # geo_info.
+                    await _freeze.lift(entry)
                     r = await entry.session.page.evaluate(WEBGL_PROBE)
                 out["renderer"] = r.get("renderer")
                 out["renderer_vendor"] = r.get("vendor")
@@ -2489,11 +2501,37 @@ def register_all(daemon) -> None:
             from .. import secrets as _secrets
             ref = args["use_secret"]
             value = _secrets.resolve_secret_reference(ref)
-            # Use a plain fill but mask the value from any logging
-            await loc.fill(value, timeout=int(args.get("timeout_ms", 30_000)))
+            timeout = int(args.get("timeout_ms", 30_000))
+            # 0.18.6: mask the EMPTY field FIRST, then write the value — so the
+            # secret renders as discs from its first paint. The old order
+            # (fill → mask, a separate CDP round-trip) left a window in which
+            # the plaintext was in the DOM and painted but not yet masked; the
+            # live-view frame loop (5fps, deliberately holds no per-session
+            # lock) or a concurrent screenshot could capture it. It also failed
+            # OPEN — a mask-eval error still returned success with the value
+            # left visible AND untagged (so the AX-snapshot redaction stopped
+            # covering it too). Now we fail CLOSED: no plaintext is written
+            # unless the mask is confirmed.
             masked = await _mask_secret_render(loc)
+            if masked not in ("masked", "password"):
+                raise RuntimeError(
+                    f"refusing to fill secret: render mask not applied "
+                    f"({masked}); the value would be visible")
+            await loc.fill(value, timeout=timeout)
+            # Re-assert after the write: a framework (React/Vue controlled
+            # input) can replace the node during fill, dropping the pre-applied
+            # mask; re-running the mask re-covers the final node. If even that
+            # can't be confirmed, clear the field rather than leave a rendered
+            # secret behind.
+            recheck = await _mask_secret_render(loc)
+            if recheck not in ("masked", "password"):
+                with contextlib.suppress(Exception):
+                    await loc.fill("")
+                raise RuntimeError(
+                    f"refusing to leave secret unmasked: render mask lost "
+                    f"after fill ({recheck}); cleared the field")
             return {"filled": args["target"], "from_secret": ref,
-                    "render_masked": masked}
+                    "render_masked": recheck}
         await loc.fill(args["text"], timeout=int(args.get("timeout_ms", 30_000)))
         # Explicitly overwriting with caller-supplied plaintext clears a mask
         # left by an earlier secret fill — the caller knows this value.
