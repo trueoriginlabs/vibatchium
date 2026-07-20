@@ -2841,7 +2841,7 @@ def oracle():
 @click.option("--baseline", "baseline_path", default=None, type=click.Path(),
               help="Recorded operator baseline JSON ({feature: [samples]}). Its "
                    "p5-p95 supersedes the literature band per feature.")
-@click.option("--out", "out_path", default=None, type=click.Path())
+@click.option("-o", "--out", "out_path", default=None, type=click.Path())
 @click.option("--json", "as_json", is_flag=True, help="Emit JSON not markdown.")
 def oracle_run(headless, baseline_path, out_path, as_json):
     """Run the behavioural oracle and emit an OFF-vs-ON feature table."""
@@ -2858,6 +2858,62 @@ def oracle_run(headless, baseline_path, out_path, as_json):
         click.echo(f"wrote {out_path}", err=True)
     else:
         click.echo(output)
+
+
+@oracle.command("record")
+@click.option("--out", "out_path", default="oracle-record.html", type=click.Path(),
+              help="Where to write the recorder page (open it in your real browser).")
+@click.option("--clicks", default=20, type=int, help="click trials to record")
+@click.option("--type-lines", "type_lines", default=8, type=int,
+              help="typing trials to record")
+@click.option("--scrolls", default=8, type=int, help="scroll trials to record")
+def oracle_record(out_path, clicks, type_lines, scrolls):
+    """Write the human mouse-baseline recorder page.
+
+    The baseline can't come through the daemon — CDP input is what we measure
+    against. Open the page in YOUR browser with a real mouse, do the guided tasks,
+    download oracle-trials.json, then `vb oracle ingest` it into a baseline.
+    """
+    from . import oracle as _oracle
+
+    p = _oracle.write_record_page(out_path, n_clicks=clicks, n_type=type_lines,
+                                  n_scroll=scrolls)
+    click.echo(f"wrote {p}", err=True)
+    click.echo(
+        f"Open it in your real browser (real mouse — not the daemon):\n"
+        f"  file://{p.resolve()}\n"
+        f"Do the {clicks} click / {type_lines} type / {scrolls} scroll tasks, download "
+        f"oracle-trials.json, then:\n"
+        f"  vb oracle ingest oracle-trials.json -o baseline.json\n"
+        f"  vb oracle run --baseline baseline.json")
+
+
+@oracle.command("ingest")
+@click.argument("trials_file", type=click.Path(exists=True))
+@click.option("-o", "--out", "out_path", default="baseline.json", type=click.Path(),
+              help="Where to write the {feature: [samples]} baseline JSON.")
+def oracle_ingest(trials_file, out_path):
+    """Aggregate a recorded oracle-trials.json into a baseline for `--baseline`."""
+    from . import oracle as _oracle
+    from pathlib import Path as _P
+
+    raw = json.loads(_P(trials_file).read_text())
+    trials = raw.get("trials", raw) if isinstance(raw, dict) else raw
+    if not isinstance(trials, list) or not trials:
+        raise click.UsageError(f"{trials_file} has no trials")
+    samples = _oracle.aggregate_trials(trials)
+    _P(out_path).write_text(json.dumps(samples, indent=2))
+    counts = samples.get("_meta", {}).get("trial_counts", {})
+    feat_lines = [f"{k} (n={len(v)})" for k, v in sorted(samples.items())
+                  if not k.startswith("_") and isinstance(v, list)]
+    click.echo(f"wrote {out_path} from trials {counts}", err=True)
+    for line in feat_lines:
+        click.echo(f"  {line}", err=True)
+    thin = [line for k, v in samples.items() if isinstance(v, list) and len(v) < 5
+            for line in [k]]
+    if thin:
+        click.echo(f"note: {', '.join(thin)} have <5 samples — those keep the "
+                   f"literature band (load_baseline needs ≥5 to overlay).", err=True)
 
 
 # ─── Wave 6.2b: humanization ─────────────────────────────────────────────

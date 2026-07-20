@@ -595,3 +595,205 @@ def render_json(rows: list[dict]) -> str:
         "baseline": "literature-default",
         "generated_at": time.time(),
     }, indent=2)
+
+
+# ─── human baseline recorder (real mouse, real browser) ──────────────────────
+#
+# The baseline that turns the literature bands into MEASURED bands cannot come
+# through the daemon — CDP synthetic input is exactly what we're measuring against.
+# It has to be the operator driving their OWN browser with a real mouse (which is
+# also the only way to capture the raw pointer stream the gap is about). So we ship
+# a self-contained page: the operator opens it, does a guided set of click / type /
+# scroll trials, downloads the raw trials, and `vb oracle ingest` runs the SAME
+# extractor per trial and aggregates per-feature sample lists for `load_baseline`.
+
+# Which extracted feature each trial-kind contributes a sample of. Only these reach
+# the baseline; a 'type' trial has no meaningful dwell, a 'click' trial no cadence.
+_TRIAL_KIND_FEATURES = {
+    "click": ["n_moves", "straightness", "dwell_ms_mean", "move_dt_cv",
+              "decel_ratio", "peak_speed_px_ms", "coalesced_max", "raw_pointer_events"],
+    "type": ["interkey_ms_mean", "interkey_ms_stdev"],
+    "scroll": ["scroll_steps"],
+}
+
+
+def aggregate_trials(trials: list[dict]) -> dict:
+    """Run `extract_features` over each recorded trial and collect per-feature sample
+    lists, keyed by feature. The result is exactly the `{feature: [samples]}` shape
+    `load_baseline()` overlays as p5–p95 bands. Pure. A `_meta` key records trial
+    counts (ignored by `load_baseline`, which only touches known score features)."""
+    samples: dict[str, list] = {}
+    counts: dict[str, int] = {}
+    for tr in trials:
+        if not isinstance(tr, dict):
+            continue
+        kind = tr.get("kind")
+        counts[kind] = counts.get(kind, 0) + 1
+        feats = extract_features(tr)
+        for feat in _TRIAL_KIND_FEATURES.get(kind, []):
+            val = feats.get(feat)
+            if val is not None:
+                samples.setdefault(feat, []).append(val)
+    samples["_meta"] = {"trial_counts": counts, "n_trials": len(trials)}
+    return samples
+
+
+_RECORD_PAGE_TEMPLATE = r"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>vb oracle — mouse baseline recorder</title>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: system-ui, sans-serif; line-height: 1.5; }
+  #hud { position: fixed; inset: 0 0 auto 0; padding: 10px 16px; background: Canvas;
+         border-bottom: 1px solid GrayText; z-index: 10; font-size: 15px; }
+  #hud b { color: Highlight; }
+  #stage { position: relative; min-height: 100vh; }
+  #target { position: absolute; width: 46px; height: 46px; border-radius: 50%;
+            background: #3b82f6; cursor: pointer; display: none;
+            box-shadow: 0 0 0 6px rgba(59,130,246,.25); }
+  .panel { display: none; padding: 72px 24px 24px; max-width: 680px; }
+  #phrase { font-size: 22px; margin: 14px 0; user-select: none; letter-spacing: .3px; }
+  #tin { font-size: 19px; width: 100%; padding: 9px; }
+  .filler { height: 240vh; display: flex; align-items: flex-end; }
+  button { font-size: 16px; padding: 11px 20px; cursor: pointer; }
+  code { background: rgba(128,128,128,.2); padding: 2px 6px; border-radius: 5px; }
+</style></head>
+<body>
+<div id="hud">vb oracle · mouse baseline recorder — <span id="status">loading…</span></div>
+<div id="stage">
+  <div id="target"></div>
+  <div id="typepanel" class="panel">
+    <p>Type each line exactly, then press <b>Enter</b>. Type at your natural pace.</p>
+    <div id="phrase"></div>
+    <input id="tin" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
+  </div>
+  <div id="scrollpanel" class="panel">
+    <p>Scroll down the way you normally would and click <b>Continue</b> at the bottom.</p>
+    <div class="filler"><button id="contBtn">Continue</button></div>
+  </div>
+  <div id="donepanel" class="panel">
+    <h2>Done — thank you.</h2>
+    <p>Download the recording, then from the repo run:</p>
+    <p><code>vb oracle ingest oracle-trials.json -o baseline.json</code><br>
+       <code>vb oracle run --baseline baseline.json</code></p>
+    <button id="dl">Download oracle-trials.json</button>
+  </div>
+</div>
+<!-- DOM mirror of the export so an isolated-world eval (Patchright) or any
+     automated harness can read the trials without the download button -->
+<textarea id="vbo-export" style="display:none" aria-hidden="true"></textarea>
+<script>__INSTRUMENT__</script>
+<script>
+(() => {
+  const N_CLICKS = __N_CLICKS__, N_TYPE = __N_TYPE__, N_SCROLL = __N_SCROLL__;
+  const TRIALS = [];
+  window.__vboTrials = TRIALS;
+  window.__vboExport = () => JSON.stringify({trials: TRIALS, ua: navigator.userAgent});
+  const $ = (id) => document.getElementById(id);
+  const status = $('status');
+  const drain = () => { const d = (window.__vbo || []).slice();
+                        if (window.__vbo) window.__vbo.length = 0; return d; };
+  const push = (kind) => {
+    TRIALS.push({kind, events: drain()});
+    const ex = document.getElementById('vbo-export');  // cross-world DOM mirror
+    if (ex) ex.value = window.__vboExport();
+  };
+  const PHRASES = [
+    'the quick brown fox jumps over 13',
+    'pack my box with five dozen jugs',
+    'sphinx of black quartz judge my vow',
+    'how vexingly quick daft zebras jump',
+    'the five boxing wizards jump quickly',
+    'bright vixens jump; dozy fowl quack 7',
+    'jackdaws love my big sphinx of quartz',
+    'we promptly judged antique ivory buckles',
+    'a wizard’s job is to vex chumps quickly',
+    'crazy fredrick bought many exotic opals',
+  ];
+
+  // phase 1 — clicks (approach trajectory + dwell)
+  let clicks = 0;
+  const target = $('target');
+  const place = () => {
+    const m = 90, w = Math.max(50, innerWidth - m * 2), h = Math.max(50, innerHeight - m * 2 - 60);
+    target.style.left = (m + Math.random() * w) + 'px';
+    target.style.top = (m + 60 + Math.random() * h) + 'px';
+  };
+  const setStatus = (label, n, total) =>
+    status.innerHTML = label + ' <b>' + n + '/' + total + '</b>';
+  const startClicks = () => {
+    setStatus('Click the blue dot each time it moves.', 0, N_CLICKS);
+    target.style.display = 'block';
+    drain(); place();
+    target.addEventListener('pointerup', () => {
+      push('click'); clicks++;
+      setStatus('Click the blue dot each time it moves.', clicks, N_CLICKS);
+      if (clicks >= N_CLICKS) { target.style.display = 'none'; startType(); }
+      else place();
+    });
+  };
+
+  // phase 2 — typing (inter-key cadence)
+  let typed = 0;
+  const startType = () => {
+    $('typepanel').style.display = 'block';
+    const tin = $('tin'), phrase = $('phrase');
+    const next = () => { phrase.textContent = PHRASES[typed % PHRASES.length];
+                         tin.value = ''; tin.focus(); drain(); };
+    setStatus('Type each line + Enter.', 0, N_TYPE);
+    next();
+    tin.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter') return;
+      push('type'); typed++;
+      setStatus('Type each line + Enter.', typed, N_TYPE);
+      if (typed >= N_TYPE) { $('typepanel').style.display = 'none'; startScroll(); }
+      else next();
+    });
+  };
+
+  // phase 3 — scroll (wheel cadence)
+  let scrolls = 0;
+  const startScroll = () => {
+    $('scrollpanel').style.display = 'block';
+    setStatus('Scroll down + click Continue.', 0, N_SCROLL);
+    scrollTo(0, 0); drain();
+    $('contBtn').addEventListener('click', () => {
+      push('scroll'); scrolls++;
+      setStatus('Scroll down + click Continue.', scrolls, N_SCROLL);
+      if (scrolls >= N_SCROLL) { $('scrollpanel').style.display = 'none'; finish(); }
+      else { scrollTo(0, 0); drain(); }
+    });
+  };
+
+  const finish = () => {
+    status.textContent = 'complete — ' + TRIALS.length + ' trials recorded';
+    $('donepanel').style.display = 'block';
+    $('dl').addEventListener('click', () => {
+      const blob = new Blob([window.__vboExport()], {type: 'application/json'});
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob); a.download = 'oracle-trials.json'; a.click();
+    });
+  };
+
+  addEventListener('load', startClicks);
+})();
+</script>
+</body></html>"""
+
+
+def record_page_html(*, n_clicks: int = 20, n_type: int = 8, n_scroll: int = 8) -> str:
+    """The self-contained recorder page, with the SAME capture instrumentation the
+    live runner uses (single event schema) and the trial counts baked in."""
+    return (_RECORD_PAGE_TEMPLATE
+            .replace("__INSTRUMENT__", _INSTRUMENT_JS)
+            .replace("__N_CLICKS__", str(int(n_clicks)))
+            .replace("__N_TYPE__", str(int(n_type)))
+            .replace("__N_SCROLL__", str(int(n_scroll))))
+
+
+def write_record_page(path: str | Path, **counts: int) -> Path:
+    p = Path(path)
+    p.write_text(record_page_html(**counts))
+    return p

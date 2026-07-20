@@ -282,3 +282,113 @@ def test_run_oracle_contrast_and_gap(_daemon_lifecycle):
     # ephemeral session cleaned up
     live = {s["name"] for s in call("session_list")["sessions"]}
     assert not any(n.startswith("vibatchium_oracle_") for n in live)
+
+
+# ─── recorder: aggregate_trials + record page ────────────────────────────────
+
+def _click_trial(i):
+    events, t = [], 0.0
+    for k in range(12):
+        t += 8 + (k % 3)
+        events.append({"type": "pmove", "t": t, "x": 100 + k * 10,
+                       "y": 100 + k * 5, "co": 2, "ets": t})
+    t += 5
+    events.append({"type": "pdown", "t": t, "x": 220, "y": 160, "btn": 0,
+                   "sx": 1400, "cx": 220, "pxv": 220, "ets": t})
+    t += 80 + i * 4  # vary dwell so p5/p95 is a real range
+    events.append({"type": "pup", "t": t, "x": 220, "y": 160, "btn": 0, "ets": t})
+    return {"kind": "click", "events": events}
+
+
+def _type_trial(i):
+    events, t = [], float(i)
+    for k in range(15):
+        t += 90.0 + (30 if k % 2 else 5)
+        events.append({"type": "key", "t": t, "ets": t})
+    return {"kind": "type", "events": events}
+
+
+def _scroll_trial():
+    events, t = [], 0.0
+    for _ in range(9):
+        t += 16
+        events.append({"type": "wheel", "t": t, "dx": 0, "dy": 40, "ets": t})
+    return {"kind": "scroll", "events": events}
+
+
+def test_aggregate_trials_collects_per_feature_samples():
+    trials = ([_click_trial(i) for i in range(6)]
+              + [_type_trial(i) for i in range(6)]
+              + [_scroll_trial() for _ in range(6)])
+    agg = oracle.aggregate_trials(trials)
+    assert len(agg["dwell_ms_mean"]) == 6       # one dwell per click trial
+    assert len(agg["n_moves"]) == 6
+    assert len(agg["straightness"]) == 6
+    assert len(agg["interkey_ms_mean"]) == 6    # one per type trial, not click/scroll
+    assert len(agg["interkey_ms_stdev"]) == 6
+    assert len(agg["scroll_steps"]) == 6
+    assert agg["_meta"]["trial_counts"] == {"click": 6, "type": 6, "scroll": 6}
+    # cross-kind isolation: a click trial contributes no cadence, a type trial no dwell
+    assert "interkey_ms_mean" not in oracle.aggregate_trials([_click_trial(0)])
+    assert "dwell_ms_mean" not in oracle.aggregate_trials([_type_trial(0)])
+
+
+def test_aggregate_feeds_load_baseline(tmp_path):
+    agg = oracle.aggregate_trials([_click_trial(i) for i in range(8)])
+    f = tmp_path / "b.json"
+    f.write_text(json.dumps(agg))
+    base = oracle.load_baseline(f)
+    # dwell (8 samples) re-bands to the recorded operator's p5-p95
+    assert base["dwell_ms_mean"]["lo"] is not None
+    assert "recorded operator baseline" in base["dwell_ms_mean"]["source"]
+    # _meta must not crash the overlay or become a phantom feature
+    assert "_meta" not in base
+
+
+def test_record_page_is_self_contained_and_instrumented():
+    html = oracle.record_page_html(n_clicks=5, n_type=3, n_scroll=2)
+    assert html.strip().startswith("<!doctype html>")
+    assert "N_CLICKS = 5" in html and "N_TYPE = 3" in html and "N_SCROLL = 2" in html
+    assert "__INSTRUMENT__" not in html          # placeholder filled
+    assert "pointerrawupdate" in html            # SAME capture as the runner
+    assert "getCoalescedEvents" in html
+    assert "window.__vboExport" in html
+    # no external resources (CSP-free, opens from file://)
+    assert "http://" not in html and "https://" not in html
+    assert "src=" not in html
+
+
+def test_record_page_click_pipe(_daemon_lifecycle, tmp_path):
+    """Drive the record page's click phase via the daemon over file://, then export
+    and ingest — proving the page's state machine + drain + export + aggregate all
+    connect. (CDP clicks are synthetic, so values aren't human; we assert the pipe
+    produces the right per-feature sample counts, not human-ness.)"""
+    page = tmp_path / "rec.html"
+    page.write_text(oracle.record_page_html(n_clicks=3, n_type=2, n_scroll=2))
+    s = "vibatchium_oraclerec_test"
+    call("start", {"ephemeral": True, "headless": True}, session=s)
+    try:
+        # startClicks runs on the load event, so wait for load (not just DCL)
+        call("go", {"url": page.as_uri(), "wait_until": "load"}, session=s)
+        rect_js = ("(() => { const t=document.getElementById('target');"
+                   " const b=t.getBoundingClientRect();"
+                   " return {x:b.x+b.width/2, y:b.y+b.height/2,"
+                   " disp:getComputedStyle(t).display}; })()")
+        for _ in range(3):
+            r = call("eval", {"expr": rect_js}, session=s)["value"]
+            if r["disp"] == "none":
+                break
+            call("mouse", {"action": "click", "x": r["x"], "y": r["y"]}, session=s)
+        # read the cross-world DOM mirror (eval is isolated-world; can't see the
+        # page's main-world window.__vboExport, but DOM is shared)
+        export = call("eval", {"expr": "document.getElementById('vbo-export').value"},
+                      session=s)["value"]
+        trials = json.loads(export)["trials"]
+        assert len(trials) >= 3
+        assert all(t["kind"] == "click" for t in trials[:3])
+        agg = oracle.aggregate_trials(trials)
+        assert len(agg.get("dwell_ms_mean", [])) >= 3   # one dwell captured per click
+        assert len(agg.get("n_moves", [])) >= 3
+    finally:
+        call("session_close", {"name": s})
+        call("session_delete", {"name": s})

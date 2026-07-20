@@ -4,6 +4,29 @@ All notable changes to vibatchium are documented here. Versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Until 1.0,
 minor bumps may include breaking changes; we'll always call them out here.
 
+## [0.18.1] — 2026-07-20
+
+### `vb oracle record` / `ingest` — capture the human mouse baseline
+
+0.18.0 grades against literature bands, with the caveat that they are our *model*
+of human until a recorded operator baseline replaces them. This is that recorder.
+
+`vb oracle record` writes a self-contained page (the same capture instrumentation
+the live runner uses). You open it in your own browser — real mouse, **not** the
+daemon, because CDP input is exactly what we measure against and can't produce the
+raw pointer stream — and do a guided set of click, type and scroll trials. It
+downloads `oracle-trials.json`; `vb oracle ingest` runs the same extractor over each
+trial and aggregates per-feature sample lists, which `load_baseline()` overlays as
+p5–p95 bands. `vb oracle run --baseline baseline.json` then grades humanize against
+*you* instead of the literature.
+
+Mouse only, deliberately: humanize dispatches `pointerType="mouse"` and vibatchium
+has no touch/mobile emulation, so a trackpad baseline only widens the same
+mouse-family band and a touchscreen one would grade a modality we can't emit. The
+page mirrors its export into a hidden DOM node so an isolated-world eval (Patchright
+runs page scripts in the main world, evals in an isolated one) or any harness can
+read the trials without the download button.
+
 ## [0.18.0] — 2026-07-20
 
 ### `vb oracle` — a self-hosted behavioural oracle
