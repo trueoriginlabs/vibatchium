@@ -12,10 +12,14 @@ because:
 
 SCOPE (be honest): this improves trajectory + timing biometrics only. It still
 dispatches through `page.mouse`/`page.keyboard` over CDP `Input.*`, so every
-injected event keeps the CDP coordinate signature (`pageX==screenX`) and lacks
-the `CoalescedEvents` real hardware produces. It does NOT close that per-event
-signature — for walls that fingerprint it, the answer is attach-mode against a
-real headful Chrome (see README "Honest limits"), not synthetic input.
+injected event lacks the raw pointer stream real hardware produces: no
+`pointerrawupdate` events and no `CoalescedEvents` batched into each `pointermove`
+(both measured absent by the behavioural oracle — vibatchium/oracle.py). It does
+NOT close that per-event gap — for walls that fingerprint it, the answer is
+attach-mode against a real headful Chrome (see README "Honest limits"), not
+synthetic input. (The `pageX==screenX` coordinate tell once assumed here was
+measured NOT to fire: CDP input carries a real screen offset — see oracle.py
+`screen_eq_client`.)
 
 Pure functions (no Playwright dependency) — the orchestration in
 `_mouse` handler awaits these in a coroutine that drives Playwright APIs.
@@ -264,37 +268,71 @@ async def humanized_locator_approach(page, loc, *,
     return (tx, ty)
 
 
-def humanized_type_delays(n: int, *, mean_ms: float = 110, stdev_ms: float = 45,
-                          floor_ms: float = 25, ceiling_ms: float = 320,
+def humanized_type_delays(n: int, *, median_ms: float = 105, sigma: float = 0.5,
+                          floor_ms: float = 22, ceiling_ms: float = 1200,
+                          pause_prob: float = 0.09,
                           seed: int | None = None) -> list[int]:
-    """Per-keystroke gaussian inter-key delays (ms) for `n` chars, clamped to a
-    realistic typist range. Pure + deterministic with `seed`."""
+    """Per-keystroke inter-key delays (ms), RIGHT-SKEWED like real keystroke
+    dynamics — a log-normal body plus occasional long hesitations — not a tight
+    gaussian.
+
+    Real inter-key timing is heavy-tailed: quick bursts punctuated by
+    word-boundary / thinking / hard-reach pauses, so the within-phrase stdev is
+    on the order of the mean. A symmetric gaussian (the old model, stdev≈45ms)
+    reads as metronomic to a behavioural scorer — the self-hosted oracle measured
+    humanize at stdev~45ms against a real operator's 90-240ms and flagged it. This
+    draws a log-normal around `median_ms` (spread `sigma`) and gives `pause_prob`
+    of the keys a 2.5-5x hesitation, so the distribution matches (stdev ≈ mean,
+    long right tail). Pure + deterministic with `seed`.
+    """
     r = random.Random(seed) if seed is not None else random
-    return [int(max(floor_ms, min(ceiling_ms, r.gauss(mean_ms, stdev_ms))))
-            for _ in range(n)]
+    mu = math.log(max(1.0, median_ms))
+    out = []
+    for _ in range(n):
+        d = r.lognormvariate(mu, sigma)
+        if r.random() < pause_prob:
+            d *= r.uniform(2.5, 5.0)          # word-boundary / thinking pause
+        out.append(int(max(floor_ms, min(ceiling_ms, d))))
+    return out
 
 
 def budgeted_type_delays(n: int, *, max_total_ms: float = 20000,
-                         base_mean_ms: float = 110, seed: int | None = None
+                         base_median_ms: float = 105, seed: int | None = None
                          ) -> list[int]:
-    """Inter-key delays for `n` chars whose total stays within `max_total_ms`.
+    """Heavy-tailed inter-key delays for `n` chars whose total stays within
+    `max_total_ms`.
 
-    For short text this is the normal ~110ms/key cadence. For long text the
-    per-key mean shrinks so the whole thing fits the budget — otherwise a big
-    field (≳375 chars) typed at full cadence could exceed the daemon's RPC
-    timeout and surface as an opaque socket error mid-type. Jitter scales with
-    the mean so it still looks human.
+    Short text types at natural cadence. For a big field the median shrinks so it
+    fits the budget, and if the sampled tail still overshoots the whole sequence
+    is scaled down proportionally (preserving the shape) — otherwise a long type
+    could exceed the daemon's RPC timeout and surface as an opaque socket error
+    mid-type.
     """
     if n <= 0:
         return []
-    mean = min(base_mean_ms, max_total_ms / n)
-    return humanized_type_delays(n, mean_ms=mean, stdev_ms=mean * 0.4,
-                                 floor_ms=max(5.0, mean * 0.4),
-                                 ceiling_ms=mean * 2.5, seed=seed)
+    # Shrink the median for very long fields; leave ~30% headroom under the budget
+    # for the heavy tail before the proportional scale-to-fit kicks in.
+    median = max(1.0, min(base_median_ms, max_total_ms / n * 0.7))
+    delays = humanized_type_delays(n, median_ms=median, seed=seed)
+    total = sum(delays)
+    if total <= max_total_ms:
+        return delays
+    # Overshoot → scale to fit with a hard 1ms/key floor. Scale only the mass ABOVE
+    # the floor, so the total lands ON the budget and int() (truncating down) keeps
+    # it there. The earlier `max(5, int(d*scale))` re-floored sub-5ms keys back UP
+    # after scaling, so once 5*n exceeded the budget (n≳4000) no single pass fit and
+    # the sum grew unbounded — a >4000-char type could sleep 100s+, past the RPC
+    # timeout the budget exists to respect. If even 1ms/key can't fit (absurdly long
+    # field), that floor is the best achievable.
+    floor = 1
+    if n * floor >= max_total_ms:
+        return [floor] * n
+    scale = (max_total_ms - n * floor) / (total - n * floor)
+    return [floor + int((d - floor) * scale) for d in delays]
 
 
 async def humanized_type(page, loc, text: str, *, timeout_ms: int = 30000) -> None:
-    """Type `text` into `loc` with gaussian inter-key timing.
+    """Type `text` into `loc` with heavy-tailed inter-key timing.
 
     Focuses the validated element first, then dispatches one character at a
     time, with the total time bounded (see `budgeted_type_delays`). Keys are

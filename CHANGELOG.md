@@ -4,6 +4,31 @@ All notable changes to vibatchium are documented here. Versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Until 1.0,
 minor bumps may include breaking changes; we'll always call them out here.
 
+## [0.18.3] — 2026-07-20
+
+### humanize: heavy-tailed inter-key timing (the oracle's first calibration fix)
+
+Recording a real operator baseline and grading humanize against it (0.18.1) found
+that humanize typed too **regularly**: a tight gaussian (within-phrase stdev ~45ms)
+where a real hand is heavy-tailed (stdev 90–240ms — quick bursts punctuated by
+word-boundary and thinking pauses). A metronomic cadence is itself a behavioural
+tell.
+
+`humanized_type_delays` now draws a log-normal around the median with occasional
+2.5–5× hesitations, so the distribution is right-skewed with a long tail (CV ~0.8,
+was ~0.4). Re-measured against the operator baseline, inter-key **mean** moved from
+122ms (below the human band) to ~150–190ms (in band) and inter-key **stdev** from
+46ms to ~85–165ms (in band). Long fields stay within the RPC budget: the sampled
+sequence is scaled to fit with a hard per-key floor that keeps even a >4000-char
+type bounded — an adversarial review caught the first cut re-flooring back over
+budget (n=20000 → a 100s sleep), so the scale-to-fit now bounds the total by
+construction.
+
+This is what the oracle is for: turning "humanize looks human" into a measured,
+directional fix. The other gaps it flags against that one operator (move sampling,
+click dwell) are speed-calibration that varies person-to-person, and were left
+alone rather than overfit to a single recording.
+
 ## [0.18.2] — 2026-07-20
 
 ### oracle recorder: randomise the scroll distance

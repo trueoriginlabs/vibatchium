@@ -168,9 +168,23 @@ def test_humanized_type_delays_shape_and_clamp():
     from vibatchium.humanize import humanized_type_delays
     d = humanized_type_delays(40, seed=7)
     assert len(d) == 40
-    assert all(25 <= x <= 320 for x in d)              # clamped to range
+    assert all(22 <= x <= 1200 for x in d)             # clamped to the new range
     assert humanized_type_delays(5, seed=7) == humanized_type_delays(5, seed=7)
-    assert statistics.pstdev(humanized_type_delays(60, seed=1)) > 5  # actually varies
+
+
+def test_humanized_type_delays_is_heavy_tailed():
+    # Real keystroke timing is right-skewed with occasional long pauses, NOT a
+    # tight gaussian — the behavioural oracle flagged the old stdev~45ms as
+    # metronomic against a real operator's 90-240ms within-phrase spread.
+    from vibatchium.humanize import humanized_type_delays
+    d = humanized_type_delays(400, seed=1)
+    med = statistics.median(d)
+    assert statistics.pstdev(d) / statistics.fmean(d) > 0.65   # heavy-tailed (CV≈0.8)
+    assert max(d) > 400                                        # long hesitations occur
+    # the FAR tail (the pause mechanism), not merely a wider lognormal: many keys
+    # land beyond 3x the median. A plain/higher-sigma lognormal without the pause
+    # gives ~6 here; the pauses push it to ~25 — this is the load-bearing guard.
+    assert sum(1 for x in d if x > 3 * med) >= 15
 
 
 def test_humanized_click_hits_correct_element(local_server):
@@ -266,7 +280,7 @@ def test_humanized_click_traces_a_real_path_on_live_dom(local_server):
 
 def test_humanized_typing_has_varied_interkey_timing_on_live_dom(local_server):
     """Humanized typing produces non-zero, non-constant inter-keystroke delays
-    on the real DOM — gaussian cadence, not an instant bulk-set."""
+    on the real DOM — heavy-tailed cadence, not an instant bulk-set."""
     import statistics
     call("go", {"url": f"{local_server}/simple.html"})
     call("eval", {"expr": """(() => {
@@ -291,7 +305,7 @@ def test_humanized_typing_has_varied_interkey_timing_on_live_dom(local_server):
     assert min(deltas) > 0, "inter-key delays are 0 — not humanized timing (bulk set?)"
     assert statistics.pstdev(deltas) > 1, (
         f"inter-key timing is ~constant (stdev={statistics.pstdev(deltas):.2f}ms) "
-        f"— gaussian cadence isn't being applied")
+        f"— humanized cadence isn't being applied")
 
 
 # ─── motion/typing actually runs (stub page — no browser) ───────────────
@@ -376,7 +390,13 @@ async def test_humanized_type_empty_is_noop():
 def test_budgeted_type_delays_bounds_long_text():
     from vibatchium.humanize import budgeted_type_delays
     assert budgeted_type_delays(0) == []
-    assert 600 < sum(budgeted_type_delays(10, seed=1)) < 2000     # ~full cadence
+    assert 600 < sum(budgeted_type_delays(10, seed=1)) < 2500     # ~full cadence + tail
     long = budgeted_type_delays(1000, seed=1)
     assert len(long) == 1000
-    assert sum(long) <= 26000          # bounded — no 110s blow-up past the RPC timeout
+    assert sum(long) <= 20000          # bounded to the RPC budget
+    # the overshoot regime the naive max(5, int(d*scale)) re-floor blew past: a
+    # >4000-char type once summed 100s+ (n=20000 -> 100000ms). The total must stay
+    # within budget across the whole feasible range (n <= max_total_ms).
+    for n in (5000, 20000):
+        d = budgeted_type_delays(n, seed=1)
+        assert len(d) == n and sum(d) <= 20000, f"n={n} sum={sum(d)}"
