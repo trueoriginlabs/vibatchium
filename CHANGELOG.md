@@ -4,6 +4,50 @@ All notable changes to vibatchium are documented here. Versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Until 1.0,
 minor bumps may include breaking changes; we'll always call them out here.
 
+## [0.17.0] — 2026-07-20
+
+### Session timezone is inferred from the proxy's exit country
+
+Host-timezone-vs-exit-IP mismatch is a loud bot tell, and it fired **by
+default** for anyone who set a proxy and forgot `vb geo set`. Every piece
+already existed — `COUNTRY_TZ`, the adapters' `country=` param, CDP
+`Emulation.setTimezoneOverride` — joined only by a log line telling the
+operator to do it themselves.
+
+`geo.country_from_proxy_url()` reads `?country=` off the raw proxy URL (all
+three provider adapters take it there before folding it into their own
+username scheme, and the parsed proxy config does not carry it back out), and
+the registry defaults the session geo from it. An explicit `geo.json` still
+wins; the warning survives for proxy URLs with no country, since inferring
+those needs a network geolocation lookup at launch.
+
+Verified live: host `Australia/Sydney`, proxy `country=jp` → the page **and a
+Worker context** both report `Asia/Tokyo`. The worker agreement is the point —
+it is what distinguishes a real CDP override from a process-TZ trick.
+
+### Action cache: tracking params no longer bust every entry
+
+`observe._cache_key` hashed the raw URL, so one `?utm_source=` re-derived a
+plan — an LLM call — for a page already solved. URLs are now normalized
+(known tracking params dropped, remaining params sorted, fragment removed).
+Deliberately conservative: anything not a *known* tracking key is kept,
+because `?id=42` and `?page=3` select different content and collapsing them
+would serve a stale plan for the wrong page.
+
+`act` now returns `cache_status`: `hit`, `stale` (cached but self-healed) or
+`miss` — the direct answer to "why did that step cost an LLM call?".
+
+### MCP tools carry annotations
+
+We shipped none. `openWorldHint` now marks every verb returning page-derived
+content, so a host can taint scraped text instead of treating it as
+instructions — the one part of the content-trust story that is actually in
+the MCP spec today, and awkward to omit while marketing on prompt-injection
+safety. `readOnlyHint` marks pure probes and `destructiveHint` marks
+`stop` / `secret_delete` / `storage_restore` and friends. Nothing is asserted
+where we cannot stand behind it: an unset hint is honest, whereas a wrong
+`readOnlyHint` would invite a host to call a mutating verb speculatively.
+
 ## [0.16.3] — 2026-07-20
 
 ### Security: vault secrets no longer readable off screenshots

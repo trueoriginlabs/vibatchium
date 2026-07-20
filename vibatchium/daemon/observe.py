@@ -269,8 +269,51 @@ async def llm_plan(intent: str, url: str, yaml_text: str, *, model: str = "claud
 # ─── cache ────────────────────────────────────────────────────────────────
 
 
+# Params that identify a campaign/referrer, never the page. Leaving them in
+# the key meant a single `?utm_source=` busted every entry — the same page
+# arrived from an email and from a search and cached twice, so the plan was
+# re-derived (an LLM call) for a page we had already solved.
+_TRACKING_PARAMS = frozenset({
+    "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content",
+    "utm_id", "utm_source_platform", "utm_creative_format", "utm_marketing_tactic",
+    "gclid", "gclsrc", "dclid", "wbraid", "gbraid",   # Google
+    "fbclid",                                          # Meta
+    "msclkid",                                         # Microsoft
+    "twclid", "ttclid", "igshid", "li_fat_id",         # X / TikTok / IG / LinkedIn
+    "mc_cid", "mc_eid",                                # Mailchimp
+    "_hsenc", "_hsmi", "hsCtaTracking",                # HubSpot
+    "yclid", "_openstat",                              # Yandex
+    "ref", "ref_src", "referrer", "source",
+})
+
+
+def _normalize_url(url: str) -> str:
+    """Canonical form of a URL for cache keying.
+
+    Drops tracking params and sorts what remains, so links to the same page
+    that differ only in campaign tagging or param ORDER share one entry.
+    The fragment goes too — it never reaches the server and does not change
+    which elements a plan targets.
+
+    Deliberately conservative: everything that is not a known tracking key is
+    KEPT, because `?id=42` or `?page=3` genuinely selects a different page and
+    collapsing those would serve a stale plan for the wrong content.
+    """
+    try:
+        from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
+        parts = urlsplit(url)
+        kept = [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True)
+                if k.lower() not in _TRACKING_PARAMS]
+        kept.sort()
+        return urlunsplit((parts.scheme, parts.netloc, parts.path,
+                           urlencode(kept), ""))
+    except Exception:  # noqa: BLE001
+        return url
+
+
 def _cache_key(url: str, intent: str) -> str:
-    return hashlib.sha256(f"{url}\n{intent}".encode()).hexdigest()[:16]
+    return hashlib.sha256(
+        f"{_normalize_url(url)}\n{intent}".encode()).hexdigest()[:16]
 
 
 def cache_load() -> dict:

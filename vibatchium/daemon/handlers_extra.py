@@ -1560,11 +1560,22 @@ def register_extra(daemon) -> None:
                 executed.append({"step": step, "error": str(exc)})
                 break
 
+        # cache_status is a first-class field, not something to infer from
+        # `source` or dig out of a step's `via`: it is the direct answer to
+        # "why did that step cost an LLM call?", and a stale hit that we
+        # self-healed is a materially different outcome from a clean hit.
+        if not bool(result.get("cached")):
+            cache_status = "miss"
+        elif self_healed:
+            cache_status = "stale"      # hit, but the plan no longer fit
+        else:
+            cache_status = "hit"
         return {
             "executed": len(executed),
             "intent": intent,
             "source": result.get("source"),
             "self_healed": self_healed,
+            "cache_status": cache_status,
             "steps": executed,
         }
 

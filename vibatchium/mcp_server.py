@@ -1225,8 +1225,64 @@ def _plugin_tools() -> list[types.Tool]:
         schema = _flat_schema_to_jsonschema(spec.get("inputs_schema") or {})
         out.append(types.Tool(
             name=name, description=desc,
-            inputSchema=_augment_schema_with_session(schema)))
+            inputSchema=_augment_schema_with_session(schema),
+            # Plugin verbs are third-party code returning page-derived data —
+            # always open-world, and we can assert nothing else about them.
+            annotations=types.ToolAnnotations(openWorldHint=True)))
     return out
+
+
+# ─── tool annotations ────────────────────────────────────────────────────
+#
+# MCP hosts read these to decide how much to trust a tool's OUTPUT and how
+# freely to call it. We market on content safety (the injection classifier)
+# and shipped none of them, which is the one part of the trust story that is
+# actually in the spec today.
+#
+# openWorldHint is the load-bearing one for us: it marks a tool as returning
+# content from an open, untrusted world — i.e. whatever some web page said.
+# A host can then taint that content and stop treating it as instructions.
+# Everything that surfaces page-derived bytes gets it.
+
+_OPEN_WORLD = frozenset({
+    "explore", "extract", "extract_fields", "detect_forms", "candidates",
+    "map", "map_compact", "text", "html", "fetch", "research",
+    "console_dump", "network_dump", "har_stop", "links", "attr",
+    "screenshot", "tiles", "expect", "find", "observe", "eval",
+})
+
+# Pure probes: no page mutation, safe to call speculatively / repeatedly.
+_READ_ONLY = frozenset({
+    "find", "count", "status", "url", "text", "html", "map", "map_compact",
+    "attr", "links", "candidates", "detect_forms", "extract", "extract_fields",
+    "console_dump", "network_dump", "secret_list", "session_list", "geo_get",
+    "liveview_url", "vision_find",
+})
+
+# Irreversible from the caller's point of view — data or state is destroyed.
+_DESTRUCTIVE = frozenset({
+    "stop", "shutdown", "secret_delete", "storage_restore", "session_delete",
+    "clean", "cache_clear", "vision_cache_clear", "close",
+})
+
+
+def _annotations_for(name: str):
+    """Build ToolAnnotations for a verb, or None when we'd assert nothing.
+
+    Only hints we can actually stand behind are emitted — an unset hint means
+    "not asserted", which is honest, whereas a wrong readOnlyHint would cause
+    a host to call a mutating verb speculatively.
+    """
+    fields = {}
+    if name in _OPEN_WORLD:
+        fields["openWorldHint"] = True
+    if name in _READ_ONLY:
+        fields["readOnlyHint"] = True
+    if name in _DESTRUCTIVE:
+        fields["destructiveHint"] = True
+    if not fields:
+        return None
+    return types.ToolAnnotations(**fields)
 
 
 @server.list_tools()
@@ -1234,7 +1290,8 @@ async def list_tools() -> list[types.Tool]:
     tools = _filter_tools(_ACTIVE_CAPS)
     static = [
         types.Tool(name=name, description=desc,
-                   inputSchema=_augment_schema_with_session(schema))
+                   inputSchema=_augment_schema_with_session(schema),
+                   annotations=_annotations_for(name))
         for (name, desc, schema, _cmd, _mapper) in tools
     ]
     # Dynamically discovered plugin verbs (dotted names — never collide with

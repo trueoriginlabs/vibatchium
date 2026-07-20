@@ -111,6 +111,30 @@ def resolve_geo(*, country: str | None = None,
     return {"timezone_id": tz}
 
 
+def country_from_proxy_url(proxy_url: str) -> str | None:
+    """Pull `?country=<cc>` out of a proxy URL, if it names one we can map.
+
+    All three provider adapters (Bright Data, IPRoyal, Oxylabs) take the exit
+    country as a `country=` query param before folding it into the provider's
+    username scheme, so reading it off the raw URL covers every provider
+    uniformly — and the parsed proxy config does not carry it back out.
+
+    Returns a lowercase code present in COUNTRY_TZ, else None. Never raises:
+    this feeds a best-effort default, and a malformed proxy URL is already
+    handled (and logged) by the proxy parser.
+    """
+    try:
+        from urllib.parse import urlparse, parse_qs
+        params = parse_qs(urlparse(proxy_url).query)
+        cc = (params.get("country") or [None])[0]
+        if not cc:
+            return None
+        cc = cc.strip().lower()
+        return cc if cc in COUNTRY_TZ else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 # ─── per-session storage (mirrors proxy.py) ────────────────────────────────
 
 

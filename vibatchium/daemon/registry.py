@@ -747,13 +747,33 @@ class SessionRegistry:
                 # — log only the exception class, never the raw URL.
                 log.warning("ignoring malformed proxy for %s: %s",
                             name, type(exc).__name__)
-        from ..geo import load_session_geo
+        from ..geo import country_from_proxy_url, load_session_geo, resolve_geo
         geo_cfg = load_session_geo(profile_dir)
         if proxy_cfg is not None and geo_cfg is None:
-            log.warning(
-                "session %s has a proxy but no geo override — the host "
-                "timezone may not match the proxy's IP (a bot tell). "
-                "Set `vb geo set --country <cc>` to cohere.", name)
+            # Host-TZ vs exit-IP mismatch is a loud tell, and it used to fire
+            # BY DEFAULT for anyone who set a proxy and forgot `vb geo set` —
+            # we had every piece (COUNTRY_TZ, the adapters' country= param,
+            # Emulation.setTimezoneOverride) and joined them with a warning.
+            # Infer the timezone from the proxy's exit country instead. An
+            # explicit geo.json still wins: this only runs when there is none.
+            cc = country_from_proxy_url(proxy_url) if proxy_url else None
+            if cc:
+                try:
+                    geo_cfg = resolve_geo(country=cc)
+                    log.info(
+                        "session %s: inferred timezone %s from the proxy's "
+                        "country=%s (no explicit geo override set)",
+                        name, geo_cfg.get("timezone_id"), cc)
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("session %s: could not infer geo from proxy "
+                                "country=%s: %s", name, cc, type(exc).__name__)
+            if geo_cfg is None:
+                # No country in the URL — inferring would need a network
+                # geolocation lookup at launch, so keep telling the operator.
+                log.warning(
+                    "session %s has a proxy but no geo override — the host "
+                    "timezone may not match the proxy's IP (a bot tell). "
+                    "Set `vb geo set --country <cc>` to cohere.", name)
         from ..gpu import resolve_gpu, resolve_gpu_node
         gpu_on = resolve_gpu(profile_dir, name=name)
         gpu_node = resolve_gpu_node(profile_dir, name=name) if gpu_on else None
