@@ -29,3 +29,10 @@ dist/
 .pytest_cache/
 .coverage
 htmlcov/
+
+# Behavioural-oracle artifacts (0.18.x): personal baseline/recordings + the
+# generated recorder page. baseline.json / oracle-trials.json contain an
+# operator's mouse+keystroke distribution — never commit them to a public repo.
+oracle-record.html
+oracle-trials.json
+baseline.json
