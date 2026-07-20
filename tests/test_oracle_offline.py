@@ -58,25 +58,27 @@ def _human_buffer() -> dict:
 
 
 def _humanize_buffer() -> dict:
-    """What humanize actually emits: the human buffer's curve + timing, but the two
-    gaps synthetic input CANNOT clear — one un-coalesced sample per move (co==1) and
-    the CDP coordinate identity (screenX == clientX). This is the realistic ON pass."""
+    """What humanize actually emits: the human buffer's curve + timing, but WITHOUT the
+    raw pointer stream synthetic input cannot produce (no praw, co==1). It DOES carry a
+    real screen offset (screenX != clientX) — the coordinate tell we once assumed does
+    not fire on CDP input (measured). This is the realistic ON pass."""
     buf = _human_buffer()
     buf["events"] = [e for e in buf["events"] if e.get("type") != "praw"]  # no raw stream
     for e in buf["events"]:
         if "co" in e:
             e["co"] = 1
         if e.get("sx") is not None:
-            e["sx"] = e["cx"]
+            e["sx"] = e["cx"] + 10          # real window offset, as CDP input carries
     return buf
 
 
 def _teleport_buffer() -> dict:
-    """Synthetic automation: one move, instant click, instant fill, one scroll jump,
-    no coalescing, screenX == clientX."""
+    """Synthetic automation: one move, instant click, instant fill, one scroll jump, no
+    coalescing, no raw stream. Carries a real screen offset (screenX != clientX) — like
+    measured CDP input, which does NOT exhibit the screenX==clientX tell we assumed."""
     events = [{"type": "pmove", "t": 0.0, "x": 400, "y": 300, "co": 1, "ets": 0.0},
               {"type": "pdown", "t": 1.0, "x": 400, "y": 300, "btn": 0,
-               "sx": 400, "cx": 400, "pxv": 400, "ets": 1.0},
+               "sx": 410, "cx": 400, "pxv": 400, "ets": 1.0},
               {"type": "pup", "t": 2.0, "x": 400, "y": 300, "btn": 0, "ets": 2.0}]
     t = 2.0
     for _ in range(20):
@@ -112,7 +114,7 @@ def test_extract_teleport_buffer_shapes():
     assert f["scroll_steps"] == 1
     assert f["coalesced_max"] == 1
     assert f["raw_pointer_events"] == 0              # no raw stream from CDP input
-    assert f["screen_eq_client"] is True             # CDP coordinate signature
+    assert f["screen_eq_client"] is False            # synthetic input still carries an offset
 
 
 def test_extract_is_total_on_empty():
@@ -121,6 +123,20 @@ def test_extract_is_total_on_empty():
     assert f["n_moves"] == 0
     assert f["dwell_ms_mean"] is None
     assert f["straightness"] is None
+
+
+def test_extract_is_total_on_malformed():
+    # the "never raises" contract must hold on CORRUPT buffers too, not just empty:
+    # null dy, a non-comparable t, and coordinate-less move samples all crashed before.
+    for buf in (
+        {"events": [{"type": "wheel", "t": 0.0, "dy": None}]},          # null dy
+        {"events": [{"type": "pmove", "t": None, "x": 1, "y": 2},       # t=None -> dropped
+                    {"type": "pmove", "t": 5.0, "x": 3, "y": 4}]},
+        {"events": [{"type": "pmove", "t": 0.0},                        # no x/y
+                    {"type": "pmove", "t": 10.0}]},
+    ):
+        f = oracle.extract_features(buf)                                # must not raise
+        assert isinstance(f, dict) and "n_events" in f
 
 
 def test_extract_falls_back_to_mousemove_when_no_pointer():
@@ -212,6 +228,46 @@ def test_load_baseline_missing_file_falls_back(tmp_path):
     assert base["dwell_ms_mean"]["lo"] == 40
 
 
+def test_load_baseline_widens_degenerate_band(tmp_path):
+    # an operator who dwells IDENTICALLY every click must not get a [V,V] knife-edge
+    # that then rejects their own next 120.5ms reading as non-human.
+    rec = tmp_path / "flat.json"
+    rec.write_text(json.dumps({"dwell_ms_mean": [120.0] * 20}))
+    base = oracle.load_baseline(rec)
+    assert base["dwell_ms_mean"]["hi"] > base["dwell_ms_mean"]["lo"]   # widened
+    s = oracle.score_features({"dwell_ms_mean": 120.5}, base)
+    assert s["per_feature"]["dwell_ms_mean"]["human"] is True
+
+
+def test_load_baseline_p95_not_over_trimmed_small_n(tmp_path):
+    # with the old floor-truncated index, an n=8 operator's OWN slowest reading fell
+    # outside the band (hi pinned to the 2nd-highest). Interpolated p95 must not.
+    rec = tmp_path / "op.json"
+    rec.write_text(json.dumps({"dwell_ms_mean": [180, 185, 190, 195, 200, 205, 210, 260]}))
+    base = oracle.load_baseline(rec)
+    assert base["dwell_ms_mean"]["hi"] > 210          # not pinned to the 2nd-highest
+
+
+def test_load_baseline_is_total_on_malformed(tmp_path):
+    # a hand-edited / partial baseline must never crash the run: bad features keep the
+    # literature band, valid ones still overlay.
+    rec = tmp_path / "bad.json"
+    rec.write_text(json.dumps({
+        "dwell_ms_mean": 99,                                # scalar not list -> skipped
+        "n_moves": ["junk", None] + list(range(30, 60)),   # junk + 30 valid numbers
+    }))
+    base = oracle.load_baseline(rec)                        # must not raise
+    assert base["dwell_ms_mean"]["lo"] == 40               # literature kept (scalar skipped)
+    assert base["n_moves"]["lo"] != 8                      # overlaid from the numeric samples
+
+
+def test_load_baseline_survives_bad_json(tmp_path):
+    rec = tmp_path / "notjson.json"
+    rec.write_text("{ this is not json ]")
+    base = oracle.load_baseline(rec)                        # must not raise
+    assert base["dwell_ms_mean"]["lo"] == 40               # literature default preserved
+
+
 # ─── PURE: rendering ─────────────────────────────────────────────────────────
 
 def _rows_from_buffers() -> list[dict]:
@@ -233,10 +289,16 @@ def test_render_markdown_carries_honesty_and_gap_note():
     assert "coalesced_max" in md
 
 
-def test_render_json_round_trips():
+def test_render_json_labels_provenance():
+    # no baseline -> literature-default
     payload = json.loads(oracle.render_json(_rows_from_buffers()))
     assert isinstance(payload["rows"], list) and len(payload["rows"]) == 2
     assert payload["baseline"] == "literature-default"
+    # with a recorded baseline the label must reflect the source, not a hardcoded lie
+    base = oracle.load_baseline()
+    base["__source__"] = {"kind": "meta", "recorded": "/tmp/op.json"}
+    labelled = json.loads(oracle.render_json(_rows_from_buffers(), base))
+    assert labelled["baseline"] == "/tmp/op.json"
 
 
 def test_render_empty():

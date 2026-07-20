@@ -140,7 +140,7 @@ _DRAIN_JS = r"""(() => {
 
 
 def _euclid(a: dict, b: dict) -> float:
-    return math.hypot(b["x"] - a["x"], b["y"] - a["y"])
+    return math.hypot(b.get("x", 0) - a.get("x", 0), b.get("y", 0) - a.get("y", 0))
 
 
 def _mean(xs: list[float]) -> float | None:
@@ -245,7 +245,7 @@ def _interkey_features(events: list[dict]) -> dict:
 def _scroll_features(events: list[dict]) -> dict:
     """Wheel-tick count + delta shape for one scroll gesture."""
     wheels = [e for e in events if e.get("type") == "wheel"]
-    deltas = [abs(e.get("dy", 0)) for e in wheels]
+    deltas = [abs(e.get("dy") or 0) for e in wheels]   # null-safe: dy may be absent OR null
     return {
         "scroll_steps": len(wheels),
         "scroll_dy_total": round(sum(deltas), 2) if deltas else None,
@@ -277,7 +277,11 @@ def extract_features(drain: dict) -> dict:
     dict the scorer grades. Pure + total: an empty buffer yields all-None, never
     raises."""
     events = drain.get("events", []) if isinstance(drain, dict) else list(drain)
-    events = [e for e in events if isinstance(e, dict) and "t" in e]
+    # require a comparable timestamp — a t=None (or bool) event would crash the sort,
+    # breaking the "never raises" contract on a malformed/corrupted buffer
+    events = [e for e in events
+              if isinstance(e, dict) and isinstance(e.get("t"), (int, float))
+              and not isinstance(e.get("t"), bool)]
     events.sort(key=lambda e: e["t"])
     f: dict[str, Any] = {"n_events": len(events)}
     f.update(_trajectory_features(events))
@@ -361,11 +365,18 @@ HUMAN_BASELINE: dict[str, dict] = {
 
 
 def load_baseline(path: str | Path | None = None) -> dict:
-    """Return the active baseline. With no path (or a missing file) this is the
-    literature default; given a JSON file of recorded operator features it overlays
-    [p5, p95] score bands per feature onto the defaults, so a real human's
-    distribution supersedes the heuristic. The overlaid file is the deliverable that
-    turns this from "our model of human" toward "measured human"."""
+    """Return the active baseline. With no path (or a missing/unreadable file) this is
+    the literature default; given a JSON file of recorded operator features it overlays
+    an interpolated p5-p95 band per SCORE feature onto the defaults.
+
+    HONEST CAVEATS on a recorded overlay (it is the deliverable, but it is not
+    "humanity"): it is ONE operator over a SMALL sample (the recorder ships 20 click /
+    8 type / 8 scroll trials), so the bands are person-specific — the SPEED features
+    (dwell, cadence, move count) reflect that operator's pace, not humans in general.
+    A consistent operator legitimately narrows the band; a degenerate all-equal feature
+    is widened so it can't knife-edge-reject the operator's own next value. Total:
+    malformed entries are skipped, keeping the literature band for that feature — never
+    raises."""
     base = {k: dict(v) for k, v in HUMAN_BASELINE.items()}
     if not path:
         return base
@@ -373,18 +384,33 @@ def load_baseline(path: str | Path | None = None) -> dict:
     if not p.exists():
         log.warning("baseline file %s not found — using literature defaults", p)
         return base
-    recorded = _json.loads(p.read_text())
-    # recorded: {feature: [samples...]} — band each scored feature to its [p5, p95].
+    try:
+        recorded = _json.loads(p.read_text(encoding="utf-8"))
+    except (ValueError, OSError) as exc:  # bad JSON / unreadable / bad encoding
+        log.warning("baseline %s unreadable (%s) — using literature defaults", p, exc)
+        return base
+    if not isinstance(recorded, dict):
+        return base
     for feat, samples in recorded.items():
-        if feat not in base or base[feat]["kind"] != "score":
+        if (feat not in base or base[feat]["kind"] != "score"
+                or not isinstance(samples, list)):
             continue
-        vals = sorted(float(s) for s in samples if s is not None)
+        vals = sorted(float(s) for s in samples
+                      if isinstance(s, (int, float)) and not isinstance(s, bool))
         if len(vals) < 5:
             continue
-        lo = vals[max(0, int(0.05 * (len(vals) - 1)))]
-        hi = vals[min(len(vals) - 1, int(0.95 * (len(vals) - 1)))]
+        # Interpolated p5/p95 — NOT the old floor-truncated index int(0.05*(n-1)),
+        # which pinned p5 to the MINIMUM sample for every n<=20 (the recorder's range).
+        cuts = statistics.quantiles(vals, n=20, method="inclusive")
+        lo, hi = cuts[0], cuts[18]
+        # Widen a degenerate / near-degenerate band: all-equal samples would give a
+        # [V,V] knife-edge that rejects the operator's own 120.001 as non-human.
+        min_span = max(abs(statistics.median(vals)) * 0.05, 1.0)
+        if hi - lo < min_span:
+            mid = (hi + lo) / 2
+            lo, hi = mid - min_span / 2, mid + min_span / 2
         base[feat]["lo"], base[feat]["hi"] = lo, hi
-        base[feat]["source"] = f"recorded operator baseline (n={len(vals)}, p5-p95)"
+        base[feat]["source"] = f"recorded operator baseline (n={len(vals)}, interp p5-p95)"
     base["__source__"] = {"kind": "meta", "recorded": str(p)}
     return base
 
@@ -562,8 +588,11 @@ def render_markdown(rows: list[dict], baseline: dict | None = None) -> str:
     for feat, spec in baseline.items():
         if spec.get("kind") == "meta":
             continue
+        # report features are shown but not graded — don't print a phantom band
+        band = ("-" if spec["kind"] == "report"
+                else _band_str([spec.get("lo"), spec.get("hi")]))
         lines.append(
-            f"| `{feat}` | {_band_str([spec.get('lo'), spec.get('hi')])} "
+            f"| `{feat}` | {band} "
             f"| {cell(off, feat)} | {cell(on, feat)} | {spec['kind']} |")
     lines.append("")
 
@@ -589,10 +618,15 @@ def render_markdown(rows: list[dict], baseline: dict | None = None) -> str:
     return "\n".join(lines) + "\n"
 
 
-def render_json(rows: list[dict]) -> str:
+def render_json(rows: list[dict], baseline: dict | None = None) -> str:
+    """Pass the baseline the rows were scored against so the provenance label is
+    truthful — otherwise a recorded-operator run is mislabelled 'literature-default'."""
+    src = "literature-default"
+    if baseline and isinstance(baseline.get("__source__"), dict):
+        src = baseline["__source__"].get("recorded") or src
     return _json.dumps({
         "rows": rows,
-        "baseline": "literature-default",
+        "baseline": src,
         "generated_at": time.time(),
     }, indent=2)
 
@@ -710,7 +744,7 @@ _RECORD_PAGE_TEMPLATE = r"""<!doctype html>
     'bright vixens jump; dozy fowl quack 7',
     'jackdaws love my big sphinx of quartz',
     'we promptly judged antique ivory buckles',
-    'a wizard’s job is to vex chumps quickly',
+    'waltz bad nymph for quick jigs vex now',
     'crazy fredrick bought many exotic opals',
   ];
 
@@ -747,7 +781,18 @@ _RECORD_PAGE_TEMPLATE = r"""<!doctype html>
     next();
     tin.addEventListener('keydown', (e) => {
       if (e.key !== 'Enter') return;
-      push('type'); typed++;
+      // The Enter keydown is already in the capture-phase buffer; drop it so the trial
+      // measures pure inter-CHARACTER cadence, symmetric with the runner (which types
+      // with no trailing Enter). The char->Enter gap is decision time, not cadence, and
+      // would inflate the SCORED interkey stdev band. Remove the last 'key' event = Enter.
+      const ev = drain();
+      for (let i = ev.length - 1; i >= 0; i--) {
+        if (ev[i].type === 'key') { ev.splice(i, 1); break; }
+      }
+      TRIALS.push({kind: 'type', events: ev});
+      const ex = document.getElementById('vbo-export');
+      if (ex) ex.value = window.__vboExport();
+      typed++;
       setStatus('Type each line + Enter.', typed, N_TYPE);
       if (typed >= N_TYPE) { $('typepanel').style.display = 'none'; startScroll(); }
       else next();
@@ -801,5 +846,5 @@ def record_page_html(*, n_clicks: int = 20, n_type: int = 8, n_scroll: int = 8) 
 
 def write_record_page(path: str | Path, **counts: int) -> Path:
     p = Path(path)
-    p.write_text(record_page_html(**counts))
+    p.write_text(record_page_html(**counts), encoding="utf-8")  # page carries non-ASCII
     return p

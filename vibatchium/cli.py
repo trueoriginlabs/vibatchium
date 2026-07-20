@@ -2826,8 +2826,8 @@ def oracle():
     instrumented page and grades each feature against a human-plausible band. This
     grades against OUR MODEL of human (literature bands until a recorded operator
     baseline replaces them) — it CANNOT claim to beat a named vendor, and the two
-    'gap' rows (coalesced pointer events, CDP coordinate signature) are unreachable
-    via synthetic input by construction.
+    'gap' rows (raw pointer events, coalesced samples) are unreachable via synthetic
+    input by construction.
 
         vb oracle run                         # off-vs-on scoreboard, markdown
         vb oracle run --json --out o.json     # machine-readable
@@ -2849,12 +2849,12 @@ def oracle_run(headless, baseline_path, out_path, as_json):
 
     baseline = _oracle.load_baseline(baseline_path) if baseline_path else None
     rows = _oracle.run_oracle(call, headless=headless, baseline=baseline)
-    output = (_oracle.render_json(rows) if as_json
+    output = (_oracle.render_json(rows, baseline) if as_json
               else _oracle.render_markdown(rows, baseline))
 
     if out_path:
         from pathlib import Path as _P
-        _P(out_path).write_text(output)
+        _P(out_path).write_text(output, encoding="utf-8")
         click.echo(f"wrote {out_path}", err=True)
     else:
         click.echo(output)
@@ -2897,12 +2897,15 @@ def oracle_ingest(trials_file, out_path):
     from . import oracle as _oracle
     from pathlib import Path as _P
 
-    raw = json.loads(_P(trials_file).read_text())
+    try:
+        raw = json.loads(_P(trials_file).read_text(encoding="utf-8"))
+    except (ValueError, OSError) as exc:
+        raise click.UsageError(f"{trials_file} is not readable JSON: {exc}") from exc
     trials = raw.get("trials", raw) if isinstance(raw, dict) else raw
     if not isinstance(trials, list) or not trials:
         raise click.UsageError(f"{trials_file} has no trials")
     samples = _oracle.aggregate_trials(trials)
-    _P(out_path).write_text(json.dumps(samples, indent=2))
+    _P(out_path).write_text(json.dumps(samples, indent=2), encoding="utf-8")
     counts = samples.get("_meta", {}).get("trial_counts", {})
     feat_lines = [f"{k} (n={len(v)})" for k, v in sorted(samples.items())
                   if not k.startswith("_") and isinstance(v, list)]

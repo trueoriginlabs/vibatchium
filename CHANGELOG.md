@@ -4,6 +4,35 @@ All notable changes to vibatchium are documented here. Versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Until 1.0,
 minor bumps may include breaking changes; we'll always call them out here.
 
+## [0.18.4] — 2026-07-20
+
+### oracle: hardening from a fresh-eyes review
+
+An adversarial multi-agent review of the 0.18.x oracle work (43 findings, 31
+verified, none critical/high) surfaced a cluster worth fixing before publishing:
+
+- **Recorder Enter-contamination** (medium): each type trial folded the char→Enter
+  interval (decision time, not cadence) into the scored inter-key band, diverging
+  from the runner (which types with no Enter). The trial-terminating Enter keydown is
+  now stripped, so a recorded baseline measures the same pure inter-character signal.
+- **`load_baseline` band math**: the floor-truncated `int(0.05*(n-1))` pinned the low
+  bound to the *minimum* sample for every n≤20 (the recorder's whole range) and
+  over-trimmed the high bound for small n, so an operator's own extreme readings
+  scored non-human. Now interpolated p5/p95 (`statistics.quantiles`) with a
+  degenerate-band guard so an all-equal feature can't knife-edge-reject the operator's
+  own next value.
+- **Robustness**: `load_baseline` and `extract_features` are now total — a malformed
+  `baseline.json` or a corrupt event buffer degrades instead of crashing; `vb oracle
+  ingest` reports a clean error on bad JSON; all oracle file I/O is utf-8.
+- **Honest provenance**: `render_json --baseline` no longer mislabels output
+  "literature-default"; report-kind features no longer print a phantom band; the
+  `vb oracle --help` gap-row names and humanize's `pageX==screenX` SCOPE note (both
+  stale from the 0.18.0 measurement that refuted the coordinate tell) are corrected.
+  Recorded bands now carry an explicit single-operator / small-n caveat.
+
+Behaviour-neutral for the production daemon — the oracle runs in an independent
+ephemeral lane.
+
 ## [0.18.3] — 2026-07-20
 
 ### humanize: heavy-tailed inter-key timing (the oracle's first calibration fix)
