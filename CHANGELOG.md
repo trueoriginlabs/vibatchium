@@ -4,6 +4,39 @@ All notable changes to vibatchium are documented here. Versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Until 1.0,
 minor bumps may include breaking changes; we'll always call them out here.
 
+## [0.18.0] — 2026-07-20
+
+### `vb oracle` — a self-hosted behavioural oracle
+
+Detection moved off our axis. Cloudflare Precursor, DataDome Agent Trust, Arkose
+Agent Trust Manager and HUMAN all shipped session-lifetime *behavioural* scoring
+in one quarter — none of them read canvas/WebGL/`Runtime.enable`. Our best proof
+(canvas-hash stability, CreepJS 0% stealth) is on the *static* axis, precisely the
+one being deprecated, and no free self-serve behavioural oracle exists to measure
+the new one. So we built our own.
+
+`vb oracle run` instruments a page, drives the same gesture set with humanize OFF
+then ON, extracts the features the vendors publish (trajectory curvature, dwell,
+keystroke cadence, scroll dynamics, event granularity) and grades each against a
+human-plausible band. Measured live: humanize **OFF → 0/5** scored features
+human-plausible, **ON → 6/6**. It does its job on every axis it can touch.
+
+The axis it *can't* touch, confirmed on and off: the **raw pointer stream**.
+CDP-synthesised input fires no `pointerrawupdate` and carries no coalesced samples
+(`getCoalescedEvents` returns nothing on the synthetic `pointermove`) — a page sees
+only Chrome's compositor-clocked moves, where real hardware produces both. That gap
+is unreachable by construction (see `humanize.py`) and closes only with attach-mode
+against a real headful Chrome; the oracle confirms it, it does not close it.
+
+The honesty ships in the output. The bands are our *model* of human — literature
+defaults until a recorded operator baseline replaces them via `load_baseline()` —
+so this cannot claim to beat a named vendor. Two tells we *assumed* turned out not
+to fire and were demoted to reported diagnostics after live measurement caught the
+mistake: `move_dt_cv` (on `pointermove` it is the ~60Hz display clock, identical for
+real and synthetic input — scoring it would false-positive a real human) and
+`screen_eq_client` (synthetic input carries a real screen offset, so the assumed
+`screenX==clientX` signature never appears).
+
 ## [0.17.1] — 2026-07-20
 
 ### Patchright 1.61 is vetted; the version cap moves to <1.62

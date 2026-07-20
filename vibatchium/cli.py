@@ -2814,6 +2814,52 @@ def bench_run(ctx, urls, expected, targets_file, tier, settle_ms, evidence_dir,
             sys.exit(1)
 
 
+# ─── 0.18.0: behavioural oracle (the axis detection moved to) ────────────────
+
+@cli.group()
+def oracle():
+    """Measure the BEHAVIOURAL axis — mouse trajectory, dwell, keystroke cadence,
+    scroll + event granularity — which Cloudflare Precursor / DataDome Agent Trust /
+    Arkose / HUMAN now score over a session's lifetime.
+
+    Drives the same gesture set with humanize OFF then ON against a local
+    instrumented page and grades each feature against a human-plausible band. This
+    grades against OUR MODEL of human (literature bands until a recorded operator
+    baseline replaces them) — it CANNOT claim to beat a named vendor, and the two
+    'gap' rows (coalesced pointer events, CDP coordinate signature) are unreachable
+    via synthetic input by construction.
+
+        vb oracle run                         # off-vs-on scoreboard, markdown
+        vb oracle run --json --out o.json     # machine-readable
+        vb oracle run --baseline human.json   # score against a recorded operator
+    """
+
+
+@oracle.command("run")
+@click.option("--headless/--headed", default=True,
+              help="standard=headless (default). --headed drops headless tells.")
+@click.option("--baseline", "baseline_path", default=None, type=click.Path(),
+              help="Recorded operator baseline JSON ({feature: [samples]}). Its "
+                   "p5-p95 supersedes the literature band per feature.")
+@click.option("--out", "out_path", default=None, type=click.Path())
+@click.option("--json", "as_json", is_flag=True, help="Emit JSON not markdown.")
+def oracle_run(headless, baseline_path, out_path, as_json):
+    """Run the behavioural oracle and emit an OFF-vs-ON feature table."""
+    from . import oracle as _oracle
+
+    baseline = _oracle.load_baseline(baseline_path) if baseline_path else None
+    rows = _oracle.run_oracle(call, headless=headless, baseline=baseline)
+    output = (_oracle.render_json(rows) if as_json
+              else _oracle.render_markdown(rows, baseline))
+
+    if out_path:
+        from pathlib import Path as _P
+        _P(out_path).write_text(output)
+        click.echo(f"wrote {out_path}", err=True)
+    else:
+        click.echo(output)
+
+
 # ─── Wave 6.2b: humanization ─────────────────────────────────────────────
 
 @cli.group()

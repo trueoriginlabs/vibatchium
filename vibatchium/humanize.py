@@ -172,7 +172,12 @@ async def humanized_move(page, end_x: float, end_y: float,
     path = humanized_path(start, (end_x, end_y))
     for px, py in path:
         await page.mouse.move(px, py)
-        # Tiny inter-step delay; total move time scales with distance + n_points
+        # Tiny inter-step delay; total move time scales with distance + n_points.
+        # NB: jittering this does NOT change the timing a page observes — Chrome
+        # re-emits injected moves on its ~60Hz compositor clock, so `pointermove`
+        # inter-event dt is fixed at the refresh interval regardless (measured via
+        # the behavioural oracle). The real synthetic tell is upstream: CDP input
+        # produces no `pointerrawupdate`/coalesced raw stream at all (see oracle.py).
         await asyncio.sleep(step_delay_ms / 1000)
 
 
