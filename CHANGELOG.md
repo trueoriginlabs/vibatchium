@@ -4,6 +4,52 @@ All notable changes to vibatchium are documented here. Versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Until 1.0,
 minor bumps may include breaking changes; we'll always call them out here.
 
+## [0.17.1] — 2026-07-20
+
+### Patchright 1.61 is vetted; the version cap moves to <1.62
+
+The `<1.61` cap was correct when written but had become a freeze rather than a
+gate: upstream shipped 1.61.1 and 1.61.2 while we sat on 1.60.1, and nobody had
+run the vetting the gate exists to force.
+
+1.61.2 now passes: `test_wave7_stealth_gate.py` (the posture suite, real Chrome
+— `navigator.webdriver`, `chrome` object, no `HeadlessChrome` token in the main
+*or* SharedWorker UA, no `--no-sandbox`, file perms) 16 passed; full suite in a
+throwaway venv 1014 passed / 1 skipped, matching the current install.
+
+Worth recording because it nearly went the other way: a first vetting attempt
+showed 102 then 79 failures that looked like engine regressions. They were
+entirely a broken harness — no optional extras, then no `pytest-asyncio`. What
+settled it was re-running the *same* broken venv with Patchright downgraded to
+1.60.1: byte-identical failures. Swapping the variable back is worth more than
+any amount of reasoning about a failure list, and a partial fix that improves
+the number is the trap, not the answer.
+
+The installed `.venv` is deliberately left on 1.60.1; both minors are vetted,
+so upgrading is now unblocked rather than mandatory.
+
+### Docs: `research` is CLI-only, and `explore` is not
+
+The README comparison table implied `research` was available everywhere; it is
+CLI-only, because it fans out N parallel browser sessions and writes markdown
+artifacts to a directory — a poor fit for one tool call on a session-capped
+daemon. The generated agent skill said the opposite of the truth about
+`explore`, calling it CLI-only when it has been an MCP tool throughout.
+
+### `vb evals --update-readme` is no longer a silent no-op
+
+The `<!-- vibatchium-evals -->` markers existed only in `evals.py`'s docstring
+and nowhere in README, and `update_readme()` returns `False` for both "no
+markers found" and "already up to date" — so the flag had never done anything
+and could not report that. README now carries the block, with a regression test
+so it cannot silently disappear again.
+
+The block ships **empty**, and says so. An empty block is honest; a number with
+no run behind it is not. It also carries the caveat that these are *fingerprint
+scoreboards* — the static axis — while the 2026 anti-bot vendors moved to
+session-lifetime behavioural scoring that we have measured against **none** of
+them.
+
 ## [0.17.0] — 2026-07-20
 
 ### Session timezone is inferred from the proxy's exit country

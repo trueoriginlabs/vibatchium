@@ -125,3 +125,31 @@ def test_some_annotations_actually_ship(listed_tools):
     annotated = [t for t in listed_tools.values() if t.annotations is not None]
     assert len(annotated) >= 10, \
         f"only {len(annotated)} annotated tools — wiring likely broken"
+
+
+# ─── evals --update-readme has something to patch ────────────────────────
+
+
+def test_readme_carries_the_evals_markers():
+    """`vb evals --update-readme` returns False for BOTH 'no markers found'
+    and 'already up to date', so a missing marker is a silent no-op rather
+    than an error. The markers lived in evals.py's docstring and nowhere in
+    README, so the flag had never done anything."""
+    from pathlib import Path
+    readme = Path(__file__).resolve().parent.parent / "README.md"
+    body = readme.read_text()
+    assert "<!-- vibatchium-evals -->" in body
+    assert "<!-- /vibatchium-evals -->" in body
+
+
+def test_update_readme_patches_and_is_idempotent(tmp_path):
+    import shutil
+    from pathlib import Path
+    from vibatchium.evals import update_readme
+    src = Path(__file__).resolve().parent.parent / "README.md"
+    dst = tmp_path / "README.md"
+    shutil.copy(src, dst)
+    table = "| target | score |\n|---|---|\n| sannysoft | 100 |"
+    assert update_readme(dst, table) is True, "markers not found in README"
+    assert "| sannysoft | 100 |" in dst.read_text()
+    assert update_readme(dst, table) is False, "second run should be a no-op"

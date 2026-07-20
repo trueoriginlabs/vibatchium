@@ -68,7 +68,7 @@ vb --version               # confirm
 | **Prompt-injection classifier on scraped content** | ❌ | ❌ | ❌ | ✅ (0% FP / 204 samples) |
 | Live-view stream with takeover (WebSocket) | ❌ | ❌ | partial | ✅ |
 | Bearer-token REST shim + caps gating | ❌ | ❌ | manual | ✅ |
-| `research` command (parallel fan-out) | ❌ | ❌ | ❌ | ✅ |
+| `research` command (parallel fan-out) — CLI only | ❌ | ❌ | ❌ | ✅ |
 
 ## Real Chrome vs fake Chrome
 
@@ -172,6 +172,22 @@ human-driven session, and attach-mode is the honest answer.
 | **Standard** (default) | headless cold launch, real `channel=chrome`, de-Headless'd UA | Cloudflare IUAM / managed challenge, `bot.sannysoft` 31/31, JS-runtime fingerprinting | aggressive Turnstile, DataDome/Kasada, anything behind a login |
 | **Hardened** | retry `--headed`; `vb humanize on`; `--backend nodriver` (`pip install vibatchium[nodriver]`, AGPL) for the hardest Cloudflare gates | aggressive Cloudflare/Turnstile, GPU/screen tells that headless leaves | behavioral biometrics, DataDome/Kasada sensor-fusion |
 | **Attach** | `vb attach` to a Chrome **you** launched and logged into | DataDome / Kasada / HUMAN behavioral walls, and any authenticated session — your real fingerprint + cookies | nothing here is automated cold; it needs the human login first |
+
+### Measured scores
+
+`vb evals --update-readme` writes measured numbers into the block below, so
+what we publish is generated rather than asserted. It is empty until someone
+runs it — an empty block is honest; a number with no run behind it is not.
+
+<!-- vibatchium-evals -->
+_No eval run has been published yet. Generate with:_ `vb evals --update-readme`
+<!-- /vibatchium-evals -->
+
+> **What these do and don't cover.** These are *fingerprint scoreboards* —
+> the static axis. Through 2026 the major anti-bot vendors moved to
+> session-lifetime **behavioural** scoring, which none of these targets
+> measure, and which we have **not** measured against any commercial vendor.
+> Treat a good score here as evidence about environment coherence only.
 
 Escalation ladder when a wall trips: **headless → `--headed` → `humanize on` →
 `--backend nodriver` → attach-mode after a manual login.** Patchright's CDP-layer

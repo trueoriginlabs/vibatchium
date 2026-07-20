@@ -110,10 +110,14 @@ Sessions are independent Chromes — run several in parallel, no cookie bleed.
 
 ## Notes
 - Already installed; do **not** `pip install` or `python -m vibatchium`. Call `vb`.
-- `vb explore`/`research` are CLI commands — shell out to `vb`. The MCP server
-  may expose only a curated subset of verbs; the full surface is always on the
-  CLI (`vb --help`), and you can widen the MCP tools by re-registering the
-  server with `--caps=all`.
+- `explore` is available BOTH as an MCP tool and on the CLI — prefer the MCP
+  tool if you have it. `research` is **CLI only**: it fans out N parallel
+  browser sessions and writes markdown artifacts to a directory, which is a
+  poor fit for a single tool call on a session-capped daemon, so shell out to
+  `vb research` for it.
+- The MCP server exposes a curated subset of verbs; the full surface is always
+  on the CLI (`vb --help`), and you can widen the MCP tools by re-registering
+  the server with `--caps=all`.
 """
 
 
