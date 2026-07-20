@@ -353,6 +353,9 @@ def test_record_page_is_self_contained_and_instrumented():
     assert "pointerrawupdate" in html            # SAME capture as the runner
     assert "getCoalescedEvents" in html
     assert "window.__vboExport" in html
+    # scroll distance is randomised per rep (fixes the fixed-distance practice
+    # effect — a learned distance lets the operator speed up rep-to-rep)
+    assert "randDist" in html and "filler.style.height" in html
     # no external resources (CSP-free, opens from file://)
     assert "http://" not in html and "https://" not in html
     assert "src=" not in html

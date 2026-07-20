@@ -670,7 +670,8 @@ _RECORD_PAGE_TEMPLATE = r"""<!doctype html>
     <input id="tin" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
   </div>
   <div id="scrollpanel" class="panel">
-    <p>Scroll down the way you normally would and click <b>Continue</b> at the bottom.</p>
+    <p>Scroll down to <b>Continue</b> and click it. The distance changes each time —
+       just scroll the way you normally would; don't race it.</p>
     <div class="filler"><button id="contBtn">Continue</button></div>
   </div>
   <div id="donepanel" class="panel">
@@ -755,15 +756,20 @@ _RECORD_PAGE_TEMPLATE = r"""<!doctype html>
 
   // phase 3 — scroll (wheel cadence)
   let scrolls = 0;
+  // Randomise the scroll distance each rep. A FIXED distance gets learned and the
+  // operator speeds up rep-to-rep (a practice-effect confound Dima caught on the
+  // first recording) — the samples then measure the page, not natural scrolling.
+  const filler = document.querySelector('.filler');
+  const randDist = () => { filler.style.height = (140 + Math.floor(Math.random() * 260)) + 'vh'; };
   const startScroll = () => {
     $('scrollpanel').style.display = 'block';
     setStatus('Scroll down + click Continue.', 0, N_SCROLL);
-    scrollTo(0, 0); drain();
+    randDist(); scrollTo(0, 0); drain();
     $('contBtn').addEventListener('click', () => {
       push('scroll'); scrolls++;
       setStatus('Scroll down + click Continue.', scrolls, N_SCROLL);
       if (scrolls >= N_SCROLL) { $('scrollpanel').style.display = 'none'; finish(); }
-      else { scrollTo(0, 0); drain(); }
+      else { randDist(); scrollTo(0, 0); drain(); }
     });
   };
 

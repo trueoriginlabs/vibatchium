@@ -4,6 +4,17 @@ All notable changes to vibatchium are documented here. Versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Until 1.0,
 minor bumps may include breaking changes; we'll always call them out here.
 
+## [0.18.2] — 2026-07-20
+
+### oracle recorder: randomise the scroll distance
+
+The first real recording surfaced a confound in the scroll task: the Continue
+button sat at a **fixed distance** every rep, so the operator learned it and sped
+up rep-to-rep — the samples measured the page, not natural scrolling (step count
+pinned to distance÷notch while duration collapsed 1451ms → 433ms). The scroll
+filler height is now randomised per rep so there is no distance to learn. Click
+targets (already randomised) and typing (fresh phrases) were unaffected.
+
 ## [0.18.1] — 2026-07-20
 
 ### `vb oracle record` / `ingest` — capture the human mouse baseline
