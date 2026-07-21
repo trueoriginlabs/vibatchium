@@ -147,6 +147,12 @@ daemon-wide cap (not per-renderer), and a breach OOM-kills inside the scope, whi
 can include the daemon. It's the only non-racy memory bound, so size it for the
 whole fan-out.
 
+**Idle CPU.** Parked sessions can't burn cores either: the daemon SIGSTOPs a
+launched session's renderer processes after `VIBATCHIUM_IDLE_FREEZE_AFTER` seconds
+with no verb (default 90) and thaws them on the next call, so an idle WebGL /
+animation page drops to zero CPU without a teardown (default on;
+`VIBATCHIUM_IDLE_FREEZE=0` disables).
+
 ## Documentation
 
 - [`AGENTS.md`](AGENTS.md) — coding-agent contract (Codex / Cursor / Claude Code)
@@ -189,6 +195,15 @@ _No eval run has been published yet. Generate with:_ `vb evals --update-readme`
 > measure, and which we have **not** measured against any commercial vendor.
 > Treat a good score here as evidence about environment coherence only.
 
+For the behavioural axis itself, `vb oracle run` is a self-hosted probe: it drives a
+page with `humanize` off then on and grades trajectory curvature, dwell, keystroke
+cadence and scroll dynamics against a human-plausible band (`vb oracle record`
+captures a real-operator baseline; literature defaults until you do). It measures
+*our* model of human rather than a named vendor — but it turns "we humanize" into a
+measured on/off delta, and it's honest about the one axis synthetic input can't
+reach: CDP input emits no raw-pointer / coalesced events, which only attach-mode
+against real hardware closes.
+
 Escalation ladder when a wall trips: **headless → `--headed` → `humanize on` →
 `--backend nodriver` → attach-mode after a manual login.** Patchright's CDP-layer
 patches apply in *all* tiers, including attach (`connect_over_cdp`).
@@ -213,9 +228,34 @@ Patchright's CDP-layer stealth still applies over `connect_over_cdp` — attach 
 
 ## Security model
 
-Credentials never appear in logs, HAR captures, observe cache, or agent-visible response fields (grep-tested in CI). Vault uses XSalsa20-Poly1305 with key from OS keyring or `VIBATCHIUM_SECRETS_KEY`. All vibatchium-written files are 0600; directories 0700.
+vibatchium is built to drive *real* logins from an untrusted agent loop, so the
+threat model is "a credential must never reach the model, a screenshot, or a log":
 
-For the REST shim: without `--caps`, the bearer token grants every verb including `eval`, `secret_*`, and file-writing verbs. Local-code-equivalent — always pass `--caps=...` for hosted-mode. Live-view binds 127.0.0.1 only by default (`--insecure-public` to override).
+- **Encrypted vault.** Passwords and TOTP secrets live in an XSalsa20-Poly1305
+  vault keyed from the OS keyring or `VIBATCHIUM_SECRETS_KEY`. A resolved secret
+  never appears in logs, HAR captures, the observe cache, or any agent-visible
+  response field (grep-tested in CI).
+- **Secrets are never rendered in the clear.** `fill --use-secret` masks the field
+  *in the page* (`-webkit-text-security`), applied before the value is written, so
+  every path that turns the viewport into bytes — the `screenshot` verb, the 5 fps
+  live-view stream, and VLM `vision_*` calls that ship the frame to a model —
+  captures dots, not the value. The mask **fails closed** (no write if it can't be
+  confirmed), covers password fields so a show-password toggle can't unmask, and
+  the accessibility snapshot returned by `map` / `diff_map` strips masked values so
+  the secret can't leak into the model's context as text either.
+- **Live-view is authenticated.** The WebSocket requires a per-server token and
+  rejects foreign-`Origin` connections (the CSWSH class), and *driving* the page is
+  a separate token from watch-only — a read-only link can be shared without handing
+  over the keyboard. Binds `127.0.0.1` by default (`--insecure-public` to override).
+- **Scraped content is marked untrusted.** MCP verbs that return page-derived text
+  carry `openWorldHint`, so a host can taint the output against prompt injection
+  instead of treating a scraped page as instructions; pure probes are `readOnlyHint`
+  and mutating verbs (`stop`, `secret_delete`, `storage_restore`) are
+  `destructiveHint`.
+- **REST shim.** Without `--caps`, the bearer token grants every verb including
+  `eval`, `secret_*`, and file-writing verbs — local-code-equivalent, so always
+  pass `--caps=...` in hosted mode. All vibatchium-written files are `0600`;
+  directories `0700`.
 
 ## Honest limits
 
