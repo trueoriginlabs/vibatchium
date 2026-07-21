@@ -173,8 +173,12 @@ the new one. So we built our own.
 `vb oracle run` instruments a page, drives the same gesture set with humanize OFF
 then ON, extracts the features the vendors publish (trajectory curvature, dwell,
 keystroke cadence, scroll dynamics, event granularity) and grades each against a
-human-plausible band. Measured live: humanize **OFF → 0/5** scored features
-human-plausible, **ON → 6/6**. It does its job on every axis it can touch.
+human-plausible band. Measured live: humanize **OFF → 0 of 5** scored features
+human-plausible, **ON → 6 of 6**. The denominators differ on purpose: a
+humanize-off click is a teleport — too few pointer samples to define a path — so
+the trajectory-straightness feature is uncomputable and shown *unscored*, where
+humanize-on produces the multi-point path that makes it the sixth graded
+feature. It does its job on every axis it can touch.
 
 The axis it *can't* touch, confirmed on and off: the **raw pointer stream**.
 CDP-synthesised input fires no `pointerrawupdate` and carries no coalesced samples
@@ -197,7 +201,7 @@ real and synthetic input — scoring it would false-positive a real human) and
 ### Patchright 1.61 is vetted; the version cap moves to <1.62
 
 The `<1.61` cap was correct when written but had become a freeze rather than a
-gate: upstream shipped 1.61.1 and 1.61.2 while we sat on 1.60.1, and nobody had
+gate: upstream shipped 1.61.1 and 1.61.2 while we sat on 1.60.0, and nobody had
 run the vetting the gate exists to force.
 
 1.61.2 now passes: `test_wave7_stealth_gate.py` (the posture suite, real Chrome
@@ -209,12 +213,15 @@ Worth recording because it nearly went the other way: a first vetting attempt
 showed 102 then 79 failures that looked like engine regressions. They were
 entirely a broken harness — no optional extras, then no `pytest-asyncio`. What
 settled it was re-running the *same* broken venv with Patchright downgraded to
-1.60.1: byte-identical failures. Swapping the variable back is worth more than
+1.60.0: byte-identical failures. Swapping the variable back is worth more than
 any amount of reasoning about a failure list, and a partial fix that improves
 the number is the trap, not the answer.
 
-The installed `.venv` is deliberately left on 1.60.1; both minors are vetted,
-so upgrading is now unblocked rather than mandatory.
+The installed `.venv` is deliberately left on 1.60.0; both minors are vetted,
+so upgrading is now unblocked rather than mandatory. The version floor was
+corrected in the same pass — `>=1.59.0` → `>=1.59.1`, since 1.59.0 was never
+published to PyPI (harmless to the resolver, but it showed the bound was
+hand-written and never checked against the index).
 
 ### Docs: `research` is CLI-only, and `explore` is not
 
@@ -267,6 +274,11 @@ plan — an LLM call — for a page already solved. URLs are now normalized
 Deliberately conservative: anything not a *known* tracking key is kept,
 because `?id=42` and `?page=3` select different content and collapsing them
 would serve a stale plan for the wrong page.
+
+Superseded in 0.18.6 on two points that over-collapsed distinct pages:
+route-like fragments (`#/orders`) are now **kept**, and the bare `ref` param is
+no longer treated as tracking (it selects content on real sites, e.g. GitHub
+`?ref=<branch>`).
 
 `act` now returns `cache_status`: `hit`, `stale` (cached but self-healed) or
 `miss` — the direct answer to "why did that step cost an LLM call?".
