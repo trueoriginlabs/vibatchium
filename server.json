@@ -3,7 +3,7 @@
   "name": "io.github.trueoriginlabs/vibatchium",
   "title": "vibatchium",
   "description": "Patchright stealth + Vibium-style LLM-friendly CLI for agentic browser automation.",
-  "version": "0.15.1",
+  "version": "0.18.6",
   "repository": {
     "url": "https://github.com/trueoriginlabs/vibatchium",
     "source": "github",
@@ -15,7 +15,7 @@
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "vibatchium",
-      "version": "0.15.1",
+      "version": "0.18.6",
       "runtimeHint": "uvx",
       "transport": { "type": "stdio" },
       "packageArguments": [
