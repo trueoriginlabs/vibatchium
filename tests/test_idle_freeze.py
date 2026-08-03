@@ -465,3 +465,21 @@ def test_find_renderers_matches_real_chrome_child_cmdline(monkeypatch, tmp_path)
     })
     assert freeze._find_renderers(f"{base}/universalflavours") == [100, 101]
     assert freeze._find_renderers(f"{base}/universal") == []
+
+
+# ─── 0.18.11: a busy session must be distinguishable from a wedged one ──────
+
+def test_status_reports_busy_while_a_verb_holds_the_session_lock():
+    """`status` is unlocked, so it answers even while a verb is in flight —
+    which meant a BUSY session and a WEDGED one looked identical. A killed or
+    timed-out client leaves its handler running, which is exactly when you need
+    to tell those apart."""
+    import asyncio as _a
+
+    async def go():
+        e = _entry()
+        assert e.lock.locked() is False        # what status reports when idle
+        async with e.lock:
+            assert e.lock.locked() is True     # ...and while a verb is running
+        assert e.lock.locked() is False        # released on exit
+    _a.run(go())

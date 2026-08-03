@@ -1557,6 +1557,13 @@ def register_all(daemon) -> None:
             # it reports truthfully and does not thaw; the next session verb
             # thaws before running).
             "idle_frozen": entry.frozen if entry else False,
+            # Is a verb in flight on this session right now? Without this, a
+            # session that is merely BUSY is indistinguishable from one that is
+            # wedged: every later verb queues on entry.lock while `status`
+            # (unlocked) keeps answering cheerfully, so the only way to tell was
+            # to guess. A killed or timed-out client leaves its handler running,
+            # which is exactly when you need to know.
+            "busy": entry.lock.locked() if entry else False,
             # 0.7.0 cap relief: persistent + ephemeral budget usage.
             "budgets": d.registry.budgets(),
         }
