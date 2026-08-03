@@ -4,6 +4,29 @@ All notable changes to vibatchium are documented here. Versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Until 1.0,
 minor bumps may include breaking changes; we'll always call them out here.
 
+## [0.18.10] — 2026-08-03
+
+### Python 3.14 is supported — we just never said so
+
+3.14 has been out since October 2025. `requires-python = ">=3.11"` meant pip
+would happily install on it, but the classifiers stopped at 3.13 and CI never
+exercised it — an untested claim by omission, the same shape as the numbers
+0.18.7 removed from the README.
+
+Ran the full suite on 3.14 with the `[all]` extras, matching CI: **1,069 passed,
+1 skipped**, and the only failure is the pre-existing Optimus de-twin GPU
+artifact that fails identically on 3.13. Added to the CI matrix and to the
+classifiers, so it is now a tested claim rather than an assumed one.
+
+### test: guard the space-in-selector trap
+
+`vb count "button:has-text('Log in')"` silently returns 0 while
+`vb wait selector` with the identical string resolves it —
+`_looks_like_plain_text` routes any space-containing selector without `[ ] . #`
+to `get_by_text`. 0.18.7 documented this in AGENTS.md along with the `css=`
+escape hatch, but nothing pinned the behaviour, so the documentation could drift
+the moment the heuristic changed. It is pinned now, in both directions.
+
 ## [0.18.9] — 2026-08-03
 
 ### change: prompt-injection scanning is ON by default
