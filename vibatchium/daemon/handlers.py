@@ -2215,10 +2215,21 @@ def register_all(daemon) -> None:
 
     @daemon.handler("eval")
     async def _eval(d, args):
+        import asyncio as _asyncio
         s = _need_session(d)
         expr = args["expr"]
+        # BOUNDED. page.evaluate() has no timeout of its own, and an
+        # isolated-world evaluation still needs the page's main thread — an
+        # ad-saturated page starves it indefinitely. Unbounded, the handler
+        # never returns, so `entry.lock` is held for the life of the daemon and
+        # every later verb on the session queues behind it; only a
+        # registry-class verb (`session close` / `stop`) could recover, and
+        # those are lease-gated. wait_for lets the handler raise, return, and
+        # RELEASE the lock. Same guard `detect_forms` / `candidates` already use.
+        timeout_ms = int(args.get("timeout_ms") or 30_000)
         # Patchright's isolated-context default is what we want for stealth.
-        return {"value": await s.page.evaluate(expr)}
+        return {"value": await _asyncio.wait_for(s.page.evaluate(expr),
+                                                 timeout_ms / 1000)}
 
     @daemon.handler("attr")
     async def _attr(d, args):

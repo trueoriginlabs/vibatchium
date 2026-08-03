@@ -33,6 +33,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -296,18 +297,80 @@ def run_login(name: str, *, url: str | None = None,
     }
 
 
+def _kill_singleton_owner(profile_dir: str | os.PathLike, *,
+                          grace: float = 3.0,
+                          pid_alive: Callable[[int], bool] = _pid_alive) -> bool:
+    """SIGTERM (then SIGKILL) a Chrome still holding this profile's SingletonLock.
+
+    Last resort for a teardown that returned while its browser lived on: the
+    orphan keeps the lock, and the next launch on that profile is refused.
+
+    Never signals a pid we cannot positively identify as Chrome — a pid can be
+    recycled between Chrome's death and this call, and killing the wrong process
+    is far worse than leaving a lock behind. Returns True if it killed something.
+    """
+    lock = Path(profile_dir) / "SingletonLock"
+    try:
+        pid = parse_singleton_pid(os.readlink(lock))
+    except OSError:
+        return False
+    if pid is None or not pid_alive(pid):
+        return False
+    try:
+        comm = Path(f"/proc/{pid}/comm").read_text().strip().lower()
+    except OSError:
+        return False  # can't confirm it's Chrome → don't touch it
+    if "chrome" not in comm and "chromium" not in comm:
+        return False
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.kill(pid, sig)
+        except OSError:
+            break
+        end = time.time() + grace
+        while time.time() < end and pid_alive(pid):
+            time.sleep(0.1)
+        if not pid_alive(pid):
+            break
+    clear_stale_singletons(profile_dir)  # owner is gone → lock is now stale
+    return True
+
+
 def close_login(name: str, *,
-                base_env: Mapping[str, str] | None = None) -> dict[str, Any]:
+                base_env: Mapping[str, str] | None = None,
+                wait: float = 20.0) -> dict[str, Any]:
     """Tear down NAME's login daemon (closing the window) and remove its runtime
-    dir. Best-effort: a missing daemon is fine."""
+    dir. Best-effort: a missing daemon is fine.
+
+    Ordering matters. `shutdown` returns before the browser is actually gone, so
+    deleting the runtime dir straight after it could leave a live Chrome holding
+    ``PROFILES_DIR/<name>/SingletonLock`` — after which the next launch on that
+    profile fails to cold-start. So: close the SESSION first (that call awaits
+    the real browser teardown), then shut the daemon down, then wait for it to
+    actually go, and only then remove the dir. `_kill_singleton_owner` is the
+    backstop for a Chrome that ignored all of it.
+    """
     base_env = os.environ if base_env is None else base_env
     rt = login_runtime_dir(_base_runtime(base_env), name)
     sock = sock_for_runtime(rt)
     closed = False
+    # 1. session_close awaits registry.close() — unlike `shutdown` it actually
+    #    closes Chrome (bounded by the daemon's own teardown timeout).
+    try:
+        _client.call_on(sock, "session_close", {"name": name}, timeout=15.0)
+    except Exception:  # noqa: BLE001 — no session / no daemon is fine
+        pass
     try:
         _client.call_on(sock, "shutdown", timeout=5.0)
         closed = True
     except Exception:  # noqa: BLE001
         pass
+    # 2. Don't delete the runtime dir out from under a daemon that is still up.
+    deadline = time.time() + wait
+    while time.time() < deadline and _sock_alive(sock, timeout=1.0):
+        time.sleep(0.2)
+    # 3. Backstop: a Chrome that survived still owns the profile lock.
+    killed = _kill_singleton_owner(PROFILES_DIR / name)
     shutil.rmtree(rt, ignore_errors=True)
-    return {"session": name, "closed": closed, "runtime_dir": str(rt)}
+    return {"session": name, "closed": closed, "runtime_dir": str(rt),
+            "orphan_killed": killed}

@@ -4,6 +4,76 @@ All notable changes to vibatchium are documented here. Versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Until 1.0,
 minor bumps may include breaking changes; we'll always call them out here.
 
+## [0.18.8] — 2026-08-03
+
+### security: a `route_add` rule could silently bypass a goal's navigation allowlist
+
+A goal's domain allowlist is enforced at the request layer by a `context.route`
+nav guard, so it holds however a navigation is triggered — `go`, a link click, an
+HTTP redirect, JS `location=`. That is the right design, and it had a hole.
+
+Playwright tries route handlers **most-recently-registered first**, and the
+user-facing `route_add` handler terminated every request it saw with
+`continue_()` / `abort()` / `fulfill()` — it never called `route.fallback()`.
+So a rule added *after* a goal pinned an allowlist ran first, performed the
+request itself, and the guard never saw the navigation. `route add "**/*"` was
+enough to escape the domain boundary entirely, with no error and nothing in the
+log. An agent under a goal could do it without meaning to.
+
+The mirror image was also broken, quietly: a rule added *before* the guard lost,
+because the guard terminated too — so the user's route rule simply never fired.
+The guard's own docstring claimed the two composed "via `route.fallback()`".
+Neither side ever called it.
+
+Both sides now hand a request they do not terminate down the chain with
+`fallback()`, and each falls back to `continue_()` only when there is no other
+handler registered (with none, `fallback()` does not reliably perform the
+request and an allowed navigation would hang). `abort` and `fulfill` stay
+terminal — those are explicit user intent, and neither reaches the network.
+
+The regression test drives real Chrome: guard installed, allowlist pinned, rule
+registered afterwards, off-allowlist navigation must still be blocked *and* the
+user's rule must still see its requests. It fails against the old code.
+
+### fix: `eval` had no timeout, so a busy page wedged the session for the daemon's life
+
+`page.evaluate()` carries no timeout of its own, and an isolated-world
+evaluation still needs the page's main thread — an ad-saturated page starves it
+indefinitely. The handler never returned, so `entry.lock` was held forever and
+every later verb on that session queued behind it. Only a registry-class verb
+(`session close` / `stop`) could recover, and those are lease-gated.
+
+`eval`, `eval_handle` and `handle_eval` are now bounded by `asyncio.wait_for`
+(default 30 s, `--timeout-ms` on the CLI, `timeout_ms` over MCP) — the same
+guard `detect_forms` and `candidates` already used. A timeout now raises,
+returns, and releases the lock.
+
+### fix: `vb login --close` could orphan a Chrome holding the profile lock
+
+`close_login` called `shutdown` and deleted the runtime dir immediately, but
+`shutdown` returns before the browser is actually torn down. The surviving
+Chrome kept `PROFILES_DIR/<name>/SingletonLock`, and the next launch on that
+profile could not cold-start.
+
+Teardown is now ordered: `session_close` first (that call awaits the real
+browser teardown), then `shutdown`, then wait for the daemon to actually go,
+then remove the dir. `_kill_singleton_owner` is the backstop for a Chrome that
+ignored all of it — and it refuses to signal any pid it cannot positively
+identify as Chrome from `/proc/<pid>/comm`, because a pid can be recycled and
+killing the wrong process is worse than leaving a lock behind.
+
+### docs: three descriptions that did not match the code
+
+- `route_add`'s docstring reaches agents over MCP. It described resource-type
+  blocking ("images/css/fonts") — the verb takes Playwright **URL globs** and
+  has no resource-type filter. It also omitted that any rule installs a
+  `context.route` and so **disables Chrome's HTTP cache** for the session, which
+  matters on an anti-bot target.
+- `observe.py` claimed the LLM backend engages "when ANTHROPIC_API_KEY is set OR
+  --llm forced". The code requires `--llm`; a set key alone does nothing.
+- The nav guard's docstring claimed a composition with `route_add` that did not
+  exist, described above.
+
 ## [0.18.7] — 2026-08-03
 
 ### fix: idle-freeze froze renderers belonging to *another* session — and the first fix silently disabled the feature

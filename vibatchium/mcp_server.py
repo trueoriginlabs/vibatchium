@@ -231,8 +231,11 @@ TOOLS: list[tuple[str, str, dict, str, Any]] = [
      }, "required": ["target"]},
      "value", None),
     ("eval", "Evaluate a JS expression in the page (isolated context per Patchright default — `window.X = ...` mutations are NOT visible to page JS; use `eval_handle` to retain references).",
-     {"type": "object", "properties": {"expr": _str("JS expression.")},
-      "required": ["expr"]},
+     {"type": "object", "properties": {
+         "expr": _str("JS expression."),
+         "timeout_ms": _int("Give up after this long — a busy page starves "
+                            "isolated-world eval too.", 30_000),
+     }, "required": ["expr"]},
      "eval", None),
     ("map", "Snapshot actionable elements and assign @eN refs (uses Playwright aria_snapshot mode='ai').",
      {"type": "object", "properties": {

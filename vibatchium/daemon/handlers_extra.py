@@ -521,14 +521,25 @@ def register_extra(daemon) -> None:
     async def _route_add(d, args):
         """Add a request-interception rule. Mode: abort | fulfill | passthrough.
 
-        - abort:  request fails. Use to block heavy resources (images/css/fonts)
-                  to save bandwidth, or to block third-party trackers during recon.
+        PATTERN is a Playwright URL glob. There is no resource-type filter —
+        match by host or extension glob (`**/*.png`), not by "images".
+
+        - abort:  request fails (`net::ERR_FAILED`). Use to block third-party
+                  trackers during recon, or heavy paths to save bandwidth.
         - fulfill: return a synthetic response. Useful for API mocking and tests.
                    body / status / content_type / headers come from args.
         - passthrough (default): observe + log without altering. Use to record
                    that this pattern was matched (visible in `route_list`).
 
+        COST: adding ANY rule installs a `context.route`, which disables Chrome's
+        HTTP cache for the session — a measurable timing / no-304 difference. On
+        an anti-bot target (Cloudflare / DataDome / Turnstile) prefer zero rules;
+        if interception is genuinely needed, scope the glob to one third-party
+        host and `route_clear` it before the challenged navigation.
+
         Multi-page aware: route is registered on the context, so popups inherit it.
+        Non-terminal modes hand the request down via `route.fallback()`, so a
+        goal's navigation allowlist still applies to URLs this pattern matches.
         """
         s = _session(d)
         pattern = args["pattern"]
@@ -548,10 +559,29 @@ def register_extra(daemon) -> None:
             existing.setdefault("hits", 0)
             return {"updated": pattern, "mode": mode}
 
+        async def _proceed(route):
+            """Let the request go ahead WITHOUT swallowing the goal allowlist.
+
+            Playwright tries route handlers most-recently-registered first, so a
+            rule added after the goal's nav guard runs BEFORE it. Terminating
+            here with `continue_()` would perform the request directly and the
+            guard would never see the navigation — silently bypassing the
+            allowlist for every URL this pattern matches. `fallback()` hands the
+            request down the chain to the guard instead.
+
+            Only when a guard is actually installed: with no next handler,
+            `fallback()` does not reliably perform the request (the same reason
+            the guard itself uses `continue_()` — see browser.py).
+            """
+            if getattr(s, "_nav_guard_installed", False):
+                await route.fallback()
+            else:
+                await route.continue_()
+
         async def handler(route, request):
             rule = next((r for r in s._routes if r["pattern"] == pattern), None)
             if rule is None:
-                await route.continue_()
+                await _proceed(route)
                 return
             rule["hits"] = rule.get("hits", 0) + 1
             if rule["mode"] == "abort":
@@ -564,7 +594,7 @@ def register_extra(daemon) -> None:
                     headers=rule.get("headers") or {},
                 )
             else:
-                await route.continue_()
+                await _proceed(route)
 
         await s.context.route(pattern, handler)
         s._routes.append({
@@ -1409,14 +1439,20 @@ def register_extra(daemon) -> None:
         """
         s = _session(d)
         expr = args["expr"]
-        handle = await s.page.evaluate_handle(expr)
+        # Bounded for the same reason as `eval` — a wedged main thread would
+        # otherwise hold entry.lock for the daemon's life.
+        timeout_ms = int(args.get("timeout_ms") or 30_000)
+        handle = await asyncio.wait_for(s.page.evaluate_handle(expr),
+                                        timeout_ms / 1000)
         d._handle_counter += 1
         hid = f"h_{d._handle_counter}"
         d._handles[hid] = handle
         # Best-effort preview — JSON.stringify of the value when it's serializable
         try:
-            preview = await handle.evaluate("(v) => { try { return JSON.stringify(v).slice(0, 500); } catch(e) { return String(v).slice(0, 500); } }")
-        except Exception:  # noqa: BLE001
+            preview = await asyncio.wait_for(
+                handle.evaluate("(v) => { try { return JSON.stringify(v).slice(0, 500); } catch(e) { return String(v).slice(0, 500); } }"),
+                timeout_ms / 1000)
+        except Exception:  # noqa: BLE001 — incl. TimeoutError; preview is optional
             preview = None
         return {"handle": hid, "preview": preview}
 
@@ -1431,7 +1467,9 @@ def register_extra(daemon) -> None:
         if hid not in d._handles:
             raise KeyError(f"unknown handle: {hid} (use eval_handle first)")
         expr = args["expr"]
-        return {"value": await d._handles[hid].evaluate(expr)}
+        timeout_ms = int(args.get("timeout_ms") or 30_000)
+        return {"value": await asyncio.wait_for(d._handles[hid].evaluate(expr),
+                                                timeout_ms / 1000)}
 
     @daemon.handler("handle_list")
     async def _handle_list(d, args):

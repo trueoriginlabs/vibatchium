@@ -205,8 +205,15 @@ async def ensure_nav_guard(session: BrowserSession) -> None:
     `context.route("**/*")` disables Chrome's HTTP cache for the session — we
     must not impose that on every non-goal session. The guard reads
     ``session.nav_allowlist`` live, so it goes inert (pure fallback) the moment
-    the goal releases the session and clears it. Composes with the user-facing
-    `route_add` interception via ``route.fallback()``.
+    the goal releases the session and clears it.
+
+    Composes with the user-facing `route_add` interception in BOTH registration
+    orders: each side hands a request it does not terminate down the chain with
+    ``route.fallback()`` rather than performing it with ``continue_()``, so a
+    user rule can never swallow the allowlist check and the guard can never
+    swallow a user rule. (Before 0.18.8 both sides terminated, so whichever was
+    registered last won outright — a `route_add` rule added while a goal held an
+    allowlist silently bypassed it.)
     """
     if session._nav_guard_installed:
         return
@@ -225,13 +232,23 @@ async def ensure_nav_guard(session: BrowserSession) -> None:
                     pass
                 return
         # Allowed (or non-navigation / inert) → let the request proceed.
-        # continue_() performs the request directly; fallback() is avoided
-        # because with a single context route + no next handler it does not
-        # reliably perform the request (the allowed nav would hang). A
-        # user-added route_add rule is unaffected for its own patterns; this
-        # guard only fires on "**/*" for the allowlist check.
+        #
+        # Which of continue_() / fallback() is correct depends on whether any
+        # user `route_add` rule is registered. Playwright tries handlers
+        # most-recently-registered first, so:
+        #   - rule added AFTER this guard  → the rule runs first; it calls
+        #     fallback() for its non-terminal modes and lands back here.
+        #   - rule added BEFORE this guard → this guard runs first, and
+        #     terminating with continue_() would mean the user's rule never
+        #     fires at all. fallback() passes the request down to it.
+        # With no user rule there is no next handler, and fallback() does not
+        # reliably perform the request (the allowed nav would hang), so
+        # continue_() is required in that case.
         try:
-            await route.continue_()
+            if getattr(session, "_routes", None):
+                await route.fallback()
+            else:
+                await route.continue_()
         except Exception:  # noqa: BLE001
             pass
 

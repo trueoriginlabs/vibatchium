@@ -1436,15 +1436,19 @@ def fetch(ctx, url, method, headers, data, impersonate, no_cookies, user_agent, 
 @cli.command(name="eval")
 @click.argument("expr", required=False)
 @click.option("--stdin", is_flag=True, help="Read expression from stdin.")
+@click.option("--timeout-ms", type=int, default=30000, show_default=True,
+              help="Give up if the page's main thread can't run the expression "
+                   "in time. A busy page starves isolated-world eval too.")
 @click.pass_context
-def eval_cmd(ctx, expr, stdin):
+def eval_cmd(ctx, expr, stdin, timeout_ms):
     """Evaluate JS in the page (isolated context, per Patchright default)."""
     if stdin:
         expr = sys.stdin.read()
     if not expr:
         click.echo("expr or --stdin required", err=True)
         sys.exit(2)
-    _emit(call("eval", {"expr": expr}), ctx.obj["json"], "value")
+    _emit(call("eval", {"expr": expr, "timeout_ms": timeout_ms}),
+          ctx.obj["json"], "value")
 
 
 @cli.group()
