@@ -19,7 +19,7 @@ After `setup`, any agent session in any cwd sees vibatchium as a registered MCP 
 
 ```bash
 # In this repo the binary is .venv/bin/vb. With pipx install it's on $PATH.
-VB=/home/mono/projects/vibatchium/.venv/bin/vb    # or just `vibatchium`
+VB="$PWD/.venv/bin/vb"                            # or just `vibatchium` if pipx-installed
 
 $VB explore https://example.com                       # one-call: text-first, auto-closes (screenshot only as a fallback)
 $VB research --target https://example.com \           # parallel fan-out
@@ -36,6 +36,154 @@ $VB verify_url --url https://maybe-dead.example       # ~50ms DNS pre-check
 - ❌ `start && go && text` for a simple lookup. Use `explore` — one call, auto-headless, auto-closes.
 - ❌ Headed Chrome for background work. As of 0.6.4 **everything is headless by default** — `explore`/`research`, the `x.*` plugin, the daemon's `start`, all programmatic callers. Only an interactive human terminal (`vb start` at a TTY) pops a visible window. If a window appears during agent work, someone passed `--headed` or set `VIBATCHIUM_DEFAULT_HEADED=1`. To force headless even at a TTY: `VIBATCHIUM_DEFAULT_HEADLESS=1`.
 - ❌ Direct domain probes without `verify_url`. A bad URL guess burns 30s of nav timeout; `verify_url` is 50ms.
+
+## Traps — things that look like vb being broken
+
+Every item below was re-verified against the code in 0.18.7. Field notes that
+turned out to be wrong are marked, because the wrong version circulated first.
+
+### Two locator dialects, split by verb — the biggest time-waster
+
+`wait selector` speaks **Playwright syntax only**. vb's `@text:` / `@role:` /
+`@label:` grammar is not decoded there and raises an invalid-selector error.
+
+```bash
+vb wait selector "@text:Log in"          # ✗ Unexpected token "@text"
+vb wait selector "text=Log in"           # ✓
+vb wait selector "role=button[name='Log in']"   # ✓
+vb map && vb wait selector @e12          # ✓ routed to wait_ref (bare `e12` ok; `[ref=e12]` is not)
+```
+
+`count` / `click` / `fill` / `text` have the **inverse** trap: a CSS selector
+containing a space and no `[ ] . #` is silently reinterpreted as visible text,
+so it matches nothing and reports no error.
+
+```bash
+vb count "button:has-text('Log in')"     # ✗ becomes a text lookup → 0
+vb count "css=button:has-text('Log in')" # ✓ force the CSS engine
+vb count "@role:button[name=Log in]"     # ✓ or use the semantic grammar
+```
+
+**Rule:** prefix raw selectors with `css=` for count/click/fill; never use
+`@prefix:` with `wait selector`. `wait selector` also ignores `vb frame switch`
+— it always waits on the main page.
+
+### `eval` can wedge a session until the daemon dies
+
+`page.evaluate` has no timeout of its own, and an isolated-world eval still
+needs the page main thread — an ad-saturated page starves it. The handler then
+holds `entry.lock` **for the life of the daemon**; only registry-class verbs
+(`vb session close`, `vb stop`) can recover, and those are lease-gated.
+
+Prefer the guarded readers, which cap at 30s and release the lock on timeout:
+
+```bash
+vb extract --mode markdown --timeout-ms 10000
+vb extract-fields --timeout-ms 10000 ...
+```
+
+Use `eval` only for expressions you know return synchronously, and only after
+the page settled (`vb wait load` / `vb wait selector`).
+
+### `extract --mode links` returning 0 means shadow DOM, not a cap
+
+It is exactly `document.querySelectorAll('a[href]')` on the **main frame**,
+deduped by absolute URL, dropping empty / `#` / `javascript:`. It does not
+filter by visibility or origin, and the cap does not lose links.
+
+So if `vb count "a[href*='/item/']"` finds 12 and extract finds 0, the anchors
+are almost certainly in an open shadow root (Playwright pierces it; plain
+`querySelectorAll` does not) — or you switched frames and extract read the top
+document anyway. Scope to a container, don't pass the anchor selector itself:
+
+```bash
+vb extract "<container>" --mode links    # ✓ descendants of one element
+vb extract "a[href*='/item/']" --mode links   # ✗ yields 0
+```
+
+`--max-links 0` silently means 500. Raising it only matters if you got back
+exactly `max_links` results.
+
+### `act` is free and lexical — phrase the intent in the button's own words
+
+```bash
+vb --session work observe "accept the cookie banner"   # plan only
+vb --session work act "accept the cookie banner"       # plan + execute
+```
+
+The default backend is heuristic: **no API key, no inference**. Inference
+happens only with an explicit `--llm`; having `ANTHROPIC_API_KEY` set changes
+nothing. The matcher is keyword overlap against each element's accessible
+*name*, not semantics — no overlap returns `{"executed":0,"reason":"empty plan"}`.
+It returns a `_durable` locator (`role=button[name="Add to cart"]`) that
+self-heals when the DOM shifts.
+
+To disambiguate: `vb candidates "<sel>"` (0-based, max 50) then
+`vb click "<sel>" --index N`. `--index` works on `fill`/`type`/`hover` too.
+
+### Killing the `vb` client does not cancel anything
+
+The daemon runs the handler to completion and only then notices the socket is
+gone. The lock is released normally (**correcting an earlier note** — it does
+not leak), but the click/fill/navigation **may still land in the browser**.
+Treat a killed or timed-out verb as *outcome unknown* and re-observe before
+retrying, or you will double-apply the side effect. The client's own read
+timeout is 120s.
+
+To break out of a genuinely hung handler use `vb session close <name>` — it
+takes a different lock and doesn't queue behind the wedged verb.
+
+### `vb login --close` can leave an orphaned Chrome
+
+The teardown can return before the browser is gone, leaving a live Chrome
+holding `~/.config/vibatchium/profiles/<name>/SingletonLock`. The next launch
+then fails to cold-start on the locked profile.
+
+```bash
+readlink ~/.config/vibatchium/profiles/<name>/SingletonLock   # -> <host>-<pid>
+```
+
+If that pid is alive, the teardown leaked — kill it, then relaunch. **Do not**
+reach for `vb clean --locks --apply` here: it only protects profiles in use by
+the daemon it queries, so it will unlink a live orphan's lock and let two
+Chromes onto one profile.
+
+### `route` is URL globs, not resource types — and it costs you the HTTP cache
+
+`vb route add PATTERN --mode abort|fulfill|passthrough` matches **Playwright URL
+globs only**; there is no resource-type filter (**correcting an earlier note**
+that described it as image/css/font blocking). Any route rule installs a
+`context.route`, which disables Chrome's HTTP cache for that session — a
+measurable timing and no-304 delta. Aborted subresources surface as
+`net::ERR_FAILED`.
+
+On a Cloudflare / DataDome / Turnstile target, add zero route rules. If you
+genuinely need interception, scope the glob to one third-party host and
+`vb route clear` before the challenged navigation.
+
+### Corrected: `go` does not need `--wait-until commit`
+
+An earlier note advised `go --wait-until commit --timeout 12000` as a
+hang workaround. That was wrong. `vb go` already defaults to
+`domcontentloaded` with a 60s timeout — it does not wait for network idle and
+cannot hang indefinitely. Only `--wait-until networkidle`, passed
+deliberately, can stall on ad/XHR-heavy pages (and is still capped by
+`--timeout`).
+
+Every `go` also runs a non-tunable ≤5s "body has >100 chars" render gate after
+navigation, so `commit` does not buy a fast return — it usually costs the full
+5s and hands back a barely-rendered page. If a page truly isn't ready, follow
+up with `vb wait selector` / `vb wait text` / `vb expect`, not a weaker
+`wait_until`.
+
+### Never `pkill -f` on a shared box
+
+The pattern matches the agent's own shell command line and kills the session.
+Use:
+
+```bash
+ps -eo pid,cmd --no-headers | grep PAT | grep -v ' grep ' | grep -v 'bash -c' | awk '{print $1}'
+```
 
 ## Tool routing
 

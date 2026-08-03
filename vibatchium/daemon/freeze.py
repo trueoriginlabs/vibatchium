@@ -125,7 +125,16 @@ def _find_renderers(profile_dir: str) -> list[int]:
     profile whose path is a prefix of another's (`…/profiles/ali` vs
     `…/profiles/alidemo`) matches it, and since this scans all of /proc that
     freezes renderers belonging to a different session — even one owned by a
-    different daemon. Empty result = fail-safe (nothing gets frozen)."""
+    different daemon. Empty result = fail-safe (nothing gets frozen).
+
+    KNOWN STRUCTURAL LIMIT: victim selection is by profile path over the whole
+    of /proc, not by process ancestry, so correctness rests on profile paths
+    being unique rather than on ownership. Whole-argument matching makes a
+    collision unreachable in practice (two daemons would have to serve the same
+    profile_dir, which Chrome's SingletonLock prevents), but scoping the scan to
+    the daemon's own process tree would make cross-daemon collateral
+    structurally impossible. Not one line: Chrome's browser process is a child
+    of the Playwright driver, so it needs a real ancestry walk."""
     pids = []
     want = f"--user-data-dir={profile_dir}"
     for ent in os.listdir("/proc"):
