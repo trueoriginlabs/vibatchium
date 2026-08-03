@@ -4,6 +4,19 @@ All notable changes to vibatchium are documented here. Versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Until 1.0,
 minor bumps may include breaking changes; we'll always call them out here.
 
+## [0.18.12] — 2026-08-04
+
+### docs: the PyPI project page was telling people to install 0.6.8
+
+`README.md`'s `vb update --version` example pinned 0.6.8 — two months and
+eleven releases stale. PyPI renders the README as the project description and
+directory sites mirror it, so that instruction was live on the most-visited
+page we have.
+
+Fixed in b4ccdd7, but a published description cannot be edited — only a new
+upload replaces it. Hence this release: it exists solely to deploy that one
+line. No code change.
+
 ## [0.18.11] — 2026-08-03
 
 ### fix: two teardown paths that could hang or leak, and a session you couldn't tell was busy
