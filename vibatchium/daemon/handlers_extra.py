@@ -1863,7 +1863,7 @@ def register_extra(daemon) -> None:
         Built-in targets:
           sannysoft  → bot.sannysoft.com (counts passed rows in the WebDriver table)
           creepjs    → abrahamjuliot.github.io/creepjs (trust score 0..100)
-          brotector  → kaliiiiiiiiii.github.io/brotector (leak count, lower = better)
+          brotector  → ttlns.github.io/brotector (leak count, lower = better)
 
         Also accepts a raw URL via `--target https://...` plus an optional
         `--extract <js>` expression to override the score extraction.
@@ -1903,7 +1903,7 @@ def register_extra(daemon) -> None:
                 }""",
             },
             "brotector": {
-                "url": "https://kaliiiiiiiiii-vinyzu.github.io/Brotector/",
+                "url": "https://ttlns.github.io/brotector/",
                 "extract": """() => {
                     // Brotector lists detection signals; count those that fired.
                     const fired = document.querySelectorAll('.detection-fired, [data-fired="true"]').length;

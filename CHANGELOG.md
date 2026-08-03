@@ -4,6 +4,90 @@ All notable changes to vibatchium are documented here. Versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Until 1.0,
 minor bumps may include breaking changes; we'll always call them out here.
 
+## [0.18.7] — 2026-08-03
+
+### fix: idle-freeze froze renderers belonging to *another* session — and the first fix silently disabled the feature
+
+Two bugs, in sequence. Both are in `freeze._find_renderers`, which picks which
+renderer processes get SIGSTOPped.
+
+**The original bug.** It matched `--user-data-dir=<profile>` as an unanchored
+substring of the joined `/proc/<pid>/cmdline`, and scans all of `/proc` rather
+than the daemon's own children. So a session whose profile path is a **prefix**
+of another's froze that other session's renderers — across daemon boundaries.
+`ali` froze `alidemo`; `default` would freeze anything named `default*`.
+
+The victim looked like a network hang: the window paints and the title is
+correct, but nothing progresses and every verb against it blocks until the
+client timeout. Setting `VIBATCHIUM_IDLE_FREEZE=0` on the victim's daemon did
+nothing, because the freezer doing the damage runs in a different process —
+which is what made this hard to diagnose.
+
+**The bug in the fix.** The first attempt switched to an exact match against
+`cmdline.split("\0")`. That is correct for a normally-exec'd process, but
+**Chrome rewrites the process title of every child it spawns**, and a rewritten
+title arrives as one space-joined field rather than NUL-separated argv. Inside a
+single Chrome tree both shapes occur: the browser process keeps real argv, while
+its renderer / gpu / utility / zygote children each present a blob. Splitting
+only on NUL therefore found **zero renderers on a real machine** — idle-freeze
+stopped freezing anything at all, silently, while still logging "idle-freeze
+armed" on every start.
+
+Its regression tests passed throughout, because the fixture wrote NUL-separated
+argv for renderers too — encoding the same wrong model as the fix. A test whose
+fixture shares the fix's assumption cannot falsify it; this one turned a dead
+feature into a confidently-green one.
+
+`_cmdline_args` now returns the arguments of either shape, so `--type=renderer`
+and `--user-data-dir=…` are matched as **whole arguments** — closing the prefix
+collision without losing the renderers. A profile path containing a space
+matches nothing, which is the module's existing fail-safe (freezing nothing
+beats freezing the wrong renderer). The fixture is rebuilt from cmdline bytes
+captured off a live Chrome, and a new test asserts both shapes directly.
+
+### deps + packaging
+
+- **`pillow<12.0` → `<13.0`.** The old cap made a patched Pillow *impossible* to
+  install: 11.3.0 is the final 11.x, and its outstanding advisories are fixed
+  only in 12.x. Anyone running `pip install vibatchium[all]` was resolver-forced
+  onto a vulnerable build.
+- **`mcp>=1.0.0` → `>=1.27.2`.** Picks up the fix for a flaw where session
+  requests were served without verifying the authenticated principal — which
+  lands on `vb mcp` directly. The `<2.0` ceiling is held deliberately; the SDK
+  2.x / spec-2026-07-28 migration is its own change.
+- **`aiohttp>=3.9` → `>=3.14.3`** for the liveview extra.
+- **`patchright!=1.61.1`** — that release regressed a `navigator.webdriver`
+  leak, fixed in 1.61.2. `<1.62` still stands until 1.62 clears the stealth gate.
+- **LICENSE now carries the full Apache-2.0 text.** It previously held only the
+  appendix boilerplate, so GitHub reported the project as NOASSERTION and
+  license scanners could not classify it.
+- The PyPI summary said "Patchwright".
+- GitHub Actions were 3–5 majors behind; `pypa/gh-action-pypi-publish` was
+  pinned to a moving `release/v1` tag and is now pinned to a SHA.
+
+### fix: `vb evals --target brotector` was scoring a 404
+
+The hardcoded URL had gone dead. Pointed at the live Brotector, so the eval
+measures the gauntlet instead of an error page.
+
+### docs: stop publishing numbers the suite does not assert
+
+- The false-positive rate for the prompt-injection classifier is **0.98 %**
+  (2 of 204), not 0 %. The two strings it flags are in the corpus.
+- The test count in the header said 606; it is 1,061.
+- `vb evals --update-readme` does not parse — `evals` is a command group. The
+  working form is `vb evals run --update-readme`.
+- bot.sannysoft / CreepJS / Cloudflare cold-launch scores are now labelled as
+  manual observations rather than CI-asserted results, because no test gates
+  on them.
+- The comparison table listed a competitor as lacking CDP attach when it has it,
+  and omitted the largest overlapping project in the category. Rewritten against
+  versions checked on 2026-08-03, conceding the rows that are no longer ours and
+  scoping the parallel-sessions claim to the tool it actually holds against.
+- Added an **Authorized use** section, an **arm64/Apple-Silicon caveat** on the
+  stealth tiers, and honest limits covering behavioural cursor detection and
+  cross-account profile correlation.
+
 ## [0.18.6] — 2026-07-20
 
 ### fixes: idle-freeze concurrency, cache-key collisions, secret-mask timing, lockfile drift (found by review)

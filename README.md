@@ -5,6 +5,15 @@
 **Agent-piloted browser automation that clears Cloudflare.**
 Patched Playwright + multi-session daemon + credential vault + vision clicking + prompt-injection safety. One MCP server, N parallel Chromes, persistent per-session profiles.
 
+> **Where this fits.** Both Anthropic and Google now ship an agent that drives
+> *your own* signed-in Chrome — Claude in Chrome and Chrome Auto Browse. If that
+> is what you want, use them: they are free, first-party, and better integrated.
+> They are also **supervised** — visible window, real time, and they hand control
+> back to you at a login wall or a CAPTCHA. vibatchium is for the other half:
+> **unattended, headless, N-at-a-time**, on a box with no human in front of it,
+> against sites that fight automation. That is the whole of the wedge, and it is
+> worth being precise about which side of it you are on.
+
 ```
 pipx install vibatchium             # core: browse / extract / screenshot / N parallel sessions
 # want the stealth HTTP fetch lane (vb fetch), the credential vault, VLM read, or the REST shim?
@@ -27,7 +36,9 @@ vb research --target https://example.com \          # parallel fan-out, N intent
   --intent "pricing model" --intent "customers" --intent "tech stack"
 ```
 
-**Status:** active development, alpha. 606 tests green. 31/31 on bot.sannysoft.com. Cleared HackerOne Cloudflare cold-launch. Apache-2.0 (AGPL only via the opt-in `nodriver` extra).
+**Status:** active development, alpha. **1,061 tests** green in CI (Linux, Python 3.11–3.13). Apache-2.0 (AGPL only via the opt-in `nodriver` extra).
+
+<sub>Detector scores quoted below (bot.sannysoft, CreepJS, Cloudflare cold-launch) are **manual observations, not CI-asserted** — no test in the suite gates on them, and they are only as current as the last hand-run. The generated block under [Measured scores](#measured-scores) is the one to trust; it is empty until someone runs it.</sub>
 
 ## Updating
 
@@ -54,21 +65,33 @@ vb --version               # confirm
 
 ## Why vibatchium
 
-|  | Vibium | Patchwright | Browser-Use | vibatchium |
+Most of what used to sit in this table is now commodity. What follows keeps only
+the rows that still separate us — and concedes the ones that don't.
+
+|  | Patchright | Browser-Use | agent-browser¹ | vibatchium |
 |---|---|---|---|---|
-| LLM-friendly `@eN` refs + `map` / `diff map` | ✅ | ❌ | ❌ | ✅ |
-| Cloudflare CDP-leak patches | ❌ | ✅ | ❌ | ✅ |
-| **Multiple parallel browsers, one daemon** | ❌ | manual | ❌ | ✅ |
-| Per-session persistent profile (cookies, login) | ✅ | manual | manual | ✅ |
-| CDP-attach to manually-logged-in Chrome | ❌ | manual | ❌ | ✅ |
-| **Encrypted credential vault** (passwords + TOTP) | ❌ | ❌ | ❌ | ✅ |
-| **IMAP email-code polling** (2FA) | ❌ | ❌ | ❌ | ✅ |
-| Per-session proxy + WebRTC leak guard | ❌ | manual | ❌ | ✅ |
-| Vision-first clicking with spend cap | ❌ | ❌ | ✅ | ✅ |
-| **Prompt-injection classifier on scraped content** | ❌ | ❌ | ❌ | ✅ (0% FP / 204 samples) |
-| Live-view stream with takeover (WebSocket) | ❌ | ❌ | partial | ✅ |
-| Bearer-token REST shim + caps gating | ❌ | ❌ | manual | ✅ |
-| `research` command (parallel fan-out) — CLI only | ❌ | ❌ | ❌ | ✅ |
+| Compact, token-frugal page representation | ❌ | ❌ | ✅ | ✅ |
+| Per-session persistent profile (cookies, login) | manual | ✅ | ✅ | ✅ |
+| CDP-attach to a manually-logged-in Chrome | manual | ✅ | ✅ | ✅ |
+| Encrypted credential vault | ❌ | ❌ | ✅ | ✅ |
+| **Stealth / anti-bot patches in core** | ✅ | ❌ | plugin slot only² | ✅ |
+| **Session state encrypted at rest by default** | — | — | ❌ (opt-in)³ | ✅ |
+| **Vault key in the OS keyring, not beside the ciphertext** | — | — | ❌⁴ | ✅ |
+| **TOTP + IMAP email-code 2FA** | ❌ | ❌ | ❌ | ✅ |
+| **N parallel persistent sessions on one daemon** | manual | — | — | ✅⁵ |
+| Per-session proxy + WebRTC leak guard | manual | ❌ | — | ✅ |
+| Vision-first clicking with spend cap | ❌ | ✅ | — | ✅ |
+| Prompt-injection scanning on scraped content | ❌ | ❌ | ❌ | opt-in⁶ |
+| Live-view stream with takeover (WebSocket) | ❌ | partial | — | ✅ |
+| Bearer-token REST shim + caps gating | ❌ | manual | — | ✅ |
+
+<sub>Verified 2026-08-03 against agent-browser v0.33.2. — = not assessed, not a claim of absence.</sub><br>
+<sub>¹ [vercel-labs/agent-browser](https://github.com/vercel-labs/agent-browser), ~1.27M npm downloads/week — by far the largest overlap, and it covers four of the rows above.</sub><br>
+<sub>² Stealth is out of agent-browser core by policy; its docs designate a `launch.mutate` plugin capability as the extension point.</sub><br>
+<sub>³ agent-browser's own README: "State files contain session tokens in plaintext&nbsp;… for encryption at rest, set `AGENT_BROWSER_ENCRYPTION_KEY`". Its credential *vault* is always encrypted; the session state is what defaults to plaintext.</sub><br>
+<sub>⁴ agent-browser auto-generates its key into `~/.agent-browser/.encryption-key` — the same directory as the ciphertext.</sub><br>
+<sub>⁵ Scoped deliberately: this is a real differentiator against **playwright-mcp**, whose README notes a persistent profile can only be used by one browser instance at a time. It is *not* a differentiator against tools that give each named session its own browser instance.</sub><br>
+<sub>⁶ Ships **off by default** (`safety` mode `off` = no scanning). Turn it on explicitly; it is not doing anything until you do.</sub>
 
 ## Real Chrome vs fake Chrome
 
@@ -93,8 +116,9 @@ one session:
 A real device returns the same fingerprint every page load; a fingerprint keyed
 off `Date.now()` does not — and *that inconsistency* is exactly what lie-detection
 fingerprinters (CreepJS and friends) flag. Measured: vibatchium's canvas hash and
-WebGL readback are byte-identical across navigations, and CreepJS reports **0 %
-stealth-tampering** (no synthetic-environment signatures).
+WebGL readback are byte-identical across navigations, and CreepJS reported **0 %
+stealth-tampering** (no synthetic-environment signatures) when last run by hand.
+That figure is not regression-tested — treat it as an observation, not a guarantee.
 
 **This is not a claim of invisibility.** The moat is fingerprint *authenticity*,
 not hiding that a browser is automated — vibatchium still reads as headless on the
@@ -161,7 +185,7 @@ animation page drops to zero CPU without a teardown (default on;
 
 | Mode | Surface | Auth |
 |---|---|---|
-| `vb mcp` | stdio JSON-RPC; defaults to the **lean** ~80-verb profile (`--caps=full`/`all` for the full surface; `--caps=...` for a custom bucket set) | n/a (stdio) |
+| `vb mcp` | stdio JSON-RPC; defaults to the **lean** 86-verb profile (`--caps=full`/`all` for the full surface; `--caps=...` for a custom bucket set) | n/a (stdio) |
 | `vb serve` | FastAPI on `127.0.0.1:8000`; every verb at `POST /v1/<verb>`; WebSocket live-view at `/v1/stream/<session>` | bearer token (`~/.cache/vibatchium/rest-token`, mode 0600) |
 
 **REST capability gating**: `vb serve --caps=core,nav,input,vision` restricts the HTTP surface the same way `mcp --caps` does. Without it, REST grants local-code-equivalent access (eval + secret_* + file-writing verbs all exposed) — safe for localhost dev, **not** for hosted/multi-tenant.
@@ -173,6 +197,11 @@ Stealth is a ladder, not a boolean. Pick the lowest tier that clears your target
 does **not** claim cold-launch defeat of behavioral walls — those need a real
 human-driven session, and attach-mode is the honest answer.
 
+> **Architecture caveat.** Every tier below was measured on **x86-64 Linux**.
+> Patchright has a known open arm64 / Apple-Silicon detection gap, so these
+> results should not be assumed to carry to an ARM host. If you run there,
+> measure before you rely on it.
+
 | Tier | How | Clears | Doesn't clear |
 |---|---|---|---|
 | **Standard** (default) | headless cold launch, real `channel=chrome`, de-Headless'd UA | Cloudflare IUAM / managed challenge, `bot.sannysoft` 31/31, JS-runtime fingerprinting | aggressive Turnstile, DataDome/Kasada, anything behind a login |
@@ -181,12 +210,12 @@ human-driven session, and attach-mode is the honest answer.
 
 ### Measured scores
 
-`vb evals --update-readme` writes measured numbers into the block below, so
+`vb evals run --update-readme` writes measured numbers into the block below, so
 what we publish is generated rather than asserted. It is empty until someone
 runs it — an empty block is honest; a number with no run behind it is not.
 
 <!-- vibatchium-evals -->
-_No eval run has been published yet. Generate with:_ `vb evals --update-readme`
+_No eval run has been published yet. Generate with:_ `vb evals run --update-readme`
 <!-- /vibatchium-evals -->
 
 > **What these do and don't cover.** These are *fingerprint scoreboards* —
@@ -218,13 +247,25 @@ patches apply in *all* tiers, including attach (`connect_over_cdp`).
 For DataDome / Kasada / hardened auth that walls cold-launch automation:
 
 ```
-google-chrome --remote-debugging-port=9222 --user-data-dir=/tmp/cdp-profile &
+google-chrome --remote-debugging-port=9222 \
+              --disable-blink-features=AutomationControlled \
+              --user-data-dir=/tmp/cdp-profile &
 # log into the walled site by hand
 vb attach http://localhost:9222
 vb go https://target.example.com        # now reads as your real browser
 ```
 
 Patchright's CDP-layer stealth still applies over `connect_over_cdp` — attach mode gets the same protocol-level patches as cold launch, plus your real-browser fingerprint and any cookies from the manual login.
+
+> **Launch flags are yours on this tier.** On cold launch the backend supplies
+> `--disable-blink-features=AutomationControlled` for you. Attach connects to a
+> Chrome that is *already running*, so nothing vibatchium does can add a launch
+> flag after the fact — if you started Chrome without it, that tell is present
+> for the whole session. Include it in the command above.
+
+> **`--remote-debugging-port` is an open door.** It grants full browser control
+> to any process on the machine, and a page you visit can probe localhost to
+> discover it. Use it on a machine you trust, and close Chrome when you're done.
 
 ## Security model
 
@@ -266,6 +307,33 @@ threat model is "a credential must never reach the model, a screenshot, or a log
 - **Synthetic input has a CDP coordinate signature.** Every `click`/`type`/`hover`/`scroll` rides Playwright over CDP `Input.dispatchMouseEvent`/`dispatchKeyEvent` (`pageX==screenX`, no `CoalescedEvents`). Patchright patches the JS-context leaks, not the Input domain, and `humanize on` improves trajectory/timing realism but does **not** change the per-event signature. Behavioral walls that fingerprint it (DataDome/Kasada/HUMAN) want **attach-mode against a real headful Chrome you drive** — OS-level synthetic input (CDP-Patches) is headful + active-tab only and doesn't fit a headless, N-parallel daemon.
 - **`fetch` is a static-fingerprint lane, not a browser.** The curl_cffi `fetch` verb matches Chrome's JA3/HTTP2 but runs no JavaScript — it clears TLS-fingerprint gates, not DataDome/Kasada/Turnstile JS challenges. Fall back to `go` for those.
 - **Single daemon = single point of failure.** No HA built in.
+- **Behavioural detection now targets the humanizer directly.** Cloudflare's 2026
+  bot-detection work names mathematically ideal Bézier cursor paths and superhuman
+  click precision as tells. `humanize` improves on nothing-at-all, but it is a
+  pointer-trajectory model, not a physiological one — and it is **off by default**,
+  which on a behaviourally-scored site is the louder of the two states.
+- **One burned profile can taint every account that shares it.** Vendors now link
+  device telemetry across sessions *and* accounts. Use one profile per account,
+  never share a profile between identities, and don't reuse a profile that has
+  already been challenged.
+
+## Authorized use
+
+vibatchium is built to drive sessions **you own**, with **your** credentials, on
+**your** machine — your accounts, your employer's, or a client's with their
+written permission. It is a tool for automating access you already have.
+
+That boundary is not a formality. In 2026 a US district court granted a
+preliminary injunction against an AI agent that accessed password-protected pages
+*through the user's own logged-in account*, holding that the user's permission is
+not the platform's authorization. (The order was stayed on appeal and there is no
+merits ruling, so the law here is unsettled — which is a reason for care, not
+comfort.) Scraping a site's public pages, evading a wall you have no account
+behind, or automating an account whose terms forbid it are all decisions you are
+making, and the consequences are yours.
+
+Check the terms of the site you are automating. If you are acting for someone
+else, get it in writing.
 
 ## License
 
