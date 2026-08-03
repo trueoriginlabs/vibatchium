@@ -297,9 +297,18 @@ def run_login(name: str, *, url: str | None = None,
     }
 
 
+def _proc_comm(pid: int) -> str | None:
+    """The process name for `pid` from /proc, or None if unreadable."""
+    try:
+        return Path(f"/proc/{pid}/comm").read_text().strip().lower()
+    except OSError:
+        return None
+
+
 def _kill_singleton_owner(profile_dir: str | os.PathLike, *,
                           grace: float = 3.0,
-                          pid_alive: Callable[[int], bool] = _pid_alive) -> bool:
+                          pid_alive: Callable[[int], bool] = _pid_alive,
+                          comm_of: Callable[[int], str | None] = _proc_comm) -> bool:
     """SIGTERM (then SIGKILL) a Chrome still holding this profile's SingletonLock.
 
     Last resort for a teardown that returned while its browser lived on: the
@@ -316,9 +325,8 @@ def _kill_singleton_owner(profile_dir: str | os.PathLike, *,
         return False
     if pid is None or not pid_alive(pid):
         return False
-    try:
-        comm = Path(f"/proc/{pid}/comm").read_text().strip().lower()
-    except OSError:
+    comm = comm_of(pid)
+    if comm is None:
         return False  # can't confirm it's Chrome → don't touch it
     if "chrome" not in comm and "chromium" not in comm:
         return False
