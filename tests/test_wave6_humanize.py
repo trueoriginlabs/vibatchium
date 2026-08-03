@@ -69,8 +69,17 @@ def test_humanized_path_deterministic_with_seed():
 
 
 def test_sample_dwell_distribution():
-    """20 samples should have stdev > 15ms (proves it's not constant)."""
-    samples = [sample_dwell_ms() for _ in range(20)]
+    """Samples should have stdev > 15ms (proves it's not constant).
+
+    N is 200, not 20, because the sample stdev of 20 unseeded draws is itself
+    very noisy: measured over 4000 trials of the real function, n=20 gives a 1st
+    percentile of 15.7ms against this 15ms threshold (observed min 11.2), so it
+    failed roughly one CI run in a hundred — and did, on 3.11, with 12.4ms.
+    n=200 concentrates the estimate: min 20.8 over the same 4000 trials. The
+    threshold is unchanged; only the flakiness is gone. (Underlying stdev_ms is
+    25, pulled down slightly by the 40-250ms clamp.)
+    """
+    samples = [sample_dwell_ms() for _ in range(200)]
     stdev = statistics.stdev(samples)
     assert stdev > 15, f"dwell stdev too low: {stdev:.1f}ms"
     # All within the clamp range
