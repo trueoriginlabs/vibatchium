@@ -201,3 +201,39 @@ def test_bare_eN_ref_form_works():
     snap = MagicMock(spec=elements.Snapshot)
     elements.resolve_target(page, snap, "e7")
     page.locator.assert_called_once_with("aria-ref=e7")
+
+
+# ─── the space-in-selector trap (documented in AGENTS.md "Traps") ───────────
+
+def test_css_selector_with_a_space_is_read_as_plain_text():
+    """`count "button:has-text('Log in')"` returns 0 with no error, while
+    `wait selector` with the IDENTICAL string resolves it.
+
+    _looks_like_plain_text fires on any space-containing string with no
+    `[ ] . #`, so count/click/fill route it to get_by_text while wait_selector
+    hands it straight to Playwright's CSS engine. This is the single most
+    time-wasting inconsistency in the locator surface, and AGENTS.md now
+    documents `css=` as the fix — so pin the behaviour here, or the doc drifts
+    the moment the heuristic changes.
+    """
+    from vibatchium.daemon.elements import _looks_like_plain_text as plain
+
+    # the trap: a real CSS selector, silently treated as text
+    assert plain("button:has-text('Log in')") is True
+    assert plain("article div") is True
+    assert plain("div:has(button:has-text('Log in'))") is True
+
+    # ...and the documented escape hatch defeats it
+    assert plain("css=button:has-text('Log in')") is False
+    assert plain("css=article div") is False
+
+    # single-word has-text is NOT ambiguous — both verbs agree there
+    assert plain("button:has-text('Post')") is False
+
+    # anything carrying a CSS sigil is already safe
+    assert plain("div.x:has-text('Log in')") is False
+    assert plain("[data-y]:has-text('Log in')") is False
+
+    # and genuine visible text still reads as text
+    assert plain("Mr. Smith") is True
+    assert plain("Hello, world!") is True
