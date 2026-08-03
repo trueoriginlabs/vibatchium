@@ -324,11 +324,18 @@ def test_kill_singleton_owner_refuses_a_pid_that_is_not_chrome(tmp_path, monkeyp
     # wrong process is far worse than leaving a lock behind, so an owner we
     # cannot positively identify as Chrome must never be signalled.
     prof = _mklock(tmp_path, 4242)
-    monkeypatch.setattr(login, "_pid_alive", lambda pid: True)
     killed = []
     monkeypatch.setattr(login.os, "kill", lambda p, s: killed.append((p, s)))
-    # /proc/4242/comm won't exist in the test env -> unidentifiable -> refuse
-    assert login._kill_singleton_owner(prof, pid_alive=lambda pid: True) is False
+
+    # comm unreadable -> we cannot confirm it is Chrome -> refuse.
+    # Injected rather than read from the real /proc: on a machine that happens
+    # to have a live Chrome at this pid (CI runs Chrome!) the ambient answer
+    # flips and the test would assert the opposite of what it means to.
+    assert login._kill_singleton_owner(
+        prof, pid_alive=lambda pid: True, comm_of=lambda pid: None) is False
+    # ...and an alive-but-not-Chrome owner is equally untouchable
+    assert login._kill_singleton_owner(
+        prof, pid_alive=lambda pid: True, comm_of=lambda pid: "postgres") is False
     assert killed == []
     assert (prof / "SingletonLock").is_symlink()      # lock left intact
 
