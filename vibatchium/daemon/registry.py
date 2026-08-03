@@ -394,10 +394,21 @@ class SessionRegistry:
         return self._pw
 
     async def _maybe_stop_pw(self) -> None:
-        """Stop the shared Playwright driver when no sessions are running."""
+        """Stop the shared Playwright driver when no sessions are running.
+
+        BOUNDED: `pw.stop()` talks to the driver subprocess over a pipe and has
+        no timeout of its own, so a wedged driver would park this coroutine
+        forever — and `Daemon.shutdown()` awaits it, which means the whole
+        daemon could never exit. Ten seconds then give up and drop the handle;
+        an orphaned driver process is a far smaller problem than a daemon that
+        cannot be shut down.
+        """
         if self._pw is not None and not self._entries and not self._warm_sessions:
             try:
-                await self._pw.stop()
+                await asyncio.wait_for(self._pw.stop(), timeout=10)
+            except TimeoutError:
+                log.warning("shared Playwright driver did not stop within 10s "
+                            "— dropping the handle and continuing")
             except Exception:  # noqa: BLE001
                 pass
             self._pw = None
@@ -987,6 +998,20 @@ class SessionRegistry:
             await asyncio.wait_for(_backends.close(entry.session), timeout=10)
         except Exception as exc:  # noqa: BLE001
             log.warning("close_session(%s) failed: %s", name, exc)
+            # A timed-out close leaves Chrome ALIVE holding the profile's
+            # ProcessSingleton lock, and the next launch on that profile is
+            # then refused outright — the failure looks like a launch bug in a
+            # later, unrelated run. Log-and-move-on was how orphans accumulated.
+            # `_kill_singleton_owner` never signals a pid it cannot confirm is
+            # Chrome from /proc, so a recycled pid is never at risk.
+            if entry.profile_dir is not None:
+                try:
+                    from ..login import _kill_singleton_owner
+                    if _kill_singleton_owner(entry.profile_dir):
+                        log.warning("close_session(%s): killed the Chrome still "
+                                    "holding %s", name, entry.profile_dir)
+                except Exception:  # noqa: BLE001 — best-effort backstop only
+                    pass
         log.info("session closed name=%s", name)
         # Wave 7.8: ephemeral session — remove the profile dir now that Chrome
         # is down so one-shot work leaves nothing on disk. The 'default'

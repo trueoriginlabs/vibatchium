@@ -55,8 +55,9 @@ def test_no_sandbox_flag_is_not_present(local_server):
     `--no-sandbox`. We `ignore_default_args=['--no-sandbox']` in
     browser.py:launch_session. If that's regressed, the yellow infobar
     comes back and the fingerprint becomes obviously bot-shaped."""
-    # The conftest default session uses /tmp/vibatchium-test-profile.
-    argv = _chrome_argv_for_profile("vibatchium-test-profile")
+    # Match whatever per-run profile conftest handed the default session.
+    argv = _chrome_argv_for_profile(
+        os.path.basename(os.environ["VIBATCHIUM_TEST_PROFILE"]))
     if not argv:
         pytest.skip("no running Chrome found for the test profile")
     no_sandbox = [a for a in argv if a == "--no-sandbox"]

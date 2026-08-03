@@ -4,6 +4,37 @@ All notable changes to vibatchium are documented here. Versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Until 1.0,
 minor bumps may include breaking changes; we'll always call them out here.
 
+## [0.18.11] — 2026-08-03
+
+### fix: two teardown paths that could hang or leak, and a session you couldn't tell was busy
+
+- **`_maybe_stop_pw` was unbounded.** `pw.stop()` talks to the driver
+  subprocess over a pipe with no timeout of its own, and `Daemon.shutdown()`
+  awaits it — so a wedged driver meant a daemon that could never exit. Bounded
+  at 10s; on timeout the handle is dropped and shutdown continues, because an
+  orphaned driver process is a much smaller problem than an unkillable daemon.
+- **A timed-out `close_session` left Chrome alive holding the profile's
+  ProcessSingleton lock.** The code logged and moved on, so the next launch on
+  that profile was refused and the failure surfaced later as an unrelated
+  launch bug. It now kills the lock holder as a backstop, reusing
+  `_kill_singleton_owner`, which never signals a pid it cannot confirm is
+  Chrome from `/proc` — a recycled pid is never at risk.
+- **`status` now reports `busy`.** Because `status` is an unlocked verb it
+  answers happily while a verb is in flight, which made a merely-busy session
+  indistinguishable from a wedged one. A killed or timed-out client leaves its
+  handler running, and that is exactly the moment you need to tell them apart.
+
+### test: the suite's Chrome profile is per-run, not a fixed /tmp path
+
+`conftest` started the default session on a hardcoded
+`/tmp/vibatchium-test-profile`. Chrome takes a ProcessSingleton lock on a
+profile dir, so two suites running at once — a 3.13 run and a 3.14 run, say —
+collided and the second died with "Failed to create a ProcessSingleton for your
+profile directory", **even with HOME, XDG_RUNTIME_DIR and XDG_STATE_HOME all
+isolated**. Isolating those three is not sufficient; the profile path has to
+move too. It is now a per-run temp dir exported as `VIBATCHIUM_TEST_PROFILE`,
+which the two other call sites read.
+
 ## [0.18.10] — 2026-08-03
 
 ### Python 3.14 is supported — we just never said so

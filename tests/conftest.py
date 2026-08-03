@@ -41,6 +41,15 @@ if _real_rt and os.path.isdir(_real_rt):
 os.environ["XDG_RUNTIME_DIR"] = _iso_rt
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp(prefix="vbtest-st-")
 
+# The default session's Chrome profile. Per-RUN, not a fixed /tmp path: Chrome
+# takes a ProcessSingleton lock on the profile dir, so two suites running at
+# once (a 3.13 run and a 3.14 run, say) collided on it and the second died with
+# "Failed to create a ProcessSingleton for your profile directory" — even though
+# HOME, XDG_RUNTIME_DIR and XDG_STATE_HOME were all isolated. Isolating those
+# three is NOT sufficient; the profile path has to move too.
+os.environ.setdefault("VIBATCHIUM_TEST_PROFILE",
+                      tempfile.mkdtemp(prefix="vbtest-prof-"))
+
 # Vault isolation MUST run BEFORE any vibatchium import (same as SOCK_PATH above):
 # secrets.py freezes VAULT_PATH from this env at import time, and the fixed test key
 # re-keys the WHOLE vault file on every save. If VAULT_PATH froze to the real
@@ -81,7 +90,8 @@ def _daemon_lifecycle():
             pass
         time.sleep(2)
     spawn_daemon(wait=10)
-    call("start", {"profile": "/tmp/vibatchium-test-profile", "headless": True})
+    call("start", {"profile": os.environ["VIBATCHIUM_TEST_PROFILE"],
+                   "headless": True})
     yield
     try:
         call("stop")

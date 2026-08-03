@@ -207,7 +207,7 @@ def test_close_all_bypasses_lease():
     finally:
         # restore the fixture's default session for the rest of the suite
         try:
-            call("start", {"profile": "/tmp/vibatchium-test-profile",
+            call("start", {"profile": os.environ["VIBATCHIUM_TEST_PROFILE"],
                            "headless": True})
         except DaemonError:
             pass
