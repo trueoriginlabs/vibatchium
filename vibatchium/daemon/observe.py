@@ -3,8 +3,9 @@
 Two backends, fallback chain:
 1. **Heuristic** (default, no API key) — keyword overlap between the user's
    intent and the @eN snapshot entries. Cheap, deterministic, works offline.
-2. **LLM** (when ANTHROPIC_API_KEY is set OR --llm forced) — sends the snapshot
-   + intent to Claude and parses a structured action plan back.
+2. **LLM** (only when `--llm` is passed — a set ANTHROPIC_API_KEY alone does
+   NOT engage it) — sends the snapshot + intent to Claude and parses a
+   structured action plan back.
 
 Both produce the same envelope:
     {

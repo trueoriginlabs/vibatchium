@@ -572,3 +572,84 @@ async def test_nav_guard_blocks_off_allowlist_at_request_layer():
             pass
         srv.shutdown()
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+async def test_route_add_cannot_swallow_the_nav_allowlist():
+    """0.18.8 regression: a `route_add` rule registered AFTER a goal pinned an
+    allowlist used to BYPASS it entirely.
+
+    Playwright tries route handlers most-recently-registered first, and
+    route_add's handler terminated with `continue_()` — performing the request
+    itself, so the nav guard never saw the navigation. Any agent that added a
+    route rule while a goal held an allowlist silently escaped the domain
+    boundary. Both sides now hand non-terminal requests down with `fallback()`.
+
+    Real Chrome + a local server, same shape as the guard test above.
+    """
+    import shutil
+    import tempfile
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    from pathlib import Path
+
+    import pytest as _pytest
+
+    from vibatchium.daemon.browser import (
+        close_session, ensure_nav_guard, launch_session,
+    )
+    from vibatchium.daemon.registry import SessionEntry, current_session_ctx
+    from vibatchium.daemon.server import Daemon
+
+    class _H(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Length", "2")
+            self.end_headers()
+            self.wfile.write(b"ok")
+
+        def log_message(self, *a):
+            pass
+
+    srv = HTTPServer(("127.0.0.1", 0), _H)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{port}/"
+    tmp = Path(tempfile.mkdtemp(prefix="routeguardtest_"))
+    sess = await launch_session(tmp, headless=True)
+    d = Daemon()
+    d.registry._entries["rg"] = SessionEntry(name="rg", profile_dir=tmp,
+                                             session=sess)
+    token = current_session_ctx.set("rg")
+    try:
+        sess.nav_allowlist = {"127.0.0.1"}
+        await ensure_nav_guard(sess)
+        # Register the user rule AFTER the guard — the ordering that used to win.
+        # Call the real route_add handler directly — dispatch would first try to
+        # resolve a registry session, which this hand-built session isn't in.
+        await d._handlers["route_add"](d, {"pattern": "**/*",
+                                           "mode": "passthrough"})
+
+        # The user rule must still work...
+        resp = await sess.page.goto(url, timeout=10_000)
+        assert resp is not None and resp.ok, "on-allowlist nav must still load"
+        assert sess._routes[0]["hits"] > 0, (
+            "the user's route rule must still see requests — the guard must not "
+            "swallow it either"
+        )
+
+        # ...and must NOT be able to escape the allowlist.
+        sess.nav_allowlist = {"allowed.test"}
+        with _pytest.raises(Exception) as ei:
+            await sess.page.goto(url, timeout=10_000)
+        assert "BLOCKED" in str(ei.value).upper(), (
+            "a route_add rule must not bypass the goal's nav allowlist; got: "
+            f"{ei.value}"
+        )
+    finally:
+        current_session_ctx.reset(token)
+        try:
+            await close_session(sess)
+        except Exception:  # noqa: BLE001
+            pass
+        srv.shutdown()
+        shutil.rmtree(tmp, ignore_errors=True)

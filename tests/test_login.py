@@ -1,4 +1,5 @@
 """Pure unit tests for `vb login` helpers (no browser, no daemon)."""
+import socket
 from pathlib import Path
 
 from vibatchium import login
@@ -307,3 +308,60 @@ def test_show_close_routes_to_teardown(monkeypatch):
     assert res.exit_code == 0, res.output
     assert seen.get("close") == "shopscout"
     assert seen.get("run") is None  # --close must NOT open a window
+
+
+# ─── 0.18.8: teardown must not leave a Chrome holding the profile lock ──────
+
+def _mklock(tmp_path, pid):
+    prof = tmp_path / "prof"
+    prof.mkdir(exist_ok=True)
+    (prof / "SingletonLock").symlink_to(f"{socket.gethostname()}-{pid}")
+    return prof
+
+
+def test_kill_singleton_owner_refuses_a_pid_that_is_not_chrome(tmp_path, monkeypatch):
+    # A pid can be RECYCLED between Chrome's death and this call. Killing the
+    # wrong process is far worse than leaving a lock behind, so an owner we
+    # cannot positively identify as Chrome must never be signalled.
+    prof = _mklock(tmp_path, 4242)
+    monkeypatch.setattr(login, "_pid_alive", lambda pid: True)
+    killed = []
+    monkeypatch.setattr(login.os, "kill", lambda p, s: killed.append((p, s)))
+    # /proc/4242/comm won't exist in the test env -> unidentifiable -> refuse
+    assert login._kill_singleton_owner(prof, pid_alive=lambda pid: True) is False
+    assert killed == []
+    assert (prof / "SingletonLock").is_symlink()      # lock left intact
+
+
+def test_kill_singleton_owner_noop_when_no_lock_or_owner_dead(tmp_path):
+    prof = tmp_path / "empty"
+    prof.mkdir()
+    assert login._kill_singleton_owner(prof) is False
+    prof2 = _mklock(tmp_path, 999999)
+    assert login._kill_singleton_owner(prof2, pid_alive=lambda pid: False) is False
+
+
+def test_close_login_closes_session_before_shutdown_and_waits(tmp_path, monkeypatch):
+    # The bug: `shutdown` returns BEFORE the browser is torn down, so deleting
+    # the runtime dir immediately could orphan a Chrome on the profile lock.
+    calls = []
+
+    def fake_call_on(sock, verb, args=None, timeout=None):
+        calls.append(verb)
+        return {}
+
+    monkeypatch.setattr(login._client, "call_on", fake_call_on)
+    monkeypatch.setattr(login, "_base_runtime", lambda env: str(tmp_path))
+    alive = iter([True, True, False])          # socket goes away on the 3rd poll
+    monkeypatch.setattr(login, "_sock_alive", lambda s, timeout=1.5: next(alive, False))
+    monkeypatch.setattr(login, "_kill_singleton_owner", lambda p, **kw: False)
+    rt = login.login_runtime_dir(tmp_path, "demo")
+    rt.mkdir(parents=True)
+
+    out = login.close_login("demo", base_env={}, wait=5.0)
+
+    assert calls == ["session_close", "shutdown"], \
+        "session_close must run FIRST — it is the call that awaits browser teardown"
+    assert out["closed"] is True
+    assert out["orphan_killed"] is False
+    assert not rt.exists(), "runtime dir removed only after the daemon went away"
