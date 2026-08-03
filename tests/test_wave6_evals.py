@@ -31,7 +31,7 @@ def test_render_markdown_basic():
          "score": 78, "error": None, "elapsed_s": 8.1},
     ]
     md = render_markdown(rows)
-    assert "| Target | Backend | Humanize | Score | Status | Time |" in md
+    assert "| Target | Backend | Humanize | GPU | Score | Status | Time |" in md
     assert "sannysoft" in md and "100" in md
     assert "creepjs" in md and "78" in md
     assert "OK" in md
@@ -150,3 +150,45 @@ def test_update_readme_no_markers_returns_false():
 def test_update_readme_missing_file_returns_false():
     changed = update_readme(Path("/nonexistent/README.md"), "x")
     assert changed is False
+
+
+def test_render_markdown_flags_a_software_renderer_run():
+    """A score measured on software GL is a floor, not the real number —
+    detectors treat software GL as a positive automation signal. The table must
+    say so rather than publishing a bare number."""
+    from vibatchium.evals import render_markdown
+    rows = [
+        {"target": "sannysoft", "backend": "patchright", "humanize": False,
+         "score": 100, "error": None, "elapsed_s": 5.2,
+         "renderer": "ANGLE (Google, Vulkan 1.3 (SwiftShader Device))",
+         "software_renderer": True},
+    ]
+    md = render_markdown(rows)
+    assert "**software**" in md
+    assert "software renderer" in md.lower()
+    assert "SwiftShader" in md, "name the renderer so the caveat is checkable"
+
+
+def test_render_markdown_marks_a_real_gpu_run_without_a_warning():
+    from vibatchium.evals import render_markdown
+    rows = [
+        {"target": "sannysoft", "backend": "patchright", "humanize": False,
+         "score": 100, "error": None, "elapsed_s": 5.2,
+         "renderer": "ANGLE (NVIDIA, NVIDIA GeForce MX150)",
+         "software_renderer": False},
+    ]
+    md = render_markdown(rows)
+    assert "| real |" in md
+    assert "software renderer" not in md.lower()
+
+
+def test_render_markdown_unknown_renderer_is_neither_claimed_nor_warned():
+    from vibatchium.evals import render_markdown
+    rows = [
+        {"target": "sannysoft", "backend": "patchright", "humanize": False,
+         "score": 100, "error": None, "elapsed_s": 5.2,
+         "renderer": None, "software_renderer": None},
+    ]
+    md = render_markdown(rows)
+    assert "| ? |" in md
+    assert "software renderer" not in md.lower()

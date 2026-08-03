@@ -1848,8 +1848,12 @@ def register_extra(daemon) -> None:
         from .registry import current_session_ctx as _ctx
         entry = d.registry.get(_ctx.get())
         if entry is None:
-            return {"safety_mode": "off", "note": "no running session"}
-        return {"safety_mode": entry.flags.get("safety_mode", "off"),
+            from .. import safety as _safety_mod
+            return {"safety_mode": _safety_mod.default_mode(),
+                    "note": "no running session (reporting the default)"}
+        from .. import safety as _safety_mod
+        return {"safety_mode": entry.flags.get("safety_mode")
+                or _safety_mod.default_mode(),
                 "session": entry.name}
 
     @daemon.handler("safety_scan")

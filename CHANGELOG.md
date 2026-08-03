@@ -4,6 +4,49 @@ All notable changes to vibatchium are documented here. Versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Until 1.0,
 minor bumps may include breaking changes; we'll always call them out here.
 
+## [0.18.9] — 2026-08-03
+
+### change: prompt-injection scanning is ON by default
+
+`safety` shipped with mode `off`, so the protection only existed for operators
+who went looking for the knob — exactly the ones least likely to need telling.
+The README listed it as a differentiator anyway. Both halves of that were wrong.
+
+The default is now `flag-only`, chosen because it is **purely additive**:
+responses gain `prompt_injection_risk` and `signals`, and every content field
+stays byte-identical, so no existing parser has to change. `wrap` and `redact`
+do rewrite content and remain opt-in.
+
+Cost is a regex pass over content-bearing fields — measured ~70 ms on a
+114k-char `text` response and ~125 ms on a 186k-char `html` one, much less on
+ordinary pages. `VIBATCHIUM_SAFETY_MODE=off` restores the previous zero-overhead
+behaviour; an unrecognised value falls back to the default rather than raising,
+so a typo in a shell profile can't break every response on the daemon.
+
+Per CONTRIBUTING non-goal 6 this is a deliberate default-flip, called out here.
+
+### evals: say when a score was measured on a software renderer
+
+Headless Chrome falls back to SwiftShader whenever the GPU path doesn't take,
+and on a proof-of-browser detector software GL is a **positive** automation
+signal — so a score measured that way is a floor, not the number a GPU-backed
+deployment gets. `vb evals run` now records the renderer each cell actually came
+up on, adds a GPU column, and prints a named caveat when any cell was software.
+
+Observed, never enforced: a host with no accessible DRM render node degrades to
+software by design, and failing the run there would be worse than reporting it.
+
+### docs: `--disable-blink-features=AutomationControlled` is a settled non-goal
+
+Recorded as CONTRIBUTING non-goal 7, because it keeps getting proposed and is a
+no-op everywhere it could be applied. Verified against live processes:
+patchright already passes it on every session; nodriver never enables
+`AutomationControlled` at all (its 13 default args don't include
+`--enable-automation`, which is what turns the feature on); and attach connects
+to an already-running Chrome, where no launch flag can be added after the fact.
+Shipping a no-op stealth flag is exactly the cargo-cult that file exists to
+prevent.
+
 ## [0.18.8] — 2026-08-03
 
 ### security: a `route_add` rule could silently bypass a goal's navigation allowlist

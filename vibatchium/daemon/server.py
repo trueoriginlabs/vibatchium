@@ -604,7 +604,8 @@ class Daemon:
             # flag controls activation. Mutates content fields in-place.
             entry = self.registry.get(session_name)
             if entry is not None and isinstance(result, dict):
-                mode = entry.flags.get("safety_mode")
+                from .. import safety as _safety_mod
+                mode = entry.flags.get("safety_mode") or _safety_mod.default_mode()
                 if mode and mode != "off":
                     from .. import safety as _safety
                     result = _safety.scan_response(cmd, result, mode)

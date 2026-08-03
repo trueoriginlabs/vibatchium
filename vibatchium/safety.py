@@ -14,8 +14,10 @@ Two tiers:
     for paraphrased injections that heuristics miss. Adds ~800 ms latency.
 
 Modes (per-session, configurable via `safety_set`):
-  - off (default): no scanning, zero overhead
-  - flag-only: response gains `prompt_injection_risk` + `signals` metadata
+  - off: no scanning, zero overhead
+  - flag-only (DEFAULT): response gains `prompt_injection_risk` + `signals`
+    metadata. Content is NOT modified, so nothing downstream has to change —
+    it only tells the agent what it is looking at.
   - wrap: matched regions wrapped in `<UNTRUSTED_CONTENT>...</UNTRUSTED_CONTENT>`
     so the LLM knows to treat them skeptically
   - redact: matched regions replaced with `[REDACTED-PROMPT-INJECTION-N]`,
@@ -26,7 +28,33 @@ fields to scan.
 """
 from __future__ import annotations
 
+import os
 import re
+
+# The mode applied when a session has not called `safety_set`.
+#
+# `flag-only` rather than `off`: this is an agent-safety feature we advertise,
+# and shipping it inert meant the protection only existed for operators who
+# went looking for the knob — exactly the ones least likely to need telling.
+# flag-only is the safe default to pick because it is PURELY ADDITIVE: it
+# attaches `prompt_injection_risk` + `signals` and leaves every content field
+# byte-identical, so no existing parser breaks. (`wrap` / `redact` do rewrite
+# content; those stay opt-in.)
+#
+# Cost is a regex pass over content-bearing fields — measured ~70 ms on a
+# 114k-char text response and ~125 ms on a 186k-char html one, far less on
+# ordinary pages. Set VIBATCHIUM_SAFETY_MODE=off to restore zero overhead.
+DEFAULT_MODE = "flag-only"
+
+
+def default_mode() -> str:
+    """Session-default safety mode, overridable by env. Unknown values fall
+    back rather than raising — a typo in a shell profile must not break every
+    response on the daemon."""
+    mode = (os.environ.get("VIBATCHIUM_SAFETY_MODE") or "").strip().lower()
+    if mode in ("off", "flag-only", "wrap", "redact"):
+        return mode
+    return DEFAULT_MODE
 
 # Verb → list of response-dict keys whose values are content worth scanning
 # for prompt injection. A field's value may be a str OR a nested dict/list of
