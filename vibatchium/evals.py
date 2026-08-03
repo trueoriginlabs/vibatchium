@@ -33,6 +33,7 @@ import time
 import uuid
 from pathlib import Path
 from typing import Any
+from .gpu import renderer_is_real as _renderer_is_real
 
 log = logging.getLogger("vibatchium.evals")
 
@@ -71,6 +72,7 @@ def _run_one_cell_sync(client_call, target: str, backend: str,
     cell: dict[str, Any] = {
         "target": target, "backend": backend, "humanize": humanize,
         "score": None, "error": None, "elapsed_s": None,
+        "renderer": None, "software_renderer": None,
     }
     t0 = time.time()
     try:
@@ -79,6 +81,24 @@ def _run_one_cell_sync(client_call, target: str, backend: str,
         if backend != "patchright":
             start_args["backend"] = backend
         client_call("start", start_args, session=sname)
+        # Record the renderer this cell ACTUALLY came up on. Headless Chrome
+        # falls back to SwiftShader whenever the GPU path doesn't take, and on
+        # a proof-of-browser detector software GL is a POSITIVE tell, not a
+        # neutral one — so a score measured on SwiftShader is not the score a
+        # real deployment gets. Publishing one without saying so would be the
+        # same class of unbacked number this file exists to replace.
+        # Observed, never enforced: a host with no render node degrades to
+        # software by design, and failing the run there would be worse than
+        # reporting it.
+        try:
+            gi = client_call("gpu_info", session=sname) or {}
+            renderer = gi.get("renderer") or (gi.get("webgl") or {}).get("renderer")
+            cell["renderer"] = renderer
+            cell["software_renderer"] = (
+                not _renderer_is_real(renderer) if renderer else None)
+        except Exception:  # noqa: BLE001 — never let provenance break the run
+            cell["renderer"] = None
+            cell["software_renderer"] = None
         if humanize:
             client_call("humanize_on", session=sname)
         res = client_call("fingerprint",
@@ -110,17 +130,32 @@ def render_markdown(rows: list[dict]) -> str:
     if not rows:
         return "_no eval cells ran_\n"
     lines = []
-    lines.append("| Target | Backend | Humanize | Score | Status | Time |")
-    lines.append("|---|---|---|---|---|---|")
+    lines.append("| Target | Backend | Humanize | GPU | Score | Status | Time |")
+    lines.append("|---|---|---|---|---|---|---|")
     for r in rows:
         score = r.get("score")
         score_s = f"{score}" if score is not None else "-"
         status = "ERR" if r.get("error") else ("OK" if score is not None else "?")
         humanize_s = "on" if r["humanize"] else "off"
         time_s = f"{r['elapsed_s']}s"
+        sw = r.get("software_renderer")
+        gpu_s = "?" if sw is None else ("**software**" if sw else "real")
         lines.append(
-            f"| {r['target']} | {r['backend']} | {humanize_s} "
+            f"| {r['target']} | {r['backend']} | {humanize_s} | {gpu_s} "
             f"| {score_s} | {status} | {time_s} |"
+        )
+    if any(r.get("software_renderer") for r in rows):
+        soft = sorted({r.get("renderer") for r in rows
+                       if r.get("software_renderer") and r.get("renderer")})
+        lines.append("")
+        lines.append(
+            "> **Measured on a software renderer.** At least one cell above came "
+            "up on software GL"
+            + (f" ({', '.join(soft)})" if soft else "")
+            + " rather than a real GPU. Detectors that probe for proof-of-browser "
+              "treat software GL as a positive automation signal, so these scores "
+              "are a floor, not the number a GPU-backed deployment gets. Re-run "
+              "with an accessible DRM render node before quoting them."
         )
     if any(r.get("error") for r in rows):
         lines.append("")

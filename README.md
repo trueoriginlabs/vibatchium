@@ -81,7 +81,7 @@ the rows that still separate us — and concedes the ones that don't.
 | **N parallel persistent sessions on one daemon** | manual | — | — | ✅⁵ |
 | Per-session proxy + WebRTC leak guard | manual | ❌ | — | ✅ |
 | Vision-first clicking with spend cap | ❌ | ✅ | — | ✅ |
-| Prompt-injection scanning on scraped content | ❌ | ❌ | ❌ | opt-in⁶ |
+| **Prompt-injection scanning on scraped content** | ❌ | ❌ | ❌ | ✅ on by default⁶ |
 | Live-view stream with takeover (WebSocket) | ❌ | partial | — | ✅ |
 | Bearer-token REST shim + caps gating | ❌ | manual | — | ✅ |
 
@@ -91,7 +91,7 @@ the rows that still separate us — and concedes the ones that don't.
 <sub>³ agent-browser's own README: "State files contain session tokens in plaintext&nbsp;… for encryption at rest, set `AGENT_BROWSER_ENCRYPTION_KEY`". Its credential *vault* is always encrypted; the session state is what defaults to plaintext.</sub><br>
 <sub>⁴ agent-browser auto-generates its key into `~/.agent-browser/.encryption-key` — the same directory as the ciphertext.</sub><br>
 <sub>⁵ Scoped deliberately: this is a real differentiator against **playwright-mcp**, whose README notes a persistent profile can only be used by one browser instance at a time. It is *not* a differentiator against tools that give each named session its own browser instance.</sub><br>
-<sub>⁶ Ships **off by default** (`safety` mode `off` = no scanning). Turn it on explicitly; it is not doing anything until you do.</sub>
+<sub>⁶ Defaults to `flag-only` since 0.18.9: responses gain `prompt_injection_risk` + `signals` and content is left byte-identical, so nothing downstream changes. `wrap` / `redact` rewrite content and stay opt-in; `VIBATCHIUM_SAFETY_MODE=off` restores zero overhead.</sub>
 
 ## Real Chrome vs fake Chrome
 

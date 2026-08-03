@@ -58,6 +58,24 @@ defend or extend that, not chase a commodity the giants already own.
    any of them is a stealth decision, not a refactor — call it out in the PR and
    the CHANGELOG, and make sure the stealth gate still passes.
 
+7. **Do NOT add `--disable-blink-features=AutomationControlled` to our own
+   launch args.** This gets proposed periodically; it is a no-op everywhere it
+   could be applied, and shipping a no-op stealth flag is the cargo-cult this
+   file exists to prevent. Verified 2026-08-03 against live processes:
+
+   - **patchright** already passes it — every running session's renderer
+     cmdline carries it. Adding it again changes nothing.
+   - **nodriver** never enables `AutomationControlled` in the first place: its
+     13 default browser args do not include `--enable-automation`, which is what
+     turns that blink feature on. Disabling something nothing enabled is noise.
+   - **attach** connects to a Chrome that is *already running*. No launch flag
+     can be added after the fact — the only fix there is telling the operator to
+     pass it themselves, which the README's attach section now does.
+
+   If you believe a specific backend is missing it, check
+   `/proc/<renderer-pid>/cmdline` on a live session first. That is a two-minute
+   check and it has settled this question twice.
+
 If you think one of these is wrong, open an issue and make the case — they're
 decisions, not dogma. But they are decisions, so don't quietly reverse one.
 
