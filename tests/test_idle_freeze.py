@@ -9,6 +9,7 @@ thaw, and peek() not stamping activity.
 from __future__ import annotations
 
 import asyncio
+import builtins
 import signal
 import time
 import types
@@ -348,3 +349,119 @@ def test_non_page_wait_verbs_are_excluded_from_the_thaw_set():
     for v in ("sleep", "wait_email_code", "wait_response", "status", "ping",
               "verify_url", "set_log_verbs"):
         assert v in Daemon.UNLOCKED_VERBS and v not in Daemon.PAGE_WAIT_VERBS
+
+
+# ─── _find_renderers: argv-exact matching (prefix-collision regression) ────
+
+def _fake_proc(monkeypatch, tmp_path, procs: dict[int, list[str]]):
+    """Build a fake /proc and redirect freeze's /proc reads at it.
+
+    The cmdline BYTES are written in the shape real Chrome produces — captured
+    from a live tree, not assumed. The browser process keeps kernel argv
+    (NUL-separated, one arg per field), but Chrome rewrites the process title
+    of every child it spawns, and the rewritten title arrives as a SINGLE
+    space-joined field. So any process carrying `--type=` is written as a blob
+    here, exactly as `/proc/<pid>/cmdline` presents it on a real box.
+
+    This distinction is the whole point of the test: a fixture that wrote
+    NUL-separated argv for renderers too would let a matcher that only splits
+    on NUL pass while finding nothing at all in production.
+    """
+    for pid, argv in procs.items():
+        d = tmp_path / str(pid)
+        d.mkdir()
+        rewritten = any(a.startswith("--type=") for a in argv)
+        raw = " ".join(argv) if rewritten else "\0".join(argv)
+        (d / "cmdline").write_bytes(raw.encode() + b"\0")
+    (tmp_path / "notapid").mkdir()          # non-numeric entry must be skipped
+
+    real_open = builtins.open
+
+    def fake_open(path, *a, **kw):
+        p = str(path)
+        if p.startswith("/proc/"):
+            return real_open(str(tmp_path / p[len("/proc/"):]), *a, **kw)
+        return real_open(path, *a, **kw)
+
+    # Snapshot the entries BEFORE patching. `freeze.os` is the global os
+    # module, so patching os.listdir here patches it for everyone — and on
+    # Python <3.13 `Path.iterdir()` is implemented on top of os.listdir, so a
+    # lambda that called iterdir() would re-enter itself forever. (3.13
+    # reimplemented iterdir on os.scandir, which is why this only blew up on
+    # 3.11/3.12.) A static list has no such edge.
+    entries = sorted(x.name for x in tmp_path.iterdir())
+    monkeypatch.setattr(freeze.os, "listdir", lambda p: entries)
+    monkeypatch.setattr(builtins, "open", fake_open)
+
+
+def test_find_renderers_ignores_prefix_colliding_profile(monkeypatch, tmp_path):
+    # The 0.18.6 bug: a substring match on the joined cmdline meant profile
+    # `…/profiles/ali` matched `…/profiles/alidemo` — and since this scans all
+    # of /proc, it SIGSTOPped renderers owned by a *different* daemon.
+    base = "/home/u/.config/vibatchium/profiles"
+    _fake_proc(monkeypatch, tmp_path, {
+        100: ["/opt/chrome", "--type=renderer", f"--user-data-dir={base}/ali"],
+        200: ["/opt/chrome", "--type=renderer", f"--user-data-dir={base}/alidemo"],
+        201: ["/opt/chrome", "--type=renderer", f"--user-data-dir={base}/ali2"],
+    })
+    assert freeze._find_renderers(f"{base}/ali") == [100]
+    assert freeze._find_renderers(f"{base}/alidemo") == [200]
+
+
+def test_find_renderers_skips_non_renderer_with_matching_profile(
+        monkeypatch, tmp_path):
+    # The browser, GPU and zygote processes all carry --user-data-dir and must
+    # stay running — only renderers may be stopped.
+    base = "/home/u/.config/vibatchium/profiles"
+    _fake_proc(monkeypatch, tmp_path, {
+        100: ["/opt/chrome", "--type=renderer", f"--user-data-dir={base}/ali"],
+        101: ["/opt/chrome", f"--user-data-dir={base}/ali"],           # browser
+        102: ["/opt/chrome", "--type=gpu-process", f"--user-data-dir={base}/ali"],
+    })
+    assert freeze._find_renderers(f"{base}/ali") == [100]
+
+
+def test_find_renderers_unknown_profile_is_failsafe(monkeypatch, tmp_path):
+    base = "/home/u/.config/vibatchium/profiles"
+    _fake_proc(monkeypatch, tmp_path, {
+        100: ["/opt/chrome", "--type=renderer", f"--user-data-dir={base}/ali"],
+    })
+    assert freeze._find_renderers(f"{base}/nosuch") == []
+
+
+def test_cmdline_args_handles_chrome_rewritten_child_titles():
+    # Regression guard for the fix that broke idle-freeze in the tree between
+    # 2026-07-29 and 2026-08-03: matching only NUL-separated argv found ZERO
+    # renderers on a real box, because Chrome rewrites child process titles
+    # into one space-joined field. Both shapes below are verbatim from a live
+    # `/proc/<pid>/cmdline`.
+    browser = "\0".join(["/opt/google/chrome/chrome",
+                         "--disable-field-trial-config",
+                         "--user-data-dir=/p/universalflavours"])
+    renderer = ("/opt/google/chrome/chrome --type=renderer"
+                " --user-data-dir=/p/universalflavours"
+                " --disable-blink-features=AutomationControlled")
+
+    assert freeze._cmdline_args(browser + "\0")[0] == "/opt/google/chrome/chrome"
+    assert "--user-data-dir=/p/universalflavours" in freeze._cmdline_args(browser)
+
+    args = freeze._cmdline_args(renderer + "\0")
+    assert "--type=renderer" in args
+    assert "--user-data-dir=/p/universalflavours" in args
+    # ...and the prefix must NOT match, which is what a substring test got wrong
+    assert "--user-data-dir=/p/universal" not in args
+
+
+def test_find_renderers_matches_real_chrome_child_cmdline(monkeypatch, tmp_path):
+    # End-to-end over the fake /proc: renderers are found DESPITE the rewritten
+    # title, and a prefix profile still matches nothing.
+    base = "/p"
+    _fake_proc(monkeypatch, tmp_path, {
+        100: ["/opt/chrome", "--type=renderer",
+              f"--user-data-dir={base}/universalflavours"],
+        101: ["/opt/chrome", "--type=renderer",
+              f"--user-data-dir={base}/universalflavours"],
+        102: ["/opt/chrome", f"--user-data-dir={base}/universalflavours"],
+    })
+    assert freeze._find_renderers(f"{base}/universalflavours") == [100, 101]
+    assert freeze._find_renderers(f"{base}/universal") == []

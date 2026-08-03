@@ -23,8 +23,10 @@ frozen. Kernel-level stop is the ONLY mechanism that measurably works
 Only renderers are stopped — the browser process, GPU process, and CDP stay
 live, so registry ops, `vb status`, and self-heal keep working; a stopped
 renderer submits no frames, so GPU-process burn stops with it. Renderers are
-found by /proc cmdline (`--type=renderer` + `--user-data-dir=<profile>`), and
-recorded as (pid, starttime) pairs so a recycled pid is never signalled.
+found by /proc cmdline (`--type=renderer` + `--user-data-dir=<profile>`, both
+matched as WHOLE ARGUMENTS — see `_cmdline_args`, which has to cope with
+Chrome rewriting its children's process titles), and recorded as
+(pid, starttime) pairs so a recycled pid is never signalled.
 SIGKILL (teardown) works on stopped processes, but close() still thaws first
 so Chrome's graceful shutdown IPC isn't left waiting on a stopped child.
 
@@ -91,21 +93,50 @@ def _starttime(pid: int) -> int | None:
         return None
 
 
+def _cmdline_args(raw: str) -> list[str]:
+    """The arguments in a raw /proc/<pid>/cmdline, whichever shape it is in.
+
+    The kernel exposes NUL-separated argv — but Chrome REWRITES its child
+    process titles, and the rewritten title is a single space-joined string.
+    Both shapes therefore occur inside one Chrome process tree: the browser
+    process keeps real NUL-separated argv, while its renderer / gpu-process /
+    utility / zygote children each present one blob. Splitting only on NUL
+    yields a one-element list for exactly the processes we care about, so
+    every whole-argument test against it fails.
+
+    Returning the arguments of either shape lets callers match a WHOLE
+    argument instead of a substring. A profile path containing a space is not
+    matchable this way and yields no result — deliberately fail-safe (see
+    `_find_renderers`: freezing nothing beats freezing the wrong renderer).
+    """
+    args = [a for a in raw.split("\0") if a]
+    if len(args) == 1:
+        args = args[0].split(" ")
+    return args
+
+
 def _find_renderers(profile_dir: str) -> list[int]:
     """Renderer pids of the Chrome serving `profile_dir`. Chrome propagates
-    --user-data-dir onto its renderer processes, so a plain cmdline match is
-    session-exact. Empty result = fail-safe (nothing gets frozen)."""
+    --user-data-dir onto its renderer processes, so the pair
+    (`--type=renderer`, `--user-data-dir=<profile>`) identifies them — but only
+    when both are matched as WHOLE arguments (see `_cmdline_args`).
+
+    A substring match against the joined cmdline is not session-exact: a
+    profile whose path is a prefix of another's (`…/profiles/ali` vs
+    `…/profiles/alidemo`) matches it, and since this scans all of /proc that
+    freezes renderers belonging to a different session — even one owned by a
+    different daemon. Empty result = fail-safe (nothing gets frozen)."""
     pids = []
-    needle = f"--user-data-dir={profile_dir}"
+    want = f"--user-data-dir={profile_dir}"
     for ent in os.listdir("/proc"):
         if not ent.isdigit():
             continue
         try:
             with open(f"/proc/{ent}/cmdline") as f:
-                cmd = f.read().replace("\0", " ")
+                args = _cmdline_args(f.read())
         except OSError:
             continue
-        if "--type=renderer" in cmd and needle in cmd:
+        if "--type=renderer" in args and want in args:
             pids.append(int(ent))
     return pids
 
