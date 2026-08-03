@@ -10,17 +10,28 @@ name: publish-mcp
 # org membership from it even for public members).
 #
 # Triggers:
-#   - release: published  -> auto-list every tagged release once the GitHub
-#                            Release is cut by publish.yml's `release` job.
+#   - workflow_run on `publish` -> auto-list every tagged release once the
+#                            PyPI + GitHub Release pipeline has SUCCEEDED, so
+#                            the registry never points at a version that
+#                            failed to ship.
 #   - workflow_dispatch    -> run standalone against the current server.json
 #                            (e.g. to backfill an already-shipped version).
 #
+# WHY NOT `release: published`: that was the original trigger and it NEVER
+# FIRED — 0.15.1 through 0.18.9 all had to be dispatched by hand. publish.yml
+# creates the release with `gh release create` using the default GITHUB_TOKEN,
+# and GitHub deliberately suppresses workflow triggers from events raised by
+# that token (the recursion guard). `workflow_run` is not subject to it.
+#
 # NOTE: server.json's `version` is the source of truth for what gets listed;
 # bump it alongside vibatchium/__init__.py when cutting a release.
+# workflow_run checks out the default branch, which is where that bump lands
+# before the tag is pushed — so master is the right ref to read it from.
 
 on:
-  release:
-    types: [published]
+  workflow_run:
+    workflows: ["publish"]
+    types: [completed]
   workflow_dispatch:
 
 permissions:
@@ -29,6 +40,10 @@ permissions:
 
 jobs:
   registry:
+    # Never list a version whose PyPI publish failed.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
