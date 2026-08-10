@@ -10,6 +10,13 @@
     "id": "1247523890"
   },
   "websiteUrl": "https://github.com/trueoriginlabs/vibatchium",
+  "icons": [
+    {
+      "src": "https://raw.githubusercontent.com/trueoriginlabs/vibatchium/master/assets/vb-logo.png",
+      "mimeType": "image/png",
+      "sizes": ["620x620"]
+    }
+  ],
   "packages": [
     {
       "registryType": "pypi",

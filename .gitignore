@@ -36,3 +36,8 @@ htmlcov/
 oracle-record.html
 oracle-trials.json
 baseline.json
+
+# Logo working files — the shipped badge is assets/vb-logo.png; the 1MB
+# generation variants stay local so `git add -A` cannot sweep 7MB into a
+# public repo.
+assets/vibatchium-vb-logo*.png

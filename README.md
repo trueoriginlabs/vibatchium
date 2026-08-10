@@ -1,3 +1,9 @@
+<!-- Absolute URL on purpose: PyPI renders this same README and cannot resolve
+     repo-relative paths. Pinned to master so it survives tag churn. -->
+<p align="center">
+  <img src="https://raw.githubusercontent.com/trueoriginlabs/vibatchium/master/assets/vb-logo.png" alt="vibatchium" width="180">
+</p>
+
 # vibatchium
 
 <!-- mcp-name: io.github.trueoriginlabs/vibatchium -->

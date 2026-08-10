@@ -58,10 +58,19 @@ if TYPE_CHECKING:
 # resource-path lookups / static-dir packaging hassles. Two templates:
 # INDEX_HTML lists running sessions; VIEWER_HTML is the per-session canvas.
 
+# The VB badge, 32x32, inlined as a data URI for the same reason the HTML is
+# inlined — and because a live-view page must not reach the network for an
+# asset. Substituted into both templates below rather than into their format()
+# calls, so INDEX_HTML (which is served verbatim) gets it too.
+_FAVICON = (
+    "data:image/png;base64,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"
+)
+
 INDEX_HTML = """<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<link rel="icon" href="__FAVICON__">
 <title>vibatchium — live-view</title>
 <style>
   body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -110,6 +119,7 @@ VIEWER_HTML = """<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<link rel="icon" href="__FAVICON__">
 <title>vibatchium — {name}</title>
 <style>
   body {{ margin: 0; background: #000; overflow: hidden;
@@ -237,6 +247,9 @@ connect();
 </script>
 </body>
 </html>"""
+
+INDEX_HTML = INDEX_HTML.replace("__FAVICON__", _FAVICON)
+VIEWER_HTML = VIEWER_HTML.replace("__FAVICON__", _FAVICON)
 
 
 def _render_viewer(name: str, takeover: bool) -> str:
