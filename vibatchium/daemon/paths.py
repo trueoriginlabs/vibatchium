@@ -18,8 +18,10 @@ for the corresponding `session_*` verbs.
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 import re
+import shutil
 from pathlib import Path
 
 # ─── name validation (Wave 7.5b — path-traversal hardening) ──────────────
@@ -109,6 +111,62 @@ if _legacy_chrome_profile.is_dir():
         pass
 ACTIVE_PROFILE_PATH = CONFIG_DIR / "active-profile"
 ACTIVE_SESSION_PATH = CONFIG_DIR / "active-session"
+
+
+def cache_mirror_dir(profile_dir: Path) -> Path | None:
+    """Where Chromium puts this profile's disk cache when we DON'T pin it.
+
+    Chromium derives the default cache location by taking the user-data-dir's
+    position relative to $XDG_CONFIG_HOME and re-rooting it at $XDG_CACHE_HOME.
+    Because PROFILES_DIR lives under ~/.config, every profile silently grows a
+    cache twin somewhere we never look:
+
+        ~/.config/vibatchium/profiles/<name>   the profile — we create/delete it
+        ~/.cache/vibatchium/profiles/<name>    Chrome's cache — nothing deleted it
+
+    Since 0.18.13 both launchers pin --disk-cache-dir INSIDE the profile, so a
+    new session's cache never lands here — though Chrome still creates the empty
+    directory skeleton, so this is not the same as "no twin exists". This
+    function locates it for the code that cleans up: both profile-deletion paths
+    drop a profile's own twin, and `clean` sweeps the ones left behind by older
+    versions, whether or not their profile survived.
+
+    Returns None when the profile isn't under XDG_CONFIG_HOME at all (an
+    attached or explicitly-placed profile) — no remap happens, so no twin.
+    Never returns a path outside XDG_CACHE_HOME.
+    """
+    cfg_home = Path(os.environ.get("XDG_CONFIG_HOME") or (Path.home() / ".config"))
+    cache_home = Path(os.environ.get("XDG_CACHE_HOME") or (Path.home() / ".cache"))
+    try:
+        rel = Path(os.path.abspath(profile_dir)).relative_to(os.path.abspath(cfg_home))
+    except ValueError:
+        return None
+    if not rel.parts:
+        return None
+    return cache_home / rel
+
+
+def drop_cache_mirror(profile_dir: Path) -> bool:
+    """Remove a deleted profile's cache twin. True if one was there.
+
+    Call this from EVERY path that removes a profile. There are two — the
+    ephemeral close in `SessionRegistry.close` and `delete_profile_dir` — and
+    the ephemeral one is by far the busier, so a fix applied to only the other
+    would miss most of the leak it was written for.
+
+    Best-effort by design: the profile is already gone, and a cache we can't
+    remove must not turn a successful close into an error.
+    """
+    twin = cache_mirror_dir(profile_dir)
+    if twin is None or twin.is_symlink() or not twin.is_dir():
+        return False
+    try:
+        shutil.rmtree(twin)
+        return True
+    except OSError as exc:
+        logging.getLogger("vibatchium.paths").warning(
+            "cache mirror %s: %s", twin, exc)
+        return False
 
 SOCK_PATH = CACHE_DIR / "daemon.sock"
 PID_PATH = CACHE_DIR / "daemon.pid"

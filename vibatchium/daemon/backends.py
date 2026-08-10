@@ -32,6 +32,7 @@ from .browser import (
     BrowserSession,
     attach_session,
     coherent_headless_ua,
+    disk_cache_mb,
     launch_session,
 )
 
@@ -192,6 +193,14 @@ async def launch_nodriver_session(
                 await probe_pw.stop()
         if clean_ua:
             extra_args.append(f"--user-agent={clean_ua}")
+    # 0.18.13: pin + bound the disk cache here too. nodriver launches Chrome
+    # itself, so like the UA flag above it inherits nothing from launch_session
+    # — and without this its profiles keep growing the unreclaimable XDG cache
+    # twin the patchright path just stopped creating.
+    extra_args.append(f"--disk-cache-dir={profile_dir / 'ChromeCache'}")
+    _cache_mb = disk_cache_mb()
+    if _cache_mb > 0:
+        extra_args.append(f"--disk-cache-size={_cache_mb * 1024 * 1024}")
     browser = await uc.start(
         user_data_dir=str(profile_dir),
         headless=headless,

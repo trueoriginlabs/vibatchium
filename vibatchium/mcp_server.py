@@ -640,10 +640,11 @@ TOOLS: list[tuple[str, str, dict, str, Any]] = [
      {"type": "object", "properties": {"name": _str("Session name.")}},
      "session_lease_info", None),
     ("clean",
-     "Housekeeping — reclaim disk from stale profile dirs, leftover Chrome lock "
-     "files, regenerable caches, and the daemon log. DRY-RUN by default; pass "
-     "apply=true to actually delete. Never touches the default/active/running "
-     "sessions. Returns a per-category {count, bytes} report.",
+     "Housekeeping — reclaim disk from stale profile dirs, superseded Chrome "
+     "cache dirs, leftover Chrome lock files, regenerable caches, and the "
+     "daemon log. DRY-RUN by default; pass apply=true to actually delete. Never "
+     "touches the default/active/running sessions. Returns a per-category "
+     "{count, bytes} report.",
      {"type": "object", "properties": {
          "apply": _bool("Actually delete (default false = dry-run report).", False),
          "older_than": _int("Prune profiles idle ≥ this many seconds (default 14d).", None),
@@ -651,6 +652,9 @@ TOOLS: list[tuple[str, str, dict, str, Any]] = [
                   "description": "Session names to never prune."},
          "log_keep_bytes": _int("Truncate daemon.log to its last N bytes.", None),
          "profiles": _bool("Include stale profile dirs (default true).", True),
+         "cache_mirror": _bool("Include superseded Chrome cache dirs — caches "
+                               "whose profile is gone, or which the profile no "
+                               "longer uses (default true).", True),
          "locks": _bool("Include leftover Chrome lock files (default true).", True),
          "cache": _bool("Include regenerable caches (default true).", True),
          "logs": _bool("Include daemon-log truncation (default true).", True),

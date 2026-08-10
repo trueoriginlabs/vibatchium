@@ -44,7 +44,7 @@ vb research --target https://example.com \          # parallel fan-out, N intent
 
 ```bash
 vb update                  # upgrade to the latest PyPI release + restart the daemon
-vb update --version 0.18.12  # or pin a specific version
+vb update --version 0.18.13  # or pin a specific version
 ```
 
 `vb update` detects how vibatchium was installed (pipx, `uv tool install`,

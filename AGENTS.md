@@ -144,9 +144,10 @@ readlink ~/.config/vibatchium/profiles/<name>/SingletonLock   # -> <host>-<pid>
 ```
 
 If that pid is alive, the teardown leaked — kill it, then relaunch. **Do not**
-reach for `vb clean --locks --apply` here: it only protects profiles in use by
-the daemon it queries, so it will unlink a live orphan's lock and let two
-Chromes onto one profile.
+reach for `vb clean --apply` here (lock removal is one of its default
+categories; `--no-locks` skips it): it only protects profiles in use by the
+daemon it queries, so it will unlink a live orphan's lock and let two Chromes
+onto one profile.
 
 ### `route` is URL globs, not resource types — and it costs you the HTTP cache
 
@@ -448,7 +449,10 @@ pinned/production sessions for a `VIBATCHIUM_MAX_SESSIONS` slot, and never touch
 `default`. On this no-`--session` lane `--keep-open` is **ignored** (response carries
 `keep_open_ignored: true`): the minted `_ex-` name is unaddressable and the slot is
 always reclaimed on return. To keep a page open for follow-up calls, pin an explicit
-`--session` — `explore` *with* a `--session` is unchanged. Worst-case live
+`--session` — `explore` *with* a `--session` is unchanged, and since 0.18.13 says so:
+the response carries `lane: "pinned"` plus a `lane_hint`. Pinning is a real downgrade
+for one-shot work — the call moves onto the `MAX_SESSIONS` budget and leaves a profile
+behind — so only pin when you need the page to survive the call. Worst-case live
 Chromes = `MAX_SESSIONS + MAX_EPHEMERAL` (+ any warms).
 
 ## Env overrides
@@ -469,6 +473,7 @@ VIBATCHIUM_AUTO_INSTALL=0       # disable one-time Chrome auto-install on first 
 VIBATCHIUM_DAEMON_IDLE_TIMEOUT=0  # seconds; >0 self-shuts an idle (0-session) daemon; 0/unset = disabled (default)
 VIBATCHIUM_IDLE_FREEZE=1        # lifecycle-freeze parked headless sessions (default on; 0 disables)
 VIBATCHIUM_IDLE_FREEZE_AFTER=90 # idle seconds before a parked session's pages freeze (default 90, min 5)
+VIBATCHIUM_DISK_CACHE_MB=256    # per-session Chrome disk-cache ceiling (0 = let Chrome size it off free disk)
 VIBATCHIUM_LOG_FILE=<path>      # full daemon-log path (default: a persistent state dir, see below)
 VIBATCHIUM_LOG_MAX_BYTES=10485760 # rotate the daemon log past this size (0 = never rotate)
 VIBATCHIUM_LOG_BACKUPS=5        # how many rotated daemon-log backups to keep

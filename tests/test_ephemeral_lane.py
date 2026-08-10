@@ -100,6 +100,82 @@ def test_create_splits_budgets(monkeypatch):
     asyncio.run(go())
 
 
+def _sandbox_profiles(monkeypatch, tmp_path):
+    """Point PROFILES_DIR at tmp_path.
+
+    `create()` mkdirs the profile even behind a stubbed launch, so a unit test
+    that skips this writes real directories into the operator's
+    ~/.config/vibatchium/profiles and leaves them there.
+    """
+    from vibatchium.daemon import paths as pathsmod
+    profiles = tmp_path / "profiles"
+    profiles.mkdir()
+    monkeypatch.setattr(pathsmod, "PROFILES_DIR", profiles)
+    monkeypatch.setattr(R, "PROFILES_DIR", profiles)
+    return profiles
+
+
+def test_cap_refusals_reach_the_daemon_log(monkeypatch, caplog, tmp_path):
+    """0.18.13: a refusal is a resource event the OPERATOR needs to see.
+
+    The exception only ever reached the calling process, and callers routinely
+    swallow it and fall back to their own raw Chrome — invisible to every vb
+    metric. The advice in the message ("use the off-budget lane") is only useful
+    if somebody reads it, so it has to land in the log too.
+    """
+    monkeypatch.setenv("VIBATCHIUM_MAX_SESSIONS", "1")
+    monkeypatch.setenv("VIBATCHIUM_MAX_EPHEMERAL", "1")
+    monkeypatch.setenv("VIBATCHIUM_WARM", "off")
+    _sandbox_profiles(monkeypatch, tmp_path)
+    reg = SessionRegistry()
+    _patch_launch(reg, monkeypatch)
+
+    async def go():
+        await reg.create("p1", headless=True)
+        await reg.create("e1", headless=True, ephemeral=True)
+        with caplog.at_level("WARNING", logger="vibatchium.registry"):
+            with pytest.raises(SessionLimitError):
+                await reg.create("p2", headless=True)
+            with pytest.raises(SessionLimitError):
+                await reg.create("e2", headless=True, ephemeral=True)
+
+    asyncio.run(go())
+    warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert any("reason=session-cap" in m and "name=p2" in m for m in warnings), warnings
+    assert any("reason=ephemeral-cap" in m and "name=e2" in m for m in warnings), warnings
+    # The counts are what make the line actionable without a second query.
+    assert any("cap=1 running=1" in m for m in warnings), warnings
+
+
+def test_no_refusal_log_on_the_happy_path(monkeypatch, caplog, tmp_path):
+    """A warning per successful start would drown the real ones."""
+    monkeypatch.setenv("VIBATCHIUM_MAX_SESSIONS", "4")
+    monkeypatch.setenv("VIBATCHIUM_WARM", "off")
+    _sandbox_profiles(monkeypatch, tmp_path)
+    reg = SessionRegistry()
+    _patch_launch(reg, monkeypatch)
+    with caplog.at_level("WARNING", logger="vibatchium.registry"):
+        asyncio.run(reg.create("p1", headless=True))
+    assert not [r for r in caplog.records if "session refused" in r.getMessage()]
+
+
+def test_ram_floor_refusal_is_logged_too(monkeypatch, caplog, tmp_path):
+    """The third refusal path. It is opt-in, so it is the one most likely to be
+    hit by an operator who has never seen it fire and has nothing to grep for."""
+    monkeypatch.setenv("VIBATCHIUM_MAX_SESSIONS", "8")
+    monkeypatch.setenv("VIBATCHIUM_WARM", "off")
+    monkeypatch.setenv("VIBATCHIUM_SESSION_RAM_FLOOR_MB", "999999")
+    _sandbox_profiles(monkeypatch, tmp_path)
+    reg = SessionRegistry()
+    _patch_launch(reg, monkeypatch)
+    with caplog.at_level("WARNING", logger="vibatchium.registry"):
+        with pytest.raises(SessionLimitError, match="admission floor"):
+            asyncio.run(reg.create("hungry", headless=True))
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any("reason=ram-floor" in m and "name=hungry" in m for m in msgs), msgs
+    assert any("floor_mb=999999" in m for m in msgs), msgs
+
+
 def test_ephemeral_full_does_not_block_persistent(monkeypatch):
     monkeypatch.setenv("VIBATCHIUM_MAX_SESSIONS", "2")
     monkeypatch.setenv("VIBATCHIUM_MAX_EPHEMERAL", "1")
@@ -181,8 +257,13 @@ def test_explore_explicit_session_unchanged(local_server):
     try:
         r = call("explore", {"url": f"{local_server}/simple.html"}, session=name)
         assert r["session"] == name
-        assert "lane" not in r                               # legacy path
         assert r["closed"] is True
+        # 0.18.13: the legacy path behaves identically, but no longer runs
+        # anonymously — pinning silently moves the work onto the persistent
+        # budget and leaves a profile behind, so the response now names the
+        # lane and points at the cheaper one.
+        assert r["lane"] == "pinned"
+        assert "off-budget" in r["lane_hint"]
     finally:
         try:
             call("session_close", {"name": name})

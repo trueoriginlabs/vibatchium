@@ -576,6 +576,9 @@ def register_all(daemon) -> None:
             # start would push total live Chromes past MAX_SESSIONS+MAX_EPHEMERAL.
             if want_ephemeral and not entry.ephemeral:
                 if d.registry.count_ephemeral() >= get_max_ephemeral():
+                    log.warning("session refused name=%s reason=ephemeral-cap "
+                                "cap=%d running=%d (reclassify)", name,
+                                get_max_ephemeral(), d.registry.count_ephemeral())
                     raise SessionLimitError(
                         f"VIBATCHIUM_MAX_EPHEMERAL={get_max_ephemeral()} reached "
                         f"— cannot reclassify {name!r} as ephemeral")
@@ -1364,7 +1367,14 @@ def register_all(daemon) -> None:
         # session) by exact name without strict validation, so an internal
         # underscore-prefixed profile (_ex-/_iv-) can be cleaned up. Validate only a
         # name that identifies neither a live session nor an on-disk profile.
-        if not (name and (d.registry.has(name) or session_dir(name).exists())):
+        #
+        # The membership test must come from `list_session_names`, NOT from
+        # `session_dir`: that helper CREATES the directory it is asked about
+        # (paths.py), so `session_dir(name).exists()` is unconditionally true and
+        # silently disabled validation for every name — including `../../x`,
+        # which `delete_profile_dir` would then rmtree outside PROFILES_DIR.
+        # Listing real directory entries cannot match a traversal.
+        if not (name and (d.registry.has(name) or name in list_session_names())):
             name = validate_name(args.get("name"), kind="session name")
         if name == get_active_session_name():
             raise ValueError(f"session {name!r} is active — switch first")
@@ -1398,9 +1408,12 @@ def register_all(daemon) -> None:
 
     @daemon.handler("clean")
     async def _clean(d, args):
-        """One-shot housekeeping — reclaim disk from four sources:
+        """One-shot housekeeping — reclaim disk from five sources:
 
           profiles : stale per-run profile dirs (idle ≥ older_than seconds)
+          cache_mirror : XDG cache twins nothing can reach any more — either
+                     the profile is gone, or it has relaunched under the
+                     --disk-cache-dir pin and left this one behind
           locks    : leftover Chrome SingletonLock/Socket/Cookie files in
                      non-running profiles (these cause 'profile already in
                      use' launch failures)
@@ -1415,7 +1428,7 @@ def register_all(daemon) -> None:
         """
         import shutil as _shutil
         import time as _time
-        from .paths import CACHE_DIR, LOG_PATH
+        from .paths import CACHE_DIR, LOG_PATH, cache_mirror_dir
 
         apply = bool(args.get("apply"))
         ot = args.get("older_than")
@@ -1450,6 +1463,55 @@ def register_all(daemon) -> None:
                         log.warning("clean: profile %s: %s", name, exc)
             cats["profiles"] = {"count": len(names), "bytes": total,
                                 "names": sorted(names)}
+
+        # ── superseded XDG cache twins ──
+        # 0.18.13: profiles created before --disk-cache-dir was pinned left a
+        # cache at $XDG_CACHE_HOME/vibatchium/profiles/<name>, which `clean`
+        # could not see because it looked exclusively at the config side. Two
+        # populations qualify: twins whose profile is gone (orphans), and twins
+        # whose profile has since relaunched under the pin, which makes the old
+        # cache unreachable by Chrome and unreclaimable by anything else.
+        if args.get("cache_mirror", True):
+            mirror_root = cache_mirror_dir(PROFILES_DIR)
+            names, total = [], 0
+            for twin in (sorted(mirror_root.iterdir())
+                         if mirror_root and mirror_root.is_dir() else ()):
+                name = twin.name
+                if not twin.is_dir() or twin.is_symlink():
+                    continue
+                if name in protected or name in in_use:
+                    continue
+                # A surviving profile does NOT make its twin live. Once a
+                # session has launched under the pin its cache is inside the
+                # profile and the twin is dead weight — which is the bulk of
+                # the leak, because the biggest twins belong to the sessions
+                # that run most (measured on one box: 72 such dirs, 8.4 GB,
+                # against 158 true orphans). ChromeCache/ inside the profile is
+                # the proof that a pinned launch happened; without it we cannot
+                # tell a legacy cache from one Chrome is still writing, so we
+                # leave it. `in_use` above already spared anything running.
+                pdir = PROFILES_DIR / name
+                if pdir.exists() and not (pdir / "ChromeCache").exists():
+                    continue
+                # The twin's own mtime is a CREATION stamp — Chrome writes into
+                # Cache_Data without touching the parent, so a directory in
+                # active use can look years idle. Age off the block file.
+                probe = twin / "Default" / "Cache" / "Cache_Data"
+                try:
+                    stamp = (probe if probe.exists() else twin).stat().st_mtime
+                except OSError:
+                    continue
+                if (now - stamp) < older_than:
+                    continue
+                total += _dir_size(twin)
+                names.append(name)
+                if apply:
+                    try:
+                        _shutil.rmtree(twin)
+                    except OSError as exc:
+                        log.warning("clean: cache mirror %s: %s", name, exc)
+            cats["cache_mirror"] = {"count": len(names), "bytes": total,
+                                    "names": sorted(names)}
 
         # ── stale Chrome lock files (non-running profiles only) ──
         if args.get("locks", True):
@@ -1507,7 +1569,7 @@ def register_all(daemon) -> None:
                             "reclaimed": max(0, before - after)}
 
         total_bytes = sum(cats.get(k, {}).get("bytes", 0)
-                          for k in ("profiles", "locks", "cache"))
+                          for k in ("profiles", "cache_mirror", "locks", "cache"))
         total_bytes += cats.get("logs", {}).get("reclaimed", 0)
         return {"dry_run": not apply, "categories": cats,
                 "total_bytes": total_bytes}
@@ -1784,6 +1846,8 @@ def register_all(daemon) -> None:
             # tear down a leased session via explore. (The no-pin lane below mints
             # its own never-leased session, so it needs no gate.)
             _pin = current_session_ctx.get()
+            log.info("explore on pinned session=%s (on-budget; omit the session "
+                     "for the off-budget ephemeral lane)", _pin)
             _pe = d.registry.get(_pin)
             if _pe is not None:
                 _active = _pe.lease_active()
@@ -1794,6 +1858,17 @@ def register_all(daemon) -> None:
                         raise RuntimeError(_reason)
             out = await _run_body()
             out["closed"] = False
+            # 0.18.13: say which lane ran. Pinning a session on explore is a
+            # silent downgrade — the work moves onto the MAX_SESSIONS budget and
+            # leaves a profile behind, where the default lane is off-budget and
+            # self-deleting. It is a real back-compat path (identity continuity
+            # across explores), so it stays; it just stops being invisible. Seen
+            # in the wild as a per-URL session name in a scraping loop, which
+            # exhausted the cap and silently fell back to the caller's own
+            # Chrome; a one-word hint in the response would have caught it.
+            out["lane"] = "pinned"
+            out["lane_hint"] = ("explore without --session for a one-shot page: "
+                                "off-budget, auto-deleted, no cap pressure")
             if not keep_open:
                 try:
                     await d._handlers["stop"](d, {})  # keys off the contextvar

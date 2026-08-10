@@ -769,7 +769,11 @@ def _human_bytes(n) -> str:
 
 def _clean_item_count(report: dict) -> int:
     cats = report.get("categories", {})
-    n = sum(cats.get(k, {}).get("count", 0) for k in ("profiles", "locks", "cache"))
+    # Every category with a count belongs here: this gates the --apply path, so
+    # a category missing from this tuple makes `clean --apply` report "nothing
+    # to reclaim" and silently do nothing whenever it is the only work to do.
+    n = sum(cats.get(k, {}).get("count", 0)
+            for k in ("profiles", "cache_mirror", "locks", "cache"))
     if cats.get("logs", {}).get("reclaimed", 0) > 0:
         n += 1
     return n
@@ -783,6 +787,10 @@ def _print_clean_report(report: dict, *, applied: bool) -> None:
     if p is not None:
         click.echo(f"  profiles : {p['count']:>4} dirs    {_human_bytes(p['bytes'])}",
                    err=True)
+    cm = cats.get("cache_mirror")
+    if cm is not None:
+        click.echo(f"  cachedirs: {cm['count']:>4} dirs    {_human_bytes(cm['bytes'])}"
+                   "  (superseded Chrome caches no profile can reach)", err=True)
     lk = cats.get("locks")
     if lk is not None:
         click.echo(f"  locks    : {lk['count']:>4} files   {_human_bytes(lk['bytes'])}",
@@ -812,6 +820,9 @@ def _print_clean_report(report: dict, *, applied: bool) -> None:
               help="Extra session names to protect (repeatable). 'default', the "
                    "active session, and any running session are always protected.")
 @click.option("--no-profiles", is_flag=True, help="Skip stale-profile pruning.")
+@click.option("--no-cache-mirror", is_flag=True,
+              help="Skip superseded Chrome cache dirs (caches whose profile is "
+                   "gone, or which the profile no longer uses).")
 @click.option("--no-locks", is_flag=True, help="Skip stale Chrome lock-file removal.")
 @click.option("--no-cache", is_flag=True,
               help="Skip cache cleanup (clearing the vision cache means paid "
@@ -820,9 +831,9 @@ def _print_clean_report(report: dict, *, applied: bool) -> None:
 @click.option("--yes", "-y", "assume_yes", is_flag=True,
               help="Skip the confirmation prompt when --apply is set.")
 @click.pass_context
-def clean(ctx, apply, older_than, keep_list, no_profiles, no_locks, no_cache,
-          no_logs, assume_yes):
-    """Reclaim disk: stale profiles, Chrome lock files, caches, and the daemon log.
+def clean(ctx, apply, older_than, keep_list, no_profiles, no_cache_mirror,
+          no_locks, no_cache, no_logs, assume_yes):
+    """Reclaim disk: stale profiles, superseded Chrome caches, lock files, caches, and the daemon log.
 
     Safe by default — with no --apply it prints a dry-run report of what it
     WOULD reclaim. Never touches the 'default' profile, the active session, or
@@ -835,8 +846,8 @@ def clean(ctx, apply, older_than, keep_list, no_profiles, no_locks, no_cache,
     """
     older_seconds = _parse_age_seconds(older_than)
     base = {"older_than": older_seconds, "keep": list(keep_list),
-            "profiles": not no_profiles, "locks": not no_locks,
-            "cache": not no_cache, "logs": not no_logs}
+            "profiles": not no_profiles, "cache_mirror": not no_cache_mirror,
+            "locks": not no_locks, "cache": not no_cache, "logs": not no_logs}
     json_mode = ctx.obj["json"]
 
     # Always compute the dry-run report first — cheap, and it's what we confirm on.

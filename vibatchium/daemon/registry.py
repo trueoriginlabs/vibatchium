@@ -43,6 +43,7 @@ from .browser import BrowserSession, attach_session
 from .paths import (
     DEFAULT_SESSION_NAME,
     PROFILES_DIR,
+    drop_cache_mirror,
     list_session_names,
     session_dir,
 )
@@ -655,10 +656,19 @@ class SessionRegistry:
             )
         # 0.7.0: two independent budgets. Ephemeral one-shot sessions never
         # compete with persistent/production sessions for slots.
+        # 0.18.13: LOG the refusal, don't only raise it. A cap hit is a resource
+        # event the operator needs in the daemon log — but the exception only
+        # ever reached the calling process, and callers routinely swallow it and
+        # fall back to their own raw Chrome, which no vb metric can see. That
+        # failure mode ran for a week on a real deployment precisely because the
+        # advice below (use the off-budget lane) was written to a stderr nobody
+        # read. WARNING, because a refusal always means work was dropped.
         if ephemeral:
             ecap = get_max_ephemeral()
             used = self.count_ephemeral()
             if ecap <= 0 or used >= ecap:
+                log.warning("session refused name=%s reason=ephemeral-cap "
+                            "cap=%d running=%d", name, ecap, used)
                 raise SessionLimitError(
                     f"VIBATCHIUM_MAX_EPHEMERAL={ecap} reached "
                     f"({used} one-shot sessions running). These auto-close on "
@@ -668,6 +678,8 @@ class SessionRegistry:
             cap = get_max_sessions()
             used = self.count_persistent()
             if used >= cap:
+                log.warning("session refused name=%s reason=session-cap "
+                            "cap=%d running=%d", name, cap, used)
                 raise SessionLimitError(
                     f"VIBATCHIUM_MAX_SESSIONS={cap} reached "
                     f"({used} persistent sessions running). Close one with "
@@ -720,6 +732,9 @@ class SessionRegistry:
             # degrade on a full cap (e.g. `vb research`) treat it the same way.
             blocked = _ram_floor_blocked() if warm is None else None
             if blocked is not None:
+                log.warning("session refused name=%s reason=ram-floor "
+                            "available_mb=%s floor_mb=%s", name, blocked,
+                            get_session_ram_floor_mb())
                 raise SessionLimitError(
                     f"memory admission floor: only {blocked}MB available, a new "
                     f"session needs >= {get_session_ram_floor_mb()}MB "
@@ -929,6 +944,9 @@ class SessionRegistry:
             raise RuntimeError(f"session {name!r} already attached")
         cap = get_max_sessions()
         if self.count_persistent() >= cap:
+            log.warning("session refused name=%s reason=session-cap "
+                        "cap=%d running=%d (attach)", name, cap,
+                        self.count_persistent())
             raise SessionLimitError(f"VIBATCHIUM_MAX_SESSIONS={cap} reached")
         pw = await self._ensure_pw()
         sess = await attach_session(cdp_url, pw=pw)
@@ -1037,6 +1055,12 @@ class SessionRegistry:
                              name, profile_dir)
             except Exception as exc:  # noqa: BLE001
                 log.warning("ephemeral cleanup failed for %s: %s", name, exc)
+            # 0.18.13: and its cache twin. This path does its own rmtree rather
+            # than calling delete_profile_dir, so it needs the call explicitly —
+            # and it is the one that matters most, because the ephemeral lane is
+            # where the profile churn is. Unconditional: the twin outlives a
+            # failed rmtree above, and _within_profiles_dir already gated us.
+            drop_cache_mirror(profile_dir)
             return True
         # Wave 7.7.3 warm recycle
         recycle = os.environ.get("VIBATCHIUM_WARM_RECYCLE", "0").lower() in (
@@ -1094,8 +1118,27 @@ class SessionRegistry:
         if name in self._warm_tasks or name in self._warm_sessions:
             await self.cancel_prewarm(name)
         pdir = PROFILES_DIR / name
+        # Defence in depth for the rmtree below. Callers are supposed to hand us
+        # a validated bare name, but a single gap upstream turns this into
+        # arbitrary directory deletion — `PROFILES_DIR / "../../x"` resolves
+        # clean out of the profile store. `close()` has always guarded its own
+        # ephemeral rmtree this way; this one was relying on its callers.
+        if not _within_profiles_dir(pdir):
+            raise ValueError(
+                f"refusing to delete {name!r}: resolves outside PROFILES_DIR")
         if not pdir.exists():
-            return False
+            # The profile is gone but its cache twin may not be — that is the
+            # exact shape legacy residue takes, so returning early here would
+            # make the twin permanently unreachable. Report on the profile as
+            # before; sweep the cache regardless.
+            return drop_cache_mirror(pdir)
         shutil.rmtree(pdir)
+        # 0.18.13: take the XDG cache twin with it. Sessions launched before
+        # --disk-cache-dir was pinned left their cache at
+        # $XDG_CACHE_HOME/vibatchium/profiles/<name>, which this function used
+        # to walk straight past. Chrome also creates the mirror root even when
+        # the cache is pinned elsewhere, so post-fix profiles leave an empty
+        # skeleton there — cheap, but it accumulates one entry per session.
+        drop_cache_mirror(pdir)
         log.info("profile dir deleted name=%s", name)
         return True

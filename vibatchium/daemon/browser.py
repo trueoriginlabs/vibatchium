@@ -55,6 +55,21 @@ _HEADLESS_UA_CACHE: str | None = None
 _HEADLESS_UA_PROBED = False
 _HEADLESS_UA_LOCK = asyncio.Lock()
 
+#: Per-session disk cache ceiling, MB. 0 = let Chrome size it off free disk
+#: (its default, and unbounded in practice on a large volume).
+DISK_CACHE_MB_DEFAULT = 256
+
+
+def disk_cache_mb() -> int:
+    """VIBATCHIUM_DISK_CACHE_MB, or the default. Junk parses as the default."""
+    raw = os.environ.get("VIBATCHIUM_DISK_CACHE_MB")
+    if raw is None:
+        return DISK_CACHE_MB_DEFAULT
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return DISK_CACHE_MB_DEFAULT
+
 
 async def coherent_headless_ua(pw: Playwright) -> str | None:
     """Clean UA (HeadlessChrome→Chrome) for headless launches, or None if this
@@ -411,6 +426,29 @@ async def launch_session(profile_dir: Path, headless: bool = False,
     #     manifesting as `Page.goto` timeouts on later-spawned sessions even
     #     though `launch_persistent_context` returned cleanly.
     extra_args = ["--disable-dev-shm-usage"] if headless else []
+    # 0.18.13: pin the disk cache INSIDE the profile, and bound it.
+    #
+    # Chromium places its cache by re-rooting the user-data-dir's path from
+    # $XDG_CONFIG_HOME to $XDG_CACHE_HOME. Profiles live under ~/.config, so
+    # every session grew a twin at ~/.cache/vibatchium/profiles/<name> that NO
+    # code path ever deleted — not `close`, not `clean`, not the ephemeral
+    # reaper, which all operate on the config side. Measured on a daemon of
+    # ordinary age: 1.6 GB of cache behind a 264 MB profile, and 158 orphaned
+    # twins whose profiles were long gone.
+    #
+    # --disk-cache-dir suppresses the remap entirely (verified: the mirror is
+    # left with zero files), so the cache now lives where rmtree already
+    # reaches it. --disk-cache-size then bounds it, which matters most for
+    # long-lived sessions: Chrome sizes its default cache off free disk, so a
+    # persistent bot on a large volume grows without limit. Set
+    # VIBATCHIUM_DISK_CACHE_MB=0 to restore Chrome's own sizing.
+    #
+    # Neither flag is JS-visible and neither raises an infobar, so unlike
+    # --no-sandbox this is stealth-neutral.
+    extra_args = list(extra_args) + [f"--disk-cache-dir={profile_dir / 'ChromeCache'}"]
+    _cache_mb = disk_cache_mb()
+    if _cache_mb > 0:
+        extra_args.append(f"--disk-cache-size={_cache_mb * 1024 * 1024}")
     # Headless Chrome leaks `HeadlessChrome` in the UA string (main page +
     # SharedWorkers + the User-Agent header). De-Headless it browser-wide via
     # the `--user-agent` flag so it reaches every target — a context-level

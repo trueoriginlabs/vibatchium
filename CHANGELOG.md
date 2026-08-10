@@ -4,6 +4,98 @@ All notable changes to vibatchium are documented here. Versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Until 1.0,
 minor bumps may include breaking changes; we'll always call them out here.
 
+## [0.18.13] — 2026-08-10
+
+### fix: Chrome's disk cache was escaping the profile, and nothing ever collected it
+
+Chromium picks a profile's cache directory by taking the user-data-dir's path
+relative to `$XDG_CONFIG_HOME` and re-rooting it at `$XDG_CACHE_HOME`. Profiles
+live under `~/.config`, so every session silently grew a twin:
+
+```
+~/.config/vibatchium/profiles/<name>   the profile — we create and delete this
+~/.cache/vibatchium/profiles/<name>    Chrome's cache — nothing deleted it, ever
+```
+
+No code path referenced the second path. `close`, `clean` and the ephemeral
+reaper all work on the config side, so every profile deletion — *including every
+successful ephemeral close* — stranded a full HTTP cache. Measured on one daemon
+of ordinary age: 158 orphaned twins, and 1.6 GB of cache behind a 264 MB
+profile, because Chrome sizes its default cache off free disk and a persistent
+session on a large volume grows without limit.
+
+- **Both launchers now pin `--disk-cache-dir` inside the profile** — the
+  patchright path and `--backend nodriver`, which builds its own argv and
+  inherits nothing, the same way it already had to be given the de-Headless UA
+  flag. Pinning suppresses the remap: verified against a real Chrome, the mirror
+  is left with zero files, so the cache lives where `rmtree` already reaches it.
+  Chrome still creates the mirror's empty directory skeleton, hence the sweep
+  below. `--disk-cache-size` bounds it, default 256 MB,
+  `VIBATCHIUM_DISK_CACHE_MB=0` to restore Chrome's own sizing. Neither flag is
+  JS-visible and neither raises an infobar, so unlike `--no-sandbox` this is
+  stealth-neutral.
+- **Both profile-deletion paths take the twin with them** — `delete_profile_dir`
+  and the ephemeral branch of `close`, which does its own `rmtree` rather than
+  calling the former. The ephemeral one is the busier by far, so wiring only
+  `delete_profile_dir` would have missed most of the leak this fixes. Shared
+  `drop_cache_mirror` helper; best-effort, since the profile is already gone and
+  a cache we can't remove must not turn a successful close into an error.
+- **`clean` gained a `cache_mirror` category** (`--no-cache-mirror` to skip),
+  which sweeps two populations: twins whose profile is gone, and twins whose
+  profile has since relaunched under the pin. That second case is most of the
+  leak — the biggest twins belong to the sessions that run most, so their
+  profiles are very much alive, and a rule keyed on "the profile is gone" would
+  strand 8.4 GB across 72 directories on the box this was measured against. A
+  `ChromeCache/` inside the profile is the proof that a pinned launch happened
+  and the twin is unreachable; without it the twin stays, because we cannot tell
+  a dead cache from one Chrome is still writing. Running and warming sessions
+  are spared either way. It ages off `Cache_Data` rather than the directory's
+  own mtime, which is a *creation* stamp: Chrome writes into the block files
+  without touching the parent, so a cache in daily use can look years idle. The
+  category is counted by `total_bytes` and by the `--apply` gate, so
+  `clean --apply` reclaims it even when it is the only thing to reclaim.
+
+### fix: a session refused by a cap was invisible to the operator
+
+`SessionLimitError` was raised and never logged, so a cap hit reached only the
+calling process. Callers routinely catch it and fall back to spawning their own
+Chrome — which no vb metric can see. On one deployment that ran for a week: a
+scraping loop pinned a session per URL, exhausted `MAX_SESSIONS` against the
+live bots, and silently degraded to `chrome --dump-dom`, losing the stealth it
+was using vibatchium for. The message even said to use the off-budget lane;
+nobody was reading that stderr. Every refusal path now logs a `WARNING` with the
+cap and the running count: the session cap, the ephemeral cap, the RAM
+admission floor, the cap check on `attach`, and the ephemeral reclassification
+check in `start`.
+
+### fix: `session_delete` could delete a directory outside the profile store
+
+Found reviewing the above, and older than it. The handler skips strict name
+validation for a name that already identifies a profile on disk, so that
+internal `_ex-`/`_iv-` profiles can be cleaned up — but it tested membership
+with `session_dir(name).exists()`, and `session_dir` **creates** the directory
+it is asked about. The probe made itself true, so validation never ran for any
+name, and `delete_profile_dir` would then `rmtree` `PROFILES_DIR / name` —
+which for `../../../x` resolves clean out of the profile store. Reproduced in a
+sandbox: `session_delete` with a traversal name removed an unrelated directory
+and its contents.
+
+Fixed at both ends: the gate now tests membership against `list_session_names`,
+which lists real directory entries and cannot match a traversal, and
+`delete_profile_dir` refuses any path that resolves outside `PROFILES_DIR` —
+the same containment guard `close` has always applied to its own ephemeral
+`rmtree`. Same-UID local socket, so this was never remotely reachable; it
+mattered for the shared-daemon model, where a peer agent can call any verb.
+
+### explore: the pinned-session path says which lane it took
+
+`explore` *with* a `--session` is unchanged and still supported, but it is a
+real downgrade for one-shot work — the call moves onto the `MAX_SESSIONS`
+budget and leaves a profile behind, where the default lane is off-budget and
+self-deleting. The response now carries `lane: "pinned"` and a `lane_hint`, and
+the daemon logs it. Same bug as above: the MCP tool description documented the
+ephemeral lane, but a CLI caller got nothing.
+
 ## [0.18.12] — 2026-08-04
 
 ### docs: the PyPI project page was telling people to install 0.6.8
