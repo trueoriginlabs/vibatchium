@@ -4,6 +4,22 @@ All notable changes to vibatchium are documented here. Versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Until 1.0,
 minor bumps may include breaking changes; we'll always call them out here.
 
+## [0.18.14] — 2026-08-11
+
+### docs: ship the badge to PyPI and the MCP registry
+
+No code change. 0.18.13 was tagged one commit before the branding landed, so
+the artwork reached the GitHub README and nowhere else: PyPI rendered the
+project page from the pre-logo description, and the registry listed 0.18.13
+with no `icons`. Both read from a release, so both needed one. Same shape as
+0.18.12, which existed to deploy a README fix for exactly this reason.
+
+- The README `<img>` — absolute `raw.githubusercontent` URL, because PyPI
+  renders this README as the long description and cannot resolve repo-relative
+  paths.
+- `server.json`'s `icons` entry, which the registry reads from `master` when
+  `publish-mcp` fires on a successful `publish` run.
+
 ## [0.18.13] — 2026-08-10
 
 ### fix: Chrome's disk cache was escaping the profile, and nothing ever collected it
