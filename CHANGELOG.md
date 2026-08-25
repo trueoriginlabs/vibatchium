@@ -60,6 +60,68 @@ saved SERP fixtures and an injected fetcher instead of waiting to be walled.
 
 Needs the `vibatchium[fetch]` extra (same `curl_cffi` dependency as `fetch`).
 
+### fix: the stealth ladder's middle rung never worked, and nothing measured it
+
+Filling the README's empty eval block turned into a bug hunt. Three defects, all
+of them invisible because the harness had never been run end-to-end.
+
+- **The `nodriver` backend was completely broken.** Every launch died in about a
+  second with `connect_over_cdp ... ECONNREFUSED`. We picked a free port, passed
+  it to `uc.start(port=...)`, then connected Patchright to *that* port — but
+  nodriver treats `port` as a hint and binds its own (asked 38167, took 50199),
+  publishing the real one on `browser.config`. The endpoint is now resolved from
+  what nodriver actually bound, via `_nodriver_cdp_url()`, which degrades to the
+  requested port on versions that expose no config. This is the tier the stealth
+  ladder tells you to escalate to for the hardest gates; it has not worked.
+- **`vb evals run` printed a caveat you could not act on.** It told the reader to
+  "re-run with an accessible DRM render node" while exposing no switch to do it
+  with, so every number it could produce was a SwiftShader floor by construction
+  — and software GL is itself a detection signal. Added `--gpu/--no-gpu`.
+  sannysoft goes 97 → 100 on a real render node.
+- **The `brotector` scorer matched nothing.** It queried `.detection-fired` /
+  `[data-test]`; the real page renders a plain table with no classes and no
+  `data-*` attributes at all, so every run returned `score: null` and showed up
+  as `?` rather than as a failure. It now parses the table, inverts brotector's
+  higher-is-worse average into this suite's convention, and returns the *names*
+  of the signals that fired — which check tripped is the actionable half.
+
+Also: the `nodriver` path silently ignored the GPU setting, so it was being
+scored on SwiftShader while patchright got a real GPU — an unfair comparison
+baked into our own published table. It now takes the same `GPU_ANGLE_ARGS` under
+the same gate. Per-render-node pinning is deliberately *not* plumbed there: it
+works by injecting an EGL vendor env var, and nodriver spawns Chrome from the
+daemon's own environment, so mutating `os.environ` around the spawn would race
+every concurrent session launch. Unpinned GPU is safe; de-twinning stays
+patchright-only.
+
+With all three fixed, the measured table is published in the README. Two of the
+three scores are bad, and measuring them immediately paid for itself:
+
+### The de-Headless fix was buying one tell with another
+
+`brotector` flags `UA_Override / HighEntropyValues.empty`. Chasing it produced a
+measurement that **refutes a load-bearing comment in our own source**, which had
+asserted the Sec-CH-UA client hints do not leak and must not be touched. Chrome
+150, headless, same profile, with and without the `--user-agent` flag we set to
+strip `HeadlessChrome`:
+
+|                  | `architecture` | `bitness` | `uaFullVersion`  | UA string           |
+|------------------|----------------|-----------|------------------|---------------------|
+| without the flag | `x86`          | `64`      | `150.0.7871.114` | says `HeadlessChrome` |
+| with the flag    | empty          | empty     | empty            | says `Chrome`         |
+
+Passing an explicit UA makes Chrome stop deriving high-entropy client hints — it
+can no longer infer them from an arbitrary string. Low-entropy hints (brands,
+platform, mobile) survive; every high-entropy value goes empty. So the fix that
+removes the UA-string tell installs a UA-CH-emptiness tell in its place.
+
+This is **not fixed here**, deliberately. The obvious repair — restoring the
+metadata with `Emulation.setUserAgentOverride` — is target-scoped, and so
+reintroduces the main-vs-worker mismatch that the same comment block correctly
+identifies as a *stronger* tell than either leak alone. A correct fix has to
+reach every target including SharedWorkers. The comment now carries the
+measurement instead of the wrong claim, so the next attempt starts from data.
+
 ### feat: `vb fetch --proxy` — per-request egress
 
 `fetch` gained the same egress override, landed in parallel with `search`. The

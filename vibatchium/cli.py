@@ -2753,9 +2753,15 @@ def evals():
               help="Patch README.md between <!-- vibatchium-evals --> markers.")
 @click.option("--min-score", "min_score_arg", default=None, type=int,
               help="Exit non-zero if any cell scored below this (CI gate).")
+@click.option("--gpu/--no-gpu", "gpu", default=None,
+              help="Force the WebGL renderer on/off for every cell. Headless "
+                   "Chrome falls back to SwiftShader when the GPU path doesn't "
+                   "take, and software GL is itself a detection signal — so "
+                   "numbers measured without it are a floor, not what a "
+                   "GPU-backed deployment gets. Default: the profile's setting.")
 @click.pass_context
 def evals_run(ctx, targets, backends, humanize, settle_ms, out_path,
-              as_json, update_readme_flag, min_score_arg):
+              as_json, update_readme_flag, min_score_arg, gpu):
     """Run the eval matrix and emit a results table."""
     from . import evals as _evals
     targets_list = [t.strip() for t in targets.split(",") if t.strip()]
@@ -2770,7 +2776,7 @@ def evals_run(ctx, targets, backends, humanize, settle_ms, out_path,
 
     rows = _evals.run_eval_matrix(
         call, targets=targets_list, backends=backends_list,
-        humanize_modes=humanize_modes, settle_ms=settle_ms,
+        humanize_modes=humanize_modes, settle_ms=settle_ms, gpu=gpu,
     )
 
     if as_json:

@@ -220,9 +220,49 @@ human-driven session, and attach-mode is the honest answer.
 what we publish is generated rather than asserted. It is empty until someone
 runs it — an empty block is honest; a number with no run behind it is not.
 
+Run on x86-64 Linux, 25 Aug 2026, Chrome 150, `--gpu` (real render node).
+Pass `--gpu` yourself: headless Chrome falls back to SwiftShader when the GPU
+path doesn't take, and software GL is itself a detection signal, so numbers
+measured without it are a floor rather than what a GPU-backed deployment gets.
+
 <!-- vibatchium-evals -->
-_No eval run has been published yet. Generate with:_ `vb evals run --update-readme`
+| Target | Backend | Humanize | GPU | Score | Status | Time |
+|---|---|---|---|---|---|---|
+| sannysoft | patchright | off | real | 100 | OK | 17.78s |
+| creepjs | patchright | off | real | 44 | OK | 7.88s |
+| brotector | patchright | off | real | 10 | OK | 7.13s |
+| sannysoft | nodriver | off | real | 100 | OK | 19.85s |
+| creepjs | nodriver | off | real | 44 | OK | 9.72s |
+| brotector | nodriver | off | real | 10 | OK | 7.73s |
 <!-- /vibatchium-evals -->
+
+**Read these honestly — two of the three are bad.**
+
+- **sannysoft 100** is the floor everyone in this category clears; it is not a
+  differentiator.
+- **creepjs 44** is mediocre. CreepJS is an adversarial *lie-detector*: it
+  cross-checks main-thread against worker-thread claims and grades confidence,
+  so a middling score means our environment is coherent but not indistinguishable.
+- **brotector 10** is poor, and we know exactly why. The signal firing is
+  `UA_Override / HighEntropyValues.empty`, and **our own de-Headless fix causes
+  it.** Measured on Chrome 150, headless, same profile, with and without the
+  `--user-agent` flag we set to strip `HeadlessChrome`:
+
+  | | `architecture` | `bitness` | `uaFullVersion` | UA string |
+  |---|---|---|---|---|
+  | without the flag | `x86` | `64` | `150.0.7871.114` | says **HeadlessChrome** |
+  | with the flag | *empty* | *empty* | *empty* | says **Chrome** |
+
+  Passing an explicit UA makes Chrome stop deriving high-entropy client hints,
+  so we trade a UA-string tell for a UA-CH-emptiness tell. It is not fixed: the
+  obvious repair (`Emulation.setUserAgentOverride` with `userAgentMetadata`) is
+  target-scoped and would reintroduce a main-vs-worker mismatch that is a
+  *stronger* tell than either leak alone. Publishing this rather than dropping
+  the target is the point — a suite that only reports its wins is marketing.
+- **`nodriver` scores identically to `patchright` on all three.** The escalation
+  tier buys nothing measurable *on static scoreboards*; its case rests on the
+  automation-protocol axis these targets don't probe. Earlier runs that appeared
+  to favour it were comparing a real GPU against SwiftShader, not the backends.
 
 > **What these do and don't cover.** These are *fingerprint scoreboards* —
 > the static axis. Through 2026 the major anti-bot vendors moved to
@@ -352,14 +392,27 @@ vibatchium is built to drive sessions **you own**, with **your** credentials, on
 **your** machine — your accounts, your employer's, or a client's with their
 written permission. It is a tool for automating access you already have.
 
-That boundary is not a formality. In 2026 a US district court granted a
-preliminary injunction against an AI agent that accessed password-protected pages
-*through the user's own logged-in account*, holding that the user's permission is
-not the platform's authorization. (The order was stayed on appeal and there is no
-merits ruling, so the law here is unsettled — which is a reason for care, not
-comfort.) Scraping a site's public pages, evading a wall you have no account
-behind, or automating an account whose terms forbid it are all decisions you are
-making, and the consequences are yours.
+That boundary is not a formality, though the law around it moved in 2026. A US
+district court had granted a preliminary injunction against an AI agent that
+accessed password-protected pages *through the user's own logged-in account*,
+holding that the user's permission is not the platform's authorization. On
+4 August 2026 the Ninth Circuit **vacated** that injunction and remanded
+(*Amazon.com Services, LLC v. Perplexity AI, Inc.*, No. 26-1444, published),
+concluding that the operator had not "accessed" the plaintiff's computers under
+the CFAA at all — "it was the user who accessed [them], with the help of
+[the] AI agent." The California CDAFA claim failed for the same reason.
+
+Read that narrowly. It decides **who** accessed a computer, not whether evading
+a technical block is access "without authorization"; the panel never reached
+circumvention. A vacated preliminary injunction on remand is not a merits
+ruling, and it leaves contract, terms-of-service, trespass and copyright
+theories entirely untouched. What it does support is the shape of the tool:
+the browser runs on your machine, under your login, and the reasoning leaned on
+exactly that — no operator computer ever touched the other side's servers.
+
+Scraping a site's public pages, evading a wall you have no account behind, or
+automating an account whose terms forbid it remain decisions you are making, and
+the consequences are yours.
 
 Check the terms of the site you are automating. If you are acting for someone
 else, get it in writing.

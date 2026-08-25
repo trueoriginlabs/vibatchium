@@ -30,10 +30,29 @@ log = logging.getLogger("vibatchium.browser")
 # in its driver source: no Headless-stripping anywhere) and it filters
 # `add_init_script`, so the JS-injection school can't fix it either.
 #
-# IMPORTANT — what does NOT leak: the Sec-CH-UA client hints. New-headless
-# already reports `Google Chrome`/`Chromium` in `userAgentData.brands`, the
-# high-entropy `fullVersionList`, and the Sec-CH-UA header at baseline. So
-# this is a UA-STRING-only problem; we must NOT touch client hints.
+# CORRECTION (0.19.0, measured): an earlier version of this comment claimed the
+# Sec-CH-UA client hints do not leak and must not be touched. That is wrong, and
+# the flag below is what makes it wrong. Measured on Chrome 150, headless, same
+# profile, with and without `--user-agent`:
+#
+#   without:  architecture='x86' bitness='64' uaFullVersion='150.0.7871.114'
+#             fullVersionList=[...populated...]   UA says HeadlessChrome
+#   with:     architecture=''    bitness=''    uaFullVersion=''
+#             fullVersionList=[]                  UA says Chrome
+#
+# Passing an explicit `--user-agent` makes Chrome stop deriving high-entropy
+# client hints, because it can no longer infer them from an arbitrary UA string.
+# The LOW-entropy hints (brands, platform, mobile) survive; every high-entropy
+# value goes empty. So this fix trades a UA-string tell for a UA-CH-emptiness
+# tell — `brotector` detects exactly that as `UA_Override /
+# HighEntropyValues.empty` and scores us 10/100 for it (see README evals).
+#
+# Not yet fixed, and deliberately not patched blind: restoring the metadata via
+# `Emulation.setUserAgentOverride` (userAgentMetadata) is target-scoped and so
+# reintroduces the very main-vs-worker mismatch described below, which is a
+# STRONGER tell than either leak alone. A correct fix has to reach every target.
+# (`platformVersion` is empty in BOTH arms — that one is a headless tell of its
+# own, independent of this flag.)
 #
 # Mechanism — a browser-wide `--user-agent=<clean>` launch flag, NOT a
 # Playwright `user_agent` context option. Patchright applies the context

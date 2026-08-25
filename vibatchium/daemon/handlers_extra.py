@@ -2069,12 +2069,47 @@ def register_extra(daemon) -> None:
             "brotector": {
                 "url": "https://ttlns.github.io/brotector/",
                 "extract": """() => {
-                    // Brotector lists detection signals; count those that fired.
-                    const fired = document.querySelectorAll('.detection-fired, [data-fired="true"]').length;
-                    const all = document.querySelectorAll('.detection, [data-test]').length;
+                    // Brotector renders a PLAIN TABLE — no classes, no data-*
+                    // attributes. An earlier version of this extractor queried
+                    // `.detection-fired` / `[data-test]`, which match nothing on
+                    // the real page, so every run silently returned score=null
+                    // and the cell showed up as "?" rather than as a failure.
+                    // Read the table.
+                    //
+                    // Columns: Detection | ms since load | Type | score | data
+                    // Per-row `score` is 0..1 where HIGHER means MORE bot-like,
+                    // and an "Average" row summarises them. We invert to this
+                    // suite's convention (0..100, higher = better) so the cell
+                    // is comparable with sannysoft/creepjs.
+                    const rows = [...document.querySelectorAll('tr')];
+                    const cells = r => [...r.querySelectorAll('td,th')]
+                        .map(c => (c.innerText || '').trim());
+                    const detections = [];
+                    let average = null;
+                    for (const r of rows) {
+                        const c = cells(r);
+                        if (c.length < 4) continue;
+                        const name = c[0];
+                        const val = parseFloat(c[3]);
+                        if (!name || Number.isNaN(val)) continue;
+                        if (/^average$/i.test(name)) { average = val; continue; }
+                        detections.push({name, score: val, type: c[2] || null});
+                    }
+                    if (average === null && detections.length) {
+                        average = detections.reduce((a, d) => a + d.score, 0)
+                                  / detections.length;
+                    }
+                    const fired = detections.filter(d => d.score > 0);
                     return {
-                        score: all ? Math.round(100 * (1 - fired / all)) : null,
-                        fired, total: all,
+                        score: average === null
+                            ? null : Math.round(100 * (1 - average)),
+                        average_bot_score: average,
+                        fired: fired.length,
+                        total: detections.length,
+                        // Name the signals — "which check fired" is the
+                        // actionable half; a bare number isn't.
+                        signals: fired.map(d => d.type ? d.name + ' (' + d.type + ')'
+                                                      : d.name),
                     };
                 }""",
             },

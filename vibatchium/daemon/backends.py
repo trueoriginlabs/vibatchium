@@ -114,6 +114,19 @@ async def launch_patchright_session(
                                 gpu_node=gpu_node)
 
 
+def _nodriver_cdp_url(browser, requested_port: int) -> str:
+    """Resolve the CDP endpoint a nodriver Browser is really listening on.
+
+    Prefers the host/port nodriver reports on `browser.config`, falling back to
+    the port we asked for when a version doesn't expose one. Kept separate from
+    the launch so the version-tolerance is unit-testable without a browser.
+    """
+    cfg = getattr(browser, "config", None)
+    host = getattr(cfg, "host", None) or "127.0.0.1"
+    port = getattr(cfg, "port", None) or requested_port
+    return f"http://{host}:{port}"
+
+
 async def launch_nodriver_session(
     profile_dir: Path,
     *,
@@ -145,14 +158,6 @@ async def launch_nodriver_session(
     profile_dir.mkdir(parents=True, exist_ok=True)
     log.info("nodriver launch persistent context profile=%s headless=%s",
              profile_dir, headless)
-    if gpu:
-        # 0.13.0: GPU WebGL mode is patchright-only in v1 — nodriver builds its own
-        # argv here (uc.start below), so the launch_session injection doesn't reach
-        # it. Best-effort: WARN and proceed unchanged rather than hard-fail.
-        # TODO(gpu-v2): add GPU_ANGLE_ARGS to extra_args (browser_args) on this path.
-        log.warning("GPU WebGL mode requested but the nodriver backend ignores it "
-                    "in this version (patchright-only); launching without it")
-
     # Pick a free port via OS — nodriver wants a concrete port
     import socket as _sk
     sk = _sk.socket()
@@ -162,6 +167,22 @@ async def launch_nodriver_session(
 
     # nodriver supports proxy via browser_args; passing through.
     extra_args = []
+
+    # 0.19.0: route ANGLE at the real GPU on this path too. nodriver builds its
+    # own argv, so it never saw `launch_session`'s injection and every nodriver
+    # launch silently came up on SwiftShader — which is itself a detection
+    # signal, so the backend we document as the ESCALATION was scoring on a
+    # handicap the default path doesn't have. Same flags, same gate
+    # (`gpu and headless`) as the patchright path.
+    #
+    # NOT plumbed here: per-render-node pinning. That works by injecting an EGL
+    # vendor env var into the browser process, and nodriver spawns Chrome from
+    # the daemon's own environment — mutating os.environ around the spawn would
+    # race every other session launching concurrently. Unpinned GPU is correct
+    # and safe; de-twinning stays patchright-only until nodriver takes an env.
+    if gpu and headless:
+        from ..gpu import GPU_ANGLE_ARGS
+        extra_args.extend(GPU_ANGLE_ARGS)
     if proxy:
         extra_args.append(f"--proxy-server={proxy['server']}")
         # 0.6.11: WebRTC leak guard MUST accompany the proxy on the nodriver
@@ -208,7 +229,14 @@ async def launch_nodriver_session(
         no_sandbox=False,
         browser_args=extra_args if extra_args else None,
     )
-    cdp_url = f"http://127.0.0.1:{port}"
+    # Ask nodriver where it ACTUALLY bound, don't assume it took our port.
+    # nodriver treats `port` as a hint and picks its own free port when it
+    # wants (0.50.x always does), publishing the real one on `browser.config`.
+    # Trusting the requested port made every launch on this backend die with
+    # `connect_over_cdp ... ECONNREFUSED` about a second in — the documented
+    # "Hardened tier" escalation was unusable, and nothing caught it because
+    # nothing measured it.
+    cdp_url = _nodriver_cdp_url(browser, port)
 
     # Now connect Patchright over CDP and wrap as a BrowserSession.
     # We use attach_session for the Patchright side, but the underlying

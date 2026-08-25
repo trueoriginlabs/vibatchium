@@ -45,27 +45,35 @@ BUILTIN_BACKENDS = ("patchright",)  # nodriver is opt-in; user passes explicitly
 def run_eval_matrix(client_call, *, targets=BUILTIN_TARGETS,
                      backends=BUILTIN_BACKENDS,
                      humanize_modes=(False,),
-                     settle_ms: int = 5000) -> list[dict]:
+                     settle_ms: int = 5000,
+                     gpu: bool | None = None) -> list[dict]:
     """Iterate the matrix sequentially. Returns list of cell results.
 
     Sequential (not parallel) because each cell spawns a fresh Chrome and
     we want clean per-cell measurements without resource contention.
+
+    ``gpu`` (None = leave the profile default) forces the WebGL renderer on or
+    off per cell. It exists because the software-renderer caveat this module
+    prints was previously unactionable: we told the reader to "re-run with an
+    accessible DRM render node" while giving them no switch to do it with, so
+    every published number was a SwiftShader floor by construction.
     """
     rows = []
     for backend in backends:
         for humanize in humanize_modes:
             for target in targets:
-                log.info("eval: target=%s backend=%s humanize=%s",
-                         target, backend, humanize)
+                log.info("eval: target=%s backend=%s humanize=%s gpu=%s",
+                         target, backend, humanize, gpu)
                 cell = _run_one_cell_sync(
-                    client_call, target, backend, humanize, settle_ms
+                    client_call, target, backend, humanize, settle_ms, gpu
                 )
                 rows.append(cell)
     return rows
 
 
 def _run_one_cell_sync(client_call, target: str, backend: str,
-                        humanize: bool, settle_ms: int) -> dict:
+                        humanize: bool, settle_ms: int,
+                        gpu: bool | None = None) -> dict:
     """Run a single (target, backend, humanize) cell. Returns a row dict.
     Sync — the eval client (daemon RPC) is synchronous."""
     sname = f"vibatchium_evals_{uuid.uuid4().hex[:8]}"
@@ -80,6 +88,8 @@ def _run_one_cell_sync(client_call, target: str, backend: str,
         start_args = {"headless": True}
         if backend != "patchright":
             start_args["backend"] = backend
+        if gpu is not None:
+            start_args["gpu"] = gpu
         client_call("start", start_args, session=sname)
         # Record the renderer this cell ACTUALLY came up on. Headless Chrome
         # falls back to SwiftShader whenever the GPU path doesn't take, and on
