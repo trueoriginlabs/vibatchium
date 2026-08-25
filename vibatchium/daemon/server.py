@@ -61,7 +61,8 @@ _REDACTED_ARG_FIELDS: dict[str, set[str]] = {
     "eval_handle":       {"expr"},
     "handle_eval":       {"expr"},
     "route_add":         {"body", "headers"},  # mock body + headers may carry auth
-    "fetch":             {"headers", "json", "data", "params"},  # may carry Authorization / login payloads / API keys
+    "fetch":             {"headers", "json", "data", "params", "proxy"},  # may carry Authorization / login payloads / API keys / proxy user:pass
+    "search":            {"proxy"},          # same egress override, same user:pass risk
     # NOTE: secret_init has no sensitive *args* — only prefer/force/print_key.
     # The generated key (`key_b64`) is in the *response*, gated behind
     # `print_key`, and responses are never logged through this path. A redaction
@@ -147,6 +148,11 @@ class Daemon:
         "wait_email_code",
         # Wave 7.6: pure utilities — no session, no registry mutation
         "verify_url",      # DNS / HTTP pre-check before committing to `go`
+        # 0.19.0: SERP discovery over the curl_cffi lane. Reads no session
+        # state and never reuses session cookies, so it needs neither a
+        # session nor its lock — parallel research fan-out must not serialise
+        # behind whatever the browser happens to be doing.
+        "search",
         "set_log_verbs",   # runtime toggle for the per-verb DEBUG audit log
         # Wave 7.7.5: high-level orchestration verbs that manage their own
         # session lifecycle — they call into other handlers explicitly

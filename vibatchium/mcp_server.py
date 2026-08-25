@@ -520,6 +520,9 @@ TOOLS: list[tuple[str, str, dict, str, Any]] = [
          "json": {"type": "object", "description": "JSON request body (sets Content-Type)."},
          "data": _str("Raw request body (form/text)."),
          "impersonate": _str("Override the curl_cffi impersonate target (default: matches the live Chrome)."),
+         "proxy": _str("Route through a proxy (scheme://[user:pass@]host:port). The sessionless "
+                       "lane inherits no proxy and ignores HTTP(S)_PROXY, so this is the only way "
+                       "to give it a non-host egress; with a session it overrides that session's."),
          "user_agent": _str("Override the User-Agent. In the sessionless lane, omit to let the impersonation target supply a coherent Chrome UA."),
          "cookies": _bool("Forward the session's cookies for this URL. Set false (with no session) for the anonymous sessionless lane.", True),
          "allow_redirects": _bool("Follow redirects.", True),
@@ -528,6 +531,38 @@ TOOLS: list[tuple[str, str, dict, str, Any]] = [
          "max_body": _int("Cap the response body bytes read.", 5_000_000),
      }, "required": ["url"]},
      "fetch", None),
+    ("search",
+     "Search the web through the Chrome-fingerprinted curl_cffi lane — NO "
+     "browser, NO session, NO API key. The discovery half of a research loop: "
+     "`search` finds URLs, `fetch`/`explore` read them. Engines are tried as a "
+     "LADDER (ddg → ddg-lite → bing) until one answers, because reachability "
+     "moves around — an endpoint that serves results now may rate-limit (HTTP "
+     "202) on the next call. The `attempts` array records every engine that "
+     "declined and why, so a thin result set is never mistaken for a thin web; "
+     "ok=false means all engines declined, NOT that the web has nothing. "
+     "Returns [{rank, title, url, snippet}]. Never reuses a session's cookies "
+     "(a SERP needs no login, and attaching one deanonymises the request). "
+     "Needs `pip install vibatchium[fetch]`; gated behind the `search` cap "
+     "(off by default). No date filter is exposed on purpose — DuckDuckGo's "
+     "mislabels article dates badly enough to corrupt a timeline; confirm "
+     "dates by opening the page.",
+     {"type": "object", "properties": {
+         "query": _str("Search query — required."),
+         "engine": {"type": "string", "enum": ["auto", "ddg", "ddg-lite", "bing"],
+                    "default": "auto",
+                    "description": "Pin one engine, or 'auto' to walk the ladder."},
+         "max_results": _int("Results to return.", 10),
+         "site": _str("Restrict to one domain (adds a `site:` operator)."),
+         "impersonate": _str("Override the curl_cffi impersonate target."),
+         "user_agent": _str("Override the User-Agent. Omit to let the "
+                            "impersonation target supply a coherent Chrome UA."),
+         "proxy": _str("Route queries through a proxy (scheme://[user:pass@]host:port). "
+                       "Engines rate-limit PER IP, so this is the lever that keeps a wide "
+                       "fan-out on the first rung of the ladder. HTTP(S)_PROXY is not "
+                       "consulted; unset means direct egress from the host."),
+         "timeout_ms": _int("Per-engine request timeout in ms.", 20_000),
+     }, "required": ["query"]},
+     "search", None),
     ("console_start",
      "Capture browser log entries (CSP/network/security warnings — what an anti-bot wall complains about), and optionally page console.* + uncaught errors. Via an opt-in CDP session (Patchright keeps console domains off for stealth); console_stop reverts it.",
      {"type": "object",

@@ -4,6 +4,77 @@ All notable changes to vibatchium are documented here. Versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Until 1.0,
 minor bumps may include breaking changes; we'll always call them out here.
 
+## [0.19.0] — 2026-08-25
+
+### feat: `vb search` — the discovery half of a research loop
+
+vibatchium could already *read* a walled page. It could not *find* one. Every
+research loop therefore had a hosted search API bolted to its front, and those
+come with a call budget — typically a couple of hundred calls shared across a
+whole session, subagents included. A wide fan-out drains that early, and the
+lanes that start afterwards get nothing. The workaround people reach for is
+scraping an engine's HTML endpoint with a plain HTTP client, which is precisely
+what the engines fingerprint-block.
+
+Search engines are anti-bot walled like everything else, so putting discovery on
+the impersonating lane isn't a new capability — it's the existing moat applied
+one step earlier in the loop.
+
+```
+vb search "playwright stealth detection" -n 5
+vb search "cdp leak" --site github.com --urls | xargs -I{} vb fetch --no-cookies {}
+```
+
+- **Engine LADDER, not one engine.** `ddg → ddg-lite → bing`, tried in order
+  until one answers. Reachability moves around: the endpoint that serves 200s
+  now answers a 202 challenge on the next call, and each engine rate-limits on
+  its own clock. Pin one with `--engine` when you need determinism.
+- **`attempts` records every rejection.** `ok:false` means *all engines
+  declined*, not *the web is empty* — the two need different responses, and an
+  agent can only tell them apart if we say which happened.
+- **A rate-limited 202 counts as walled.** The usual `2xx == ok` test parses the
+  challenge page into zero results and reports "no matches" for a good query.
+- **Always sessionless.** Unlike `fetch`, this never reuses a browser session's
+  cookies: a SERP needs no login, and attaching a logged-in identity to search
+  traffic deanonymises it. That makes the verb strictly lower blast-radius —
+  fixed engine allowlist, GET only, no credentials — so it gets its own
+  `search` cap rather than riding on `fetch`. Like `fetch` it stays out of
+  `LEAN_CAPS`; network egress is opt-in (`--caps search`).
+- **UNLOCKED verb.** Holds no session lock and needs no session, so research
+  fan-out doesn't serialise behind whatever the browser is doing.
+- **`--proxy` for egress.** Engines rate-limit *per IP*, which makes egress the
+  binding constraint on a wide fan-out — the thing most likely to push the
+  ladder onto its last rung. `--proxy scheme://[user:pass@]host:port` moves the
+  queries; `HTTP(S)_PROXY` is not consulted, so unset always means direct. The
+  proxy URL is redacted from the verb log, and the response reports only
+  `proxied: true|false` — a caller debugging a walled ladder needs to know
+  which IP the queries left from, not the credentials back. Because this lane
+  carries no session identity, changing egress changes nothing else.
+- **No date filter, on purpose.** DuckDuckGo's `&df=` mislabels article dates
+  badly enough to corrupt a timeline. A filter that silently lies is worse than
+  no filter; confirm dates by opening the page.
+
+Ladder policy lives in `vibatchium/search.py` (stdlib-only, no HTML parser) and
+the handler supplies transport, so the fallthrough logic is unit-tested against
+saved SERP fixtures and an injected fetcher instead of waiting to be walled.
+
+Needs the `vibatchium[fetch]` extra (same `curl_cffi` dependency as `fetch`).
+
+### feat: `vb fetch --proxy` — per-request egress
+
+`fetch` gained the same egress override, landed in parallel with `search`. The
+sessionless lane has no session to inherit a proxy from, so before this there
+was no way to give it one at all; with a session, an explicit `--proxy` now
+overrides that session's own. `HTTP(S)_PROXY` is deliberately not consulted —
+curl_cffi is called with an explicit `proxies` kwarg, so an unset `--proxy`
+always means direct egress rather than silently picking up an ambient variable.
+
+A bad proxy value is an error, not a fallback: a caller who asked for specific
+egress and silently got the host's would be worse off than one who got an
+error, because the whole point of passing it is that the host IP must not be
+used. The URL is redacted from the verb log like any other credential-bearing
+argument.
+
 ## [0.18.14] — 2026-08-11
 
 ### docs: ship the badge to PyPI and the MCP registry

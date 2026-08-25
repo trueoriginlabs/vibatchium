@@ -79,3 +79,33 @@ def test_url_bearing_verbs_mask_userinfo_only():
     # proxy_set is still WHOLE-redacted (not userinfo-masked)
     assert _redact_for_log("proxy_set", {"url": "http://u:p@h:8080?token=x"})["url"] \
         == "<redacted>"
+
+
+def test_search_proxy_is_redacted_but_the_query_survives():
+    """0.19.0 — `search` takes the same `proxy` egress override as `fetch`, so
+    it carries the same user:pass leak risk and needs its OWN entry (the map is
+    keyed per verb; fetch's entry does not cover it). The query itself is not
+    sensitive and must stay readable, or the verb log stops being an audit log."""
+    assert _REDACTED_ARG_FIELDS["search"] == {"proxy"}
+    out = _redact_for_log("search", {
+        "query": "playwright stealth", "engine": "auto",
+        "proxy": "http://user:pa55@proxy.example:8080"})
+    assert out["proxy"] == "<redacted>"
+    assert "pa55" not in str(out)
+    assert out["query"] == "playwright stealth"
+    assert out["engine"] == "auto"
+
+
+def test_fetch_proxy_is_redacted_alongside_the_auth_bearing_fields():
+    """0.19.0 — `fetch` gained a `proxy` egress override, whose URL can embed
+    user:pass. It joins the existing auth-bearing fields rather than replacing
+    them; the target URL keeps its userinfo-masking treatment separately."""
+    assert "proxy" in _REDACTED_ARG_FIELDS["fetch"]
+    out = _redact_for_log("fetch", {
+        "url": "https://api.example/v1", "method": "GET",
+        "proxy": "http://user:pa55@proxy.example:8080",
+        "headers": {"Authorization": "Bearer abc"}})
+    assert out["proxy"] == "<redacted>"
+    assert out["headers"] == "<redacted>"
+    assert "pa55" not in str(out)
+    assert out["method"] == "GET"

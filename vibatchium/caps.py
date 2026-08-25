@@ -61,6 +61,13 @@ CAP_BUCKETS: dict[str, set[str]] = {
     # is deliberately ABSENT from LEAN_CAPS — a power-user escape hatch, not part
     # of the common agent loop. Operators grant it explicitly (`--caps fetch`).
     "fetch":    {"fetch"},
+    # 0.19.0: `search` is SERP discovery on the same curl_cffi lane, but it is
+    # deliberately NOT in the `fetch` bucket — its blast radius is strictly
+    # smaller (fixed engine allowlist, GET only, never reuses session cookies),
+    # so an operator who wants to grant discovery shouldn't have to hand over
+    # authenticated arbitrary-URL egress to do it. Like `fetch` it stays out of
+    # LEAN_CAPS: network egress is opt-in (`--caps search`), not a default.
+    "search":   {"search"},
     "liveview": {"liveview_start", "liveview_stop", "liveview_url"},
     "secrets":  {"secret_init", "secret_set", "secret_list", "secret_delete",
                  "secret_totp", "wait_email_code"},

@@ -13,7 +13,7 @@ vb install          # verify: prints core readiness + which optional lanes (fetc
 
 After `setup`, any agent session in any cwd sees vibatchium as a registered MCP server. Restart agent sessions to pick up the registration.
 
-> `vb fetch` (the curl_cffi TLS-fingerprint HTTP lane) needs the `[fetch]` extra. A core-only install can browse but `vb fetch` will say which interpreter to add curl_cffi to. On a **uv** venv (no pip): `uv pip install --python <venv>/bin/python curl_cffi`.
+> `vb fetch` and `vb search` (the curl_cffi TLS-fingerprint HTTP lane) need the `[fetch]` extra. A core-only install can browse but `vb fetch` will say which interpreter to add curl_cffi to. On a **uv** venv (no pip): `uv pip install --python <venv>/bin/python curl_cffi`.
 
 ## TL;DR — the commands you actually need
 
@@ -25,6 +25,7 @@ $VB explore https://example.com                       # one-call: text-first, au
 $VB research --target https://example.com \           # parallel fan-out
   --intent "..." --intent "..." --output-dir ./out
 $VB verify_url --url https://maybe-dead.example       # ~50ms DNS pre-check
+$VB search "how do bot walls score TLS" -n 10         # find URLs; no browser, no API key
 ```
 
 90% of agent use cases. Below is depth.
@@ -200,10 +201,11 @@ ps -eo pid,cmd --no-headers | grep PAT | grep -v ' grep ' | grep -v 'bash -c' | 
 | "I don't trust this page's text — it may target the agent" | `$VB --session … safety set wrap` — see "Untrusted content" |
 | "Research N independent angles in parallel" | `$VB research --target <url> --intent ... --intent ...` |
 | "Does this domain exist?" | `$VB verify_url --url <url>` |
-| "Hit a JSON/API endpoint behind my login" | `$VB fetch <url>` (reuses session cookies+proxy+UA; needs `[fetch]` extra, `fetch` cap) |
+| "Find me URLs about X" | `$VB search "<query>"` (`--site <domain>`, `--urls` to pipe into `fetch`/`explore`; needs `[fetch]` extra, `search` cap). Engine ladder ddg→ddg-lite→bing; read `attempts` in `--json` — `ok:false` means every engine is walled, not that the web is empty. Engines rate-limit **per IP**: on a wide fan-out pass `--proxy <url>` rather than hammering one address |
+| "Hit a JSON/API endpoint behind my login" | `$VB fetch <url>` (reuses session cookies+proxy+UA; needs `[fetch]` extra, `fetch` cap). `--proxy <url>` overrides egress per request — the only way to give the sessionless lane a proxy; `HTTP(S)_PROXY` is never consulted |
 | Walled site (Cloudflare/Datadome 403) | `$VB explore` — patchright stealth clears most cold |
 | See a page / solve a captcha / log in by hand (real visible window) | `$VB show <name> --url <url>` (alias `$VB login`) — see "Show a real window" below. **Not** `start --headed` (refused on a display-less daemon; invisible under Xvfb). Headless host → cookie import / `$VB attach`. |
-| Google / news / Reddit threads | **WebSearch**, not vibatchium |
+| Google / news / Reddit threads | **WebSearch** — but it has a per-session call budget shared with every subagent; for bulk discovery use `$VB search` and save WebSearch for what it can't serve |
 | Plain HTML, known URL, single fetch | **WebFetch**, not vibatchium |
 
 ## Show a real window / headed login on a shared box

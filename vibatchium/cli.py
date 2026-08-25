@@ -332,7 +332,7 @@ def install(ctx, skip_chrome):
         except Exception:  # noqa: BLE001
             lane(name, False, f"unavailable — {what}. Add: {_pkg_install_cmd(dep)}")
 
-    _lane("curl_cffi", "fetch", "stealth HTTP fetch lane (`vb fetch`)", "curl_cffi")
+    _lane("curl_cffi", "fetch", "stealth HTTP lane (`vb fetch`, `vb search`)", "curl_cffi")
     _lane("PIL", "annotate", "annotated screenshots (`screenshot --annotate`)", "pillow")
     _lane("anthropic", "vision", "VLM read/locate (`visual-extract`, vision click)", "anthropic")
     _lane("aiohttp", "liveview", "live-view stream (`vb liveview`)", "aiohttp")
@@ -1406,9 +1406,14 @@ def extract_fields(ctx, fields_json, fields_file, target, max_chars, node_cap):
                    "curl_cffi's impersonation target supplies a coherent Chrome UA.")
 @click.option("--allow-internal", is_flag=True,
               help="Permit loopback/link-local/private targets (SSRF guard off).")
+@click.option("--proxy", default=None, metavar="URL",
+              help="Route this request through a proxy (scheme://[user:pass@]host:port). "
+                   "The sessionless lane has no session to inherit one from and does NOT "
+                   "read HTTP(S)_PROXY, so this is the only way to give it a non-host "
+                   "egress; with a session it overrides that session's proxy.")
 @click.option("--timeout-ms", type=int, default=30000, show_default=True)
 @click.pass_context
-def fetch(ctx, url, method, headers, data, impersonate, no_cookies, user_agent, allow_internal, timeout_ms):
+def fetch(ctx, url, method, headers, data, impersonate, no_cookies, user_agent, allow_internal, proxy, timeout_ms):
     """Chrome-fingerprinted HTTP fetch (curl_cffi) — no renderer, no JS.
 
     Two lanes:
@@ -1419,6 +1424,10 @@ def fetch(ctx, url, method, headers, data, impersonate, no_cookies, user_agent, 
     - SESSIONLESS (`--no-cookies`, no session): an anonymous GET with a coherent
       Chrome JA3/HTTP2 fingerprint and no `vb start`, no browser — the cheapest
       lane for a TLS-fingerprint wall on a public endpoint.
+
+    Egress is the HOST's IP unless you pass --proxy. The environment's
+    HTTP(S)_PROXY is deliberately not consulted (curl_cffi is called with an
+    explicit proxies kwarg), so an unset --proxy always means direct.
 
     Needs `pip install vibatchium[fetch]` (curl_cffi). For a plain anonymous GET
     that ISN'T fingerprint-walled, WebFetch/curl is simpler.
@@ -1441,7 +1450,102 @@ def fetch(ctx, url, method, headers, data, impersonate, no_cookies, user_agent, 
         args["cookies"] = False
     if allow_internal:
         args["allow_internal"] = True
+    if proxy:
+        args["proxy"] = proxy
     _emit(call("fetch", args), ctx.obj["json"], None)
+
+
+@cli.command()
+@click.argument("query")
+@click.option("-n", "--max-results", type=int, default=10, show_default=True,
+              help="Results to return.")
+@click.option("-e", "--engine", default="auto", show_default=True,
+              help="Engine to use: auto (walk the ladder) | ddg | ddg-lite | bing.")
+@click.option("--site", default=None,
+              help="Restrict to one domain (adds a `site:` operator).")
+@click.option("--urls", "urls_only", is_flag=True,
+              help="Print bare result URLs, one per line — pipe straight into "
+                   "`vb fetch`/`vb explore`.")
+@click.option("--impersonate", default=None,
+              help="Override the curl_cffi impersonate target (default: latest Chrome).")
+@click.option("--user-agent", "user_agent", default=None,
+              help="Override the User-Agent. Omit to let the impersonation "
+                   "target supply a coherent Chrome UA.")
+@click.option("--proxy", default=None, metavar="URL",
+              help="Route queries through a proxy (scheme://[user:pass@]host:port). "
+                   "Engines rate-limit per IP, so this is the lever that keeps a wide "
+                   "fan-out on the first rung of the ladder.")
+@click.option("--timeout-ms", type=int, default=20000, show_default=True)
+@click.pass_context
+def search(ctx, query, max_results, engine, site, urls_only, impersonate,
+           user_agent, proxy, timeout_ms):
+    """Search the web through the stealth lane — no browser, no session, no API key.
+
+    The discovery half of a research loop: `search` finds the URLs, `fetch` or
+    `explore` reads them. It runs over the same Chrome-fingerprinted curl_cffi
+    transport as `fetch`, which is the whole point — search engines
+    fingerprint-block plain HTTP clients, so a naive scrape of an engine's HTML
+    endpoint is exactly what gets walled.
+
+    \b
+    Engines are tried as a LADDER (ddg → ddg-lite → bing) until one answers,
+    because reachability moves around: the same endpoint that serves results in
+    one session rate-limits (HTTP 202) in the next. `attempts` in the JSON
+    records every engine that declined and why, so a thin result set is never
+    silently mistaken for a thin web.
+
+    \b
+    Examples:
+      vb search "playwright stealth detection"
+      vb search "cdp leak" --site github.com -n 20
+      vb search "postmortem" --urls | xargs -I{} vb fetch --no-cookies {}
+
+    Never reuses a session's cookies (a SERP needs no login, and attaching one
+    deanonymises you). Egress is the HOST's IP unless you pass --proxy; the
+    environment's HTTP(S)_PROXY is deliberately not consulted, so an unset
+    --proxy always means direct. Because no session identity rides along,
+    changing egress changes nothing else about the request.
+
+    Needs `pip install vibatchium[fetch]`; gated behind the `search` cap.
+    """
+    args = {"query": query, "max_results": max_results, "engine": engine,
+            "timeout_ms": timeout_ms}
+    if site:
+        args["site"] = site
+    if impersonate:
+        args["impersonate"] = impersonate
+    if user_agent:
+        args["user_agent"] = user_agent
+    if proxy:
+        args["proxy"] = proxy
+
+    result = call("search", args)
+
+    if ctx.obj["json"]:
+        _emit(result, True, None)
+        return
+    if urls_only:
+        for row in result.get("results", []):
+            click.echo(row["url"])
+        return
+
+    rows = result.get("results", [])
+    if not rows:
+        # Surface the ladder trace: "every engine is walled right now" and "the
+        # web has nothing" are different problems with different fixes.
+        click.echo(f"no results for {query!r}")
+        for a in result.get("attempts", []):
+            click.echo(f"  {a['engine']}: {a.get('rejected', 'no results')}")
+        if result.get("hint"):
+            click.echo(f"  → {result['hint']}")
+        return
+    for row in rows:
+        click.echo(f"{row['rank']}. {row['title']}")
+        click.echo(f"   {row['url']}")
+        if row.get("snippet"):
+            click.echo(f"   {row['snippet']}")
+    click.echo(f"\n[{result.get('engine')}] {len(rows)} results "
+               f"in {result.get('elapsed_ms')}ms")
 
 
 @cli.command(name="eval")

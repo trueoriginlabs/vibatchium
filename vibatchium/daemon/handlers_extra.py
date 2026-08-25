@@ -824,6 +824,32 @@ def register_extra(daemon) -> None:
             return {"path": path, "events": len(events)}
         return {"events": events}
 
+    def _proxy_arg(args, verb="fetch"):
+        """Parse an explicit `proxy` arg into a curl_cffi proxies dict.
+
+        Unlike the session-inherited path this does NOT swallow a bad value:
+        a caller who asked for a specific egress and silently got the host's
+        would be worse off than one who got an error, because the whole point
+        of passing it is that the host IP must not be used.
+
+        Shared by every curl_cffi lane (`fetch`, `search`); `verb` only names
+        the caller in the error, so the message matches the command the user
+        actually ran.
+        """
+        purl = args.get("proxy")
+        if not purl:
+            return None
+        if not isinstance(purl, str):
+            raise ValueError(f"{verb} `proxy` must be a proxy URL string")
+        # Imported here, not at module scope: `fetch` is an optional-extra lane
+        # and the rest of this module must import without curl_cffi present.
+        from .. import fetch as _fetch_mod
+        from ..proxy import parse as _pparse
+        try:
+            return _fetch_mod.proxy_cfg_to_curl(_pparse(purl))
+        except Exception as e:
+            raise ValueError(f"{verb} could not parse `proxy`: {e}") from e
+
     # ─── authenticated out-of-browser fetch lane ─────────────────────────
     #
     # 0.9.0 (competitive-landscape lesson): a curl_cffi HTTP request that reuses
@@ -902,7 +928,15 @@ def register_extra(daemon) -> None:
             # None → curl_cffi's `impersonate` sets a coherent Chrome UA itself;
             # an explicit --user-agent still wins.
             ua = ua_override
-            proxies = None
+            # 0.19.0: an explicit --proxy is the ONLY way to give this lane an
+            # egress other than the host's. There is no session to inherit one
+            # from, and curl_cffi is called with an explicit `proxies` kwarg, so
+            # HTTP(S)_PROXY in the environment is NOT consulted — verified: the
+            # same request with and without HTTPS_PROXY set egressed from the
+            # host IP both times. Callers that need per-identity egress (e.g.
+            # reading one account's public pages from the same exit that account
+            # posts from) must pass it here.
+            proxies = _proxy_arg(args)
         else:
             # Identity reads happen here, under the per-session lock, so cookies/UA
             # are coherent with the live context.
@@ -914,8 +948,10 @@ def register_extra(daemon) -> None:
                     ua = await s.page.evaluate("navigator.userAgent")
                 except Exception:  # noqa: BLE001
                     ua = await coherent_headless_ua(s.pw)
-            proxies = None
-            if getattr(s, "profile_dir", None) is not None:
+            # An explicit --proxy overrides the session's own, so a caller can
+            # route one request differently without touching the session config.
+            proxies = _proxy_arg(args)
+            if proxies is None and getattr(s, "profile_dir", None) is not None:
                 try:
                     purl = load_session_proxy(s.profile_dir)
                     proxies = _f.proxy_cfg_to_curl(_proxy_parse(purl)) if purl else None
@@ -986,6 +1022,92 @@ def register_extra(daemon) -> None:
         out["body" if is_text else "body_b64"] = body
         if truncated:
             out["truncated"] = True
+        return out
+
+    # ─── SERP discovery lane ─────────────────────────────────────────────
+    #
+    # 0.19.0: the other half of a research loop. `fetch`/`explore` read a URL
+    # you already have; `search` is how you get URLs in the first place without
+    # renting a hosted search API — which matters because those come with a call
+    # budget, and when the budget runs out mid-run discovery stops dead.
+    #
+    # Search engines fingerprint-block plain HTTP clients, so a naive requests/
+    # httpx scrape of an engine's HTML endpoint is precisely what gets walled.
+    # Running discovery over the same curl_cffi impersonation lane as `fetch` is
+    # therefore the same moat applied one step earlier, not a new capability.
+    #
+    # UNLOCKED + always sessionless: this reads no session state and holds no
+    # session lock, so parallel research fan-out doesn't serialise behind
+    # browser work. Never reusing session cookies is a deliberate property —
+    # attaching a logged-in identity to search traffic is a deanonymisation
+    # vector, and a SERP needs no authentication to begin with.
+    @daemon.handler("search")
+    async def _search(d, args):
+        from .. import fetch as _f, search as _s
+
+        query = args.get("query")
+        if not isinstance(query, str) or not query.strip():
+            raise ValueError("search requires `query` (str)")
+
+        engine_arg = args.get("engine") or "auto"
+        _s.resolve_ladder(engine_arg)          # validate before paying for a request
+        max_results = max(1, int(args.get("max_results", 10)))
+        site = args.get("site")
+        timeout_ms = int(args.get("timeout_ms", 20_000))
+
+        try:
+            import curl_cffi.requests as _cc
+        except ImportError as e:
+            import sys as _sys
+            raise RuntimeError(
+                f"search needs curl_cffi (the `vibatchium[fetch]` extra) in the "
+                f"DAEMON's interpreter ({_sys.executable}). Install it there — "
+                f"e.g. `uv pip install --python {_sys.executable} curl_cffi` "
+                f"(or `pip install curl_cffi`) — then bounce the daemon with "
+                f"`vb shutdown` (it auto-respawns on the next call)."
+            ) from e
+
+        ua = args.get("user_agent")
+        impersonate = _f.pick_impersonate(ua, args.get("impersonate"))
+        headers = {"User-Agent": ua} if ua else {}
+
+        # Egress control matters more here than on any other lane: search
+        # engines rate-limit PER IP, so a wide fan-out from one address is the
+        # thing most likely to push the ladder onto its last rung or off the end
+        # entirely. Routing queries through a proxy is the direct remedy — and
+        # since this lane never carries session cookies, changing egress changes
+        # nothing else about the request's identity.
+        proxies = _proxy_arg(args, "search")
+
+        # Transport only — the ladder policy (order, what counts as an answer,
+        # what gets recorded) lives in vibatchium/search.py so it is testable
+        # without a network. A per-engine failure is data, not an exception:
+        # returning it lets the ladder advance instead of aborting the request.
+        t0 = time.monotonic()
+        async with _cc.AsyncSession() as sess:
+            async def _get(url):
+                try:
+                    resp = await sess.get(
+                        url, impersonate=impersonate, headers=headers or None,
+                        proxies=proxies, timeout=timeout_ms / 1000.0,
+                        allow_redirects=True)
+                except Exception as e:  # noqa: BLE001 — one engine failing is not the request failing
+                    return None, "", f"transport: {e}"
+                body, _truncated, is_text = _f.truncate_body(resp.content, 5_000_000)
+                if not is_text:
+                    return resp.status_code, "", "non-text response"
+                return resp.status_code, body, None
+
+            out = await _s.run_ladder(_get, query, engine=engine_arg,
+                                      max_results=max_results, site=site)
+
+        out["impersonate"] = impersonate
+        out["elapsed_ms"] = int((time.monotonic() - t0) * 1000)
+        out["via"] = "curl_cffi"
+        # Report THAT egress was proxied, never the proxy URL — it can carry
+        # user:pass. A caller debugging a walled ladder needs to know which IP
+        # the queries left from; it does not need the credentials back.
+        out["proxied"] = proxies is not None
         return out
 
     # ─── console + browser-log capture ───────────────────────────────────

@@ -22,14 +22,14 @@ Patched Playwright + multi-session daemon + credential vault + vision clicking +
 
 ```
 pipx install vibatchium             # core: browse / extract / screenshot / N parallel sessions
-# want the stealth HTTP fetch lane (vb fetch), the credential vault, VLM read, or the REST shim?
+# want the stealth HTTP lanes (vb fetch, vb search), the credential vault, VLM read, or the REST shim?
 pipx install 'vibatchium[all]'      # everything; or pick extras: vibatchium[fetch], [secrets], [llm], [rest]
 patchright install chrome
 vb setup                    # register MCP + an auto-discoverable skill so agents reach for vb (idempotent)
 ```
 
-Core install covers all browsing. `vb fetch` (the curl_cffi TLS-fingerprint lane) is the
-`[fetch]` extra; `vb install` reports which optional lanes are available. On a **uv** venv
+Core install covers all browsing. `vb fetch` and `vb search` (the curl_cffi
+TLS-fingerprint lane) are the `[fetch]` extra; `vb install` reports which optional lanes are available. On a **uv** venv
 (no pip), add an extra with `uv pip install --python <venv>/bin/python curl_cffi`.
 
 > Bleeding edge from `master`: `pipx install 'git+https://github.com/trueoriginlabs/vibatchium#egg=vibatchium[all]'`
@@ -247,6 +247,29 @@ patches apply in *all* tiers, including attach (`connect_over_cdp`).
 > wall in the browser, `vb fetch` reuses that session's cookies+proxy to hit
 > JSON/API endpoints at TLS-fingerprint-correct speed — but it runs no JS, so it
 > can't *clear* a JS challenge itself.
+
+### Finding the URL in the first place — `vb search`
+
+Reading a walled page is only half a research loop; the other half is discovery,
+and search engines are anti-bot walled like everything else. `vb search` runs the
+SERP over the same curl_cffi lane — no browser, no session, no API key, no call
+budget to exhaust mid-run.
+
+```
+vb search "playwright stealth detection" -n 5
+vb search "cdp leak" --site github.com --urls | xargs -I{} vb fetch --no-cookies {}
+```
+
+Engines are tried as a ladder (`ddg → ddg-lite → bing`) until one answers,
+because reachability moves: the endpoint serving results now may rate-limit
+(HTTP 202) on the next call. `--json` returns an `attempts` array naming every
+engine that declined and why, so `ok:false` reads as *all engines are walled
+right now* rather than *the web has nothing* — different problems, different
+fixes. Engines rate-limit *per IP*, so `--proxy` is the lever that keeps a wide
+fan-out on the first rung. Unlike `fetch` it never reuses session cookies (a SERP
+needs no login, and attaching one deanonymises the request), which is why it gets
+its own `search` cap instead of riding on `fetch` — and why changing egress
+changes nothing else about the request.
 
 ## Attach mode — the practical Cloudflare workaround
 
