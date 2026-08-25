@@ -62,11 +62,23 @@ CAP_BUCKETS: dict[str, set[str]] = {
     # of the common agent loop. Operators grant it explicitly (`--caps fetch`).
     "fetch":    {"fetch"},
     # 0.19.0: `search` is SERP discovery on the same curl_cffi lane, but it is
-    # deliberately NOT in the `fetch` bucket — its blast radius is strictly
-    # smaller (fixed engine allowlist, GET only, never reuses session cookies),
+    # deliberately NOT in the `fetch` bucket — its blast radius is smaller (fixed
+    # engine allowlist for the TARGET, GET only, never reuses session cookies),
     # so an operator who wants to grant discovery shouldn't have to hand over
     # authenticated arbitrary-URL egress to do it. Like `fetch` it stays out of
     # LEAN_CAPS: network egress is opt-in (`--caps search`), not a default.
+    #
+    # KNOWN GAP, stated rather than glossed: the allowlist covers the target,
+    # NOT the `proxy` argument. `--proxy` takes an arbitrary host:port with no
+    # `host_is_internal` check on either lane, so a `search` cap-holder can
+    # direct a connection at a loopback/private address even though `search`
+    # deliberately exposes no `allow_internal` escape hatch the way `fetch`
+    # does. What comes back is a connection error, not content — and on
+    # curl_cffi 0.15.x that error echoes the internal host:port verbatim, while
+    # 0.16.x masks it behind the tunnel target. Guarding the proxy host is the
+    # right fix; it needs a decision on private-LAN proxies (a corporate proxy
+    # on 10.0.0.0/8 is a legitimate deployment), which is why it is documented
+    # here rather than patched blind.
     "search":   {"search"},
     "liveview": {"liveview_start", "liveview_stop", "liveview_url"},
     "secrets":  {"secret_init", "secret_set", "secret_list", "secret_delete",

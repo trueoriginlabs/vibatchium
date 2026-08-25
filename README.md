@@ -306,7 +306,9 @@ because reachability moves: the endpoint serving results now may rate-limit
 engine that declined and why, so `ok:false` reads as *all engines are walled
 right now* rather than *the web has nothing* — different problems, different
 fixes. Engines rate-limit *per IP*, so `--proxy` is the lever that keeps a wide
-fan-out on the first rung. Unlike `fetch` it never reuses session cookies (a SERP
+fan-out on the first rung — note the engine allowlist constrains the *target*,
+not that argument: `--proxy` takes an arbitrary host:port and is not SSRF-guarded
+on either lane. Unlike `fetch` it never reuses session cookies (a SERP
 needs no login, and attaching one deanonymises the request), which is why it gets
 its own `search` cap instead of riding on `fetch` — and why changing egress
 changes nothing else about the request.
