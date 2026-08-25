@@ -60,6 +60,72 @@ saved SERP fixtures and an injected fetcher instead of waiting to be walled.
 
 Needs the `vibatchium[fetch]` extra (same `curl_cffi` dependency as `fetch`).
 
+### fix: what an adversarial review found in the above
+
+Three context-free reviewers read this release before it shipped. Everything
+below was already green on the full suite and hand-smoked; none of it was found
+by a test we wrote, because a test only asks what its author thought to ask.
+
+**The egress guarantee was false.** This release told users, in CLI help, MCP
+tool descriptions, the README and AGENTS.md, that `HTTP(S)_PROXY` is not
+consulted and an unset `--proxy` always means direct. It was consulted.
+curl_cffi sets `CURLOPT_PROXY` only when the proxies mapping is *truthy*, so
+`proxies=None` and `{}` alike leave libcurl free to read `HTTPS_PROXY` /
+`ALL_PROXY` out of the environment — and the daemon is spawned with no `env=`,
+is long-lived, and is shared, so it inherits whatever shell first started it.
+A user with `HTTPS_PROXY` exported had every query egress through it while the
+response reported `proxied: false`. For a tool whose value is knowing where
+traffic exits, that was the worst available thing to be wrong about. Fixed by
+always passing an explicit empty mapping — the only value that actually
+suppresses the lookup — rather than by softening the sentence.
+
+**The proxy argument bypassed the SSRF guard, and returned content.** The
+target URL has been guarded since 0.9.0; the proxy was not, which reopens the
+same door from the other side. An earlier note in this release claimed the
+result was "a connection error, not content"; for an `http://` target the
+internal service's response body comes back to the caller in full. The proxy
+host now gets the same `host_is_internal` check with the same `allow_internal`
+opt-out, and `search` gained that flag so a proxy on your own LAN stays
+reachable deliberately.
+
+**The SERP parser could stall the whole daemon.** Unbounded lazy quantifiers
+meant a single unbalanced `<a` made every match attempt scan to end of
+document: 0.57s at 50 KB, 2.90s at 100 KB, 10.60s at 200 KB — four times the
+work per doubling, and hours at the 5 MB body cap. The parse is synchronous CPU
+inside the daemon coroutine, so that time blocks every other session, and the
+body is whatever a search endpoint chose to return. Captures are now bounded;
+400 KB went from ~43s to 0.73s, and the growth is linear.
+
+Smaller, all confirmed:
+
+- Challenge-marker detection scanned the whole body, but engines echo the query
+  back into the page — so searching for "verify you are human" made all three
+  rungs reject a page containing five valid results. The parse now runs first
+  and markers are consulted only when it comes back empty, which is exactly
+  when a challenge page and an empty result set need telling apart.
+- The DuckDuckGo extractors emitted any `href` verbatim. `javascript:` URLs,
+  bare relative paths and DuckDuckGo's own ad shim all passed through as
+  "sources" — the outcome the Bing path's guards exist to prevent.
+- `_attr` matched attribute-name *suffixes*, so `data-href` satisfied a request
+  for `href` and could source a result from an attribute nobody meant to read.
+- Every client-side failure was diagnosed as an IP rate-limit; an unsupported
+  impersonate token told the user to change proxies. `no_matches` and
+  `all_declined` are now distinct, with different guidance, and the CLI exits
+  non-zero only when nothing answered — exiting 0 on a walled ladder made the
+  documented `--urls | xargs` pipeline print nothing and report success.
+- An unscored eval cell now FAILS `--min-score` instead of being filtered out
+  of it. A scraper that silently stops matching rendered as `?` and left CI
+  green — which is precisely how the brotector scorer stayed broken.
+
+Two claims made earlier in this release were overstated, and are narrowed:
+the note about the nodriver/GPU comparison had the history backwards in the
+flattering direction (nodriver was the arm *denied* the GPU, so it was scoring
+from behind, not being over-credited), and the client-hints correction claimed
+to refute a baseline observation its own data confirms — what it refutes is the
+prescription drawn from it.
+
+Full suite: 1170 passed, 1 skipped.
+
 ### fix: the stealth ladder's middle rung never worked, and nothing measured it
 
 Filling the README's empty eval block turned into a bug hunt. Three defects, all

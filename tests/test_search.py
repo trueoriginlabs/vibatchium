@@ -303,3 +303,62 @@ def test_exhausted_hint_names_the_per_ip_remedy():
     out = _run(search.run_ladder(_fetcher({"": (403, "", None)}), "q"))
     assert out["ok"] is False
     assert "--proxy" in out["hint"] and "PER IP" in out["hint"]
+
+
+# ─── regressions found by adversarial review ─────────────────────────────
+def test_marker_in_the_QUERY_does_not_reject_a_page_full_of_results():
+    """Engines echo the query into the page, so scanning the whole body for
+    challenge text made searching for a marker phrase reject valid results."""
+    body = _fixture("serp_ddg.html").replace(
+        "playwright stealth detection", "verify you are human")
+    assert len(search.parse("ddg", body, 5)) == 5           # still parses
+    assert search.marker_wall(body) is not None             # marker IS present
+    out = _run(search.run_ladder(
+        _fetcher({"duckduckgo.com/html": (200, body, None)}),
+        "verify you are human", max_results=5))
+    assert out["ok"] is True and out["count"] == 5
+
+
+def test_marker_still_rejects_a_challenge_page_that_yields_nothing():
+    out = _run(search.run_ladder(
+        _fetcher({"": (200, "<html>Please solve this CAPTCHA</html>", None)}), "q"))
+    assert out["ok"] is False
+    assert "challenge marker" in out["attempts"][0]["rejected"]
+    assert out["reason"] == "all_declined"
+
+
+def test_empty_result_set_is_reported_as_no_matches_not_a_wall():
+    out = _run(search.run_ladder(
+        _fetcher({"": (200, "<html><body>nothing at all</body></html>", None)}), "q"))
+    assert out["ok"] is False
+    assert out["reason"] == "no_matches"
+    assert "not a wall" in out["hint"]
+
+
+@pytest.mark.parametrize("href", [
+    "javascript:alert(1)",
+    "/relative/path",
+    "//duckduckgo.com/y.js?ad_domain=x.com&ad_provider=bingv7aa",
+    "https://duckduckgo.com/l/?uddg=",          # empty target -> the redirector
+])
+def test_unusable_result_urls_are_dropped_not_emitted_as_sources(href):
+    body = f'<a class="result__a" href="{href}">Sponsored Result</a>'
+    assert search.parse("ddg", body, 10) == []
+
+
+def test_attr_does_not_match_an_attribute_name_suffix():
+    """`data-href` used to satisfy a request for `href`."""
+    body = '<a data-href="https://evil.example/" href="https://real.example/">T</a>'
+    body = body.replace("<a ", '<a class="result__a" ')
+    rows = search.parse("ddg", body, 10)
+    assert [r["url"] for r in rows] == ["https://real.example/"]
+
+
+def test_unbalanced_anchors_do_not_blow_up_parse_time():
+    """Unbounded lazy quantifiers made this O(n^2): 200 KB took 10.6s, and the
+    parse runs synchronously on the daemon's shared event loop."""
+    import time
+    body = '<a class="result__a" href="https://e/">t' * 5000     # no closing tags
+    t0 = time.monotonic()
+    search.parse("ddg", body, 10)
+    assert time.monotonic() - t0 < 2.0

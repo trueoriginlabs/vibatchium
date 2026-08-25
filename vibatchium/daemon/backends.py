@@ -247,6 +247,9 @@ async def launch_nodriver_session(
     sess.profile_dir = profile_dir
     sess.headless = headless      # record posture for the warm-claim guard
     sess.timezone_id = timezone_id  # record geo posture (observability/parity)
+    sess.gpu = bool(gpu and headless)  # record GPU posture — without this the
+    # daemon kept reporting gpu_ignored/"patchright-only" on a launch that did
+    # get the ANGLE args, so `start` contradicted `gpu_info` in the same reply.
     sess._nodriver_browser = browser  # keep handle for cleanup
     if timezone_id:
         await _apply_geo_overrides_cdp(sess.context, timezone_id)
@@ -300,7 +303,8 @@ async def launch(
                                                 timezone_id=timezone_id, gpu=gpu,
                                                 gpu_node=gpu_node)
     if backend == "nodriver":
-        # nodriver ignores gpu (WARNs) in v1, so gpu_node is moot there too.
+        # gpu IS honoured on this path now; only gpu_node (render-node pinning)
+        # is not, because it needs an env var and nodriver spawns Chrome itself.
         return await launch_nodriver_session(profile_dir, headless=headless,
                                               pw=pw, proxy=proxy,
                                               timezone_id=timezone_id, gpu=gpu)

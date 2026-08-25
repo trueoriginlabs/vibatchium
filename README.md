@@ -50,7 +50,7 @@ vb research --target https://example.com \          # parallel fan-out, N intent
 
 ```bash
 vb update                  # upgrade to the latest PyPI release + restart the daemon
-vb update --version 0.18.14  # or pin a specific version
+vb update --version 0.19.0   # or pin a specific version
 ```
 
 `vb update` detects how vibatchium was installed (pipx, `uv tool install`,
@@ -261,8 +261,10 @@ measured without it are a floor rather than what a GPU-backed deployment gets.
   the target is the point — a suite that only reports its wins is marketing.
 - **`nodriver` scores identically to `patchright` on all three.** The escalation
   tier buys nothing measurable *on static scoreboards*; its case rests on the
-  automation-protocol axis these targets don't probe. Earlier runs that appeared
-  to favour it were comparing a real GPU against SwiftShader, not the backends.
+  automation-protocol axis these targets don't probe. An earlier run had
+  `nodriver` slightly *ahead* on creepjs (50 vs 44) — but that run silently
+  denied it the GPU while patchright got a real one, so it was scoring from
+  behind. Once both arms get a real renderer the difference disappears.
 
 > **What these do and don't cover.** These are *fingerprint scoreboards* —
 > the static axis. Through 2026 the major anti-bot vendors moved to
@@ -306,9 +308,9 @@ because reachability moves: the endpoint serving results now may rate-limit
 engine that declined and why, so `ok:false` reads as *all engines are walled
 right now* rather than *the web has nothing* — different problems, different
 fixes. Engines rate-limit *per IP*, so `--proxy` is the lever that keeps a wide
-fan-out on the first rung — note the engine allowlist constrains the *target*,
-not that argument: `--proxy` takes an arbitrary host:port and is not SSRF-guarded
-on either lane. Unlike `fetch` it never reuses session cookies (a SERP
+fan-out on the first rung. The engine allowlist constrains the *target*; the
+proxy address gets its own SSRF guard, with `--allow-internal` to opt in to a
+proxy on your own LAN. Unlike `fetch` it never reuses session cookies (a SERP
 needs no login, and attaching one deanonymises the request), which is why it gets
 its own `search` cap instead of riding on `fetch` — and why changing egress
 changes nothing else about the request.

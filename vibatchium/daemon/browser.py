@@ -30,10 +30,12 @@ log = logging.getLogger("vibatchium.browser")
 # in its driver source: no Headless-stripping anywhere) and it filters
 # `add_init_script`, so the JS-injection school can't fix it either.
 #
-# CORRECTION (0.19.0, measured): an earlier version of this comment claimed the
-# Sec-CH-UA client hints do not leak and must not be touched. That is wrong, and
-# the flag below is what makes it wrong. Measured on Chrome 150, headless, same
-# profile, with and without `--user-agent`:
+# CORRECTION (0.19.0, measured). The BASELINE half of the old claim here holds:
+# left alone, new-headless really does populate brands and the high-entropy
+# values. What does not hold is the conclusion drawn from it — "this is a
+# UA-STRING-only problem; we must NOT touch client hints" — because the flag
+# below touches them anyway, by emptying them. Measured on Chrome 150, headless,
+# same profile, with and without `--user-agent`:
 #
 #   without:  architecture='x86' bitness='64' uaFullVersion='150.0.7871.114'
 #             fullVersionList=[...populated...]   UA says HeadlessChrome

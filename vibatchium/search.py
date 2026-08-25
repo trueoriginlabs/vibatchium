@@ -72,14 +72,38 @@ _WALL_MARKERS: tuple[str, ...] = (
 
 _TAG_RE = re.compile(r"<[^>]+>")
 _WS_RE = re.compile(r"\s+")
-_ANCHOR_RE = re.compile(r"<a\b([^>]*)>(.*?)</a>", re.S | re.I)
-_H2_RE = re.compile(r"<h2\b[^>]*>(.*?)</h2>", re.S | re.I)
+
+# Every inner-text capture below is BOUNDED (`.{0,_MAX_INNER}?`) rather than a
+# bare `.*?`. With an unbounded lazy quantifier a single unbalanced `<a` makes
+# each match attempt scan to end-of-document before failing, which is O(n²) over
+# the whole page: measured 0.57s at 50 KB, 2.90s at 100 KB, 10.60s at 200 KB —
+# four times the work per doubling, i.e. hours at the 5 MB body cap. This parse
+# is plain synchronous CPU inside the daemon's coroutine, so that time blocks
+# EVERY other session and verb, not just the search. The body is attacker-
+# controlled (it is whatever a search endpoint returned), so the bound is a
+# safety limit, not a tidiness one. No real result title or snippet approaches
+# it; anything longer is malformed and deserves to be skipped.
+_MAX_INNER = 4000
+
+_ANCHOR_RE = re.compile(r"<a\b([^>]*)>(.{0,%d}?)</a>" % _MAX_INNER, re.S | re.I)
+_H2_RE = re.compile(r"<h2\b[^>]*>(.{0,%d}?)</h2>" % _MAX_INNER, re.S | re.I)
 _DDG_SNIPPET_RE = re.compile(
-    r"<a\b[^>]*class=[\"']result__snippet[\"'][^>]*>(.*?)</a>", re.S | re.I)
+    r"<a\b[^>]*class=[\"']result__snippet[\"'][^>]*>(.{0,%d}?)</a>" % _MAX_INNER,
+    re.S | re.I)
 _LITE_SNIPPET_RE = re.compile(
-    r"<td\b[^>]*class=[\"']result-snippet[\"'][^>]*>(.*?)</td>", re.S | re.I)
+    r"<td\b[^>]*class=[\"']result-snippet[\"'][^>]*>(.{0,%d}?)</td>" % _MAX_INNER,
+    re.S | re.I)
 _BING_SNIPPET_RE = re.compile(
-    r"<p\b[^>]*class=[\"'][^\"']*b_lineclamp[^\"']*[\"'][^>]*>(.*?)</p>", re.S | re.I)
+    r"<p\b[^>]*class=[\"'][^\"']*b_lineclamp[^\"']*[\"'][^>]*>(.{0,%d}?)</p>"
+    % _MAX_INNER, re.S | re.I)
+
+#: Hosts that belong to the engines themselves. A result URL still pointing at
+#: one of these is a redirector or an ad shim we failed to unwrap — emitting it
+#: would record the search engine as the source of a claim.
+_ENGINE_HOSTS = frozenset({
+    "duckduckgo.com", "www.duckduckgo.com", "html.duckduckgo.com",
+    "lite.duckduckgo.com", "bing.com", "www.bing.com",
+})
 
 
 def engines() -> tuple[str, ...]:
@@ -117,11 +141,30 @@ def looks_walled(status: int | None, body: str) -> str | None:
     failure mode is a *200 that isn't a SERP* — an interstitial served with a
     success status, which a status check alone would wave through.
     """
+    return status_wall(status) or marker_wall(body)
+
+
+def status_wall(status: int | None) -> str | None:
+    """The cheap half of ``looks_walled`` — status only, no body scan."""
     if status is None:
         return "no status"
     if int(status) != 200:
         return f"http {status}"
-    low = body.lower()
+    return None
+
+
+def marker_wall(body: str) -> str | None:
+    """The body half — ONLY meaningful on a page that yielded no results.
+
+    Every engine echoes the query back into the page (DuckDuckGo lite puts it in
+    four separate places), and result titles quote it too. So scanning the whole
+    body for challenge text means searching for "verify you are human" makes all
+    three rungs reject a page containing five perfectly good results — verified
+    against the saved fixture. Callers must parse first and consult this only
+    when the parse came back empty, which is exactly when a challenge page and
+    an empty result set need telling apart.
+    """
+    low = (body or "").lower()
     for marker in _WALL_MARKERS:
         if marker in low:
             return f"challenge marker: {marker}"
@@ -176,7 +219,13 @@ def _clean(fragment: str) -> str:
 
 
 def _attr(tag_attrs: str, name: str) -> str:
-    m = re.search(rf"{name}\s*=\s*[\"']([^\"']*)[\"']", tag_attrs, re.I)
+    """Read one attribute out of a raw tag's attribute text.
+
+    The leading boundary is load-bearing: without it a request for `href`
+    happily matched `data-href`, so an anchor could be selected and sourced from
+    an attribute nobody meant to read.
+    """
+    m = re.search(rf"(?:^|\s){name}\s*=\s*[\"']([^\"']*)[\"']", tag_attrs, re.I)
     return unescape(m.group(1)) if m else ""
 
 
@@ -219,6 +268,20 @@ def _pair(links: list[tuple[int, str, str]], snippets: list[tuple[int, str]],
     return out
 
 
+def _usable_result_url(url: str) -> bool:
+    """Reject anything that must not be emitted as a source URL.
+
+    The Bing path has always screened its output; the DuckDuckGo paths did not,
+    so `javascript:` hrefs, bare relative paths, and DuckDuckGo's own `y.js` ad
+    shim all passed straight through as "sources" — the precise outcome the Bing
+    comment calls poisoning a citation trail. An engine-owned host here means we
+    failed to unwrap a redirector, which is never a real result.
+    """
+    if not url.startswith(("http://", "https://")):
+        return False
+    return (urlsplit(url).hostname or "").lower() not in _ENGINE_HOSTS
+
+
 def _anchors_with_class(body: str, cls: str) -> list[tuple[int, str, str]]:
     """Positioned ``(offset, url, title)`` for result anchors of one class."""
     hits: list[tuple[int, str, str]] = []
@@ -227,7 +290,7 @@ def _anchors_with_class(body: str, cls: str) -> list[tuple[int, str, str]]:
             continue
         url = unwrap_ddg(_absolutise(_attr(m.group(1), "href")))
         title = _clean(m.group(2))
-        if url and title:
+        if title and _usable_result_url(url):
             hits.append((m.start(), url, title))
     return hits
 
@@ -326,6 +389,7 @@ async def run_ladder(fetcher, query: str, *, engine: str | None = "auto",
     make that judgement.
     """
     attempts: list[dict] = []
+    answered = False        # did ANY engine serve a real SERP that simply had no hits?
     for eng in resolve_ladder(engine):
         url = engine_url(eng, query, site=site)
         status, body, error = await fetcher(url)
@@ -333,28 +397,43 @@ async def run_ladder(fetcher, query: str, *, engine: str | None = "auto",
             attempts.append({"engine": eng, "status": status, "results": 0,
                              "rejected": error})
             continue
-        walled = looks_walled(status, body)
+        walled = status_wall(status)
         if walled:
             attempts.append({"engine": eng, "status": status, "results": 0,
                              "rejected": walled})
             continue
+        # PARSE BEFORE scanning for challenge text. The body echoes the query
+        # back, so a query containing a marker phrase would otherwise reject a
+        # page full of valid results.
         rows = parse(eng, body, max_results)
         if not rows:
-            # A 200 that parses to nothing is ambiguous — a genuinely empty
-            # result set is indistinguishable from markup drift. Treat it as
-            # this engine declining and let the next one arbitrate.
+            marker = marker_wall(body)
+            if marker is None:
+                answered = True     # a real SERP; it just had nothing
             attempts.append({"engine": eng, "status": status, "results": 0,
-                             "rejected": "no results parsed"})
+                             "rejected": marker or "no results parsed"})
             continue
         attempts.append({"engine": eng, "status": status, "results": len(rows)})
         return {"query": query, "site": site or None, "engine": eng, "ok": True,
-                "count": len(rows), "results": rows, "attempts": attempts}
+                "count": len(rows), "results": rows, "attempts": attempts,
+                "reason": None}
 
+    # Two very different outcomes share ok=false, and conflating them sent users
+    # to change their proxy when the web simply had no match. Say which happened.
+    if answered:
+        reason, hint = "no_matches", (
+            "at least one engine served a real result page with no hits — this "
+            "is an empty result set, not a wall. Broaden the query or drop "
+            "`--site`.")
+    else:
+        reason, hint = "all_declined", (
+            "no engine served a result page. Engines rate-limit PER IP, so "
+            "route through a different egress (`--proxy`), retry after a pause "
+            "(the limit recovers), or run `explore` against a search URL to use "
+            "a full browser. Check `attempts` — a transport error there is a "
+            "client-side fault, not a wall.")
     return {
         "query": query, "site": site or None, "engine": None, "ok": False,
         "count": 0, "results": [], "attempts": attempts,
-        "hint": "every engine declined — engines rate-limit PER IP, so route "
-                "through a different egress (`--proxy`), retry after a pause "
-                "(the limit recovers), or run `explore` against a search URL "
-                "to use a full browser.",
+        "reason": reason, "hint": hint,
     }

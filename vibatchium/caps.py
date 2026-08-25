@@ -68,17 +68,14 @@ CAP_BUCKETS: dict[str, set[str]] = {
     # authenticated arbitrary-URL egress to do it. Like `fetch` it stays out of
     # LEAN_CAPS: network egress is opt-in (`--caps search`), not a default.
     #
-    # KNOWN GAP, stated rather than glossed: the allowlist covers the target,
-    # NOT the `proxy` argument. `--proxy` takes an arbitrary host:port with no
-    # `host_is_internal` check on either lane, so a `search` cap-holder can
-    # direct a connection at a loopback/private address even though `search`
-    # deliberately exposes no `allow_internal` escape hatch the way `fetch`
-    # does. What comes back is a connection error, not content — and on
-    # curl_cffi 0.15.x that error echoes the internal host:port verbatim, while
-    # 0.16.x masks it behind the tunnel target. Guarding the proxy host is the
-    # right fix; it needs a decision on private-LAN proxies (a corporate proxy
-    # on 10.0.0.0/8 is a legitimate deployment), which is why it is documented
-    # here rather than patched blind.
+    # The engine allowlist covers the TARGET. The `proxy` argument is guarded
+    # separately, by the same `host_is_internal` check the target gets, with the
+    # same `allow_internal` opt-out so a legitimate proxy on a private LAN stays
+    # reachable deliberately. That guard was added after a review measured what
+    # an unguarded proxy actually does: for an `http://` target libcurl delivers
+    # the request to the internal service and returns its RESPONSE BODY to the
+    # caller — not merely a connection error, which is what an earlier version
+    # of this comment claimed.
     "search":   {"search"},
     "liveview": {"liveview_start", "liveview_stop", "liveview_url"},
     "secrets":  {"secret_init", "secret_set", "secret_list", "secret_delete",

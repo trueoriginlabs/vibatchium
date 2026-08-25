@@ -521,12 +521,16 @@ TOOLS: list[tuple[str, str, dict, str, Any]] = [
          "data": _str("Raw request body (form/text)."),
          "impersonate": _str("Override the curl_cffi impersonate target (default: matches the live Chrome)."),
          "proxy": _str("Route through a proxy (scheme://[user:pass@]host:port). The sessionless "
-                       "lane inherits no proxy and ignores HTTP(S)_PROXY, so this is the only way "
-                       "to give it a non-host egress; with a session it overrides that session's."),
+                       "lane inherits no proxy, so this is the only way to give it a non-host "
+                       "egress; with a session it overrides that session's. Unset means direct "
+                       "(the daemon suppresses HTTP(S)_PROXY/ALL_PROXY explicitly). An "
+                       "internal/loopback PROXY address is refused unless allow_internal=true — "
+                       "note allow_internal governs BOTH the target and the proxy."),
          "user_agent": _str("Override the User-Agent. In the sessionless lane, omit to let the impersonation target supply a coherent Chrome UA."),
          "cookies": _bool("Forward the session's cookies for this URL. Set false (with no session) for the anonymous sessionless lane.", True),
          "allow_redirects": _bool("Follow redirects.", True),
-         "allow_internal": _bool("Permit loopback/link-local/private targets (SSRF guard off).", False),
+         "allow_internal": _bool("Permit loopback/link-local/private addresses — for the "
+                                 "TARGET url and for the `proxy` (SSRF guard off).", False),
          "timeout_ms": _int("Request timeout in ms.", 30_000),
          "max_body": _int("Cap the response body bytes read.", 5_000_000),
      }, "required": ["url"]},
@@ -558,8 +562,12 @@ TOOLS: list[tuple[str, str, dict, str, Any]] = [
                             "impersonation target supply a coherent Chrome UA."),
          "proxy": _str("Route queries through a proxy (scheme://[user:pass@]host:port). "
                        "Engines rate-limit PER IP, so this is the lever that keeps a wide "
-                       "fan-out on the first rung of the ladder. HTTP(S)_PROXY is not "
-                       "consulted; unset means direct egress from the host."),
+                       "fan-out on the first rung of the ladder. Unset means direct egress "
+                       "from the host (the daemon suppresses HTTP(S)_PROXY/ALL_PROXY "
+                       "explicitly). Internal/loopback proxy addresses are refused unless "
+                       "allow_internal=true."),
+         "allow_internal": _bool("Permit a loopback/link-local/private PROXY address "
+                                 "(SSRF guard off).", False),
          "timeout_ms": _int("Per-engine request timeout in ms.", 20_000),
      }, "required": ["query"]},
      "search", None),

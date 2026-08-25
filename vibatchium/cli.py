@@ -1425,9 +1425,9 @@ def fetch(ctx, url, method, headers, data, impersonate, no_cookies, user_agent, 
       Chrome JA3/HTTP2 fingerprint and no `vb start`, no browser — the cheapest
       lane for a TLS-fingerprint wall on a public endpoint.
 
-    Egress is the HOST's IP unless you pass --proxy. The environment's
-    HTTP(S)_PROXY is deliberately not consulted (curl_cffi is called with an
-    explicit proxies kwarg), so an unset --proxy always means direct.
+    Egress is the HOST's IP unless you pass --proxy: the daemon passes libcurl an
+    explicit EMPTY proxy, which is the only value that stops it reading
+    HTTP(S)_PROXY / ALL_PROXY out of the environment it was spawned with.
 
     Needs `pip install vibatchium[fetch]` (curl_cffi). For a plain anonymous GET
     that ISN'T fingerprint-walled, WebFetch/curl is simpler.
@@ -1475,10 +1475,13 @@ def fetch(ctx, url, method, headers, data, impersonate, no_cookies, user_agent, 
               help="Route queries through a proxy (scheme://[user:pass@]host:port). "
                    "Engines rate-limit per IP, so this is the lever that keeps a wide "
                    "fan-out on the first rung of the ladder.")
+@click.option("--allow-internal", is_flag=True,
+              help="Permit a loopback/link-local/private PROXY address (SSRF guard "
+                   "off). Needed only for a proxy on your own LAN.")
 @click.option("--timeout-ms", type=int, default=20000, show_default=True)
 @click.pass_context
 def search(ctx, query, max_results, engine, site, urls_only, impersonate,
-           user_agent, proxy, timeout_ms):
+           user_agent, proxy, allow_internal, timeout_ms):
     """Search the web through the stealth lane — no browser, no session, no API key.
 
     The discovery half of a research loop: `search` finds the URLs, `fetch` or
@@ -1501,10 +1504,10 @@ def search(ctx, query, max_results, engine, site, urls_only, impersonate,
       vb search "postmortem" --urls | xargs -I{} vb fetch --no-cookies {}
 
     Never reuses a session's cookies (a SERP needs no login, and attaching one
-    deanonymises you). Egress is the HOST's IP unless you pass --proxy; the
-    environment's HTTP(S)_PROXY is deliberately not consulted, so an unset
-    --proxy always means direct. Because no session identity rides along,
-    changing egress changes nothing else about the request.
+    deanonymises you). Egress is the HOST's IP unless you pass --proxy: the
+    daemon passes libcurl an explicit empty proxy so HTTP(S)_PROXY / ALL_PROXY
+    in its environment cannot silently redirect egress. Because no session
+    identity rides along, changing egress changes nothing else.
 
     Needs `pip install vibatchium[fetch]`; gated behind the `search` cap.
     """
@@ -1518,6 +1521,8 @@ def search(ctx, query, max_results, engine, site, urls_only, impersonate,
         args["user_agent"] = user_agent
     if proxy:
         args["proxy"] = proxy
+    if allow_internal:
+        args["allow_internal"] = True
 
     result = call("search", args)
 
@@ -1538,6 +1543,12 @@ def search(ctx, query, max_results, engine, site, urls_only, impersonate,
             click.echo(f"  {a['engine']}: {a.get('rejected', 'no results')}")
         if result.get("hint"):
             click.echo(f"  → {result['hint']}")
+        # Exit non-zero only when nothing ANSWERED. A genuine empty result set is
+        # a valid answer and must stay exit 0; a walled ladder is a failure, and
+        # exiting 0 there made the documented `--urls | xargs` pipeline print
+        # nothing and report success.
+        if result.get("reason") == "all_declined":
+            sys.exit(1)
         return
     for row in rows:
         click.echo(f"{row['rank']}. {row['title']}")
@@ -2805,6 +2816,17 @@ def evals_run(ctx, targets, backends, humanize, settle_ms, out_path,
         click.echo(output)
 
     if min_score_arg is not None:
+        # An UNSCORED cell fails the gate. `min_score()` filters None out, so a
+        # target whose scraper silently stopped matching (exactly what the old
+        # brotector selectors did for months) would render as "?" and leave CI
+        # green — the gate would be guarding a target it was no longer measuring.
+        unscored = [r for r in rows if r.get("score") is None]
+        if unscored:
+            for r in unscored:
+                click.echo(
+                    f"FAIL: {r['target']}/{r['backend']} produced no score "
+                    f"({r.get('error') or 'scraper matched nothing'})", err=True)
+            sys.exit(1)
         lowest = _evals.min_score(rows)
         if lowest is None:
             click.echo("error: no scored cells (all errored)", err=True)

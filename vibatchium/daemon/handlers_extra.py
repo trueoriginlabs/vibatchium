@@ -106,6 +106,14 @@ def _guarded_locator(d, surface, target):
     return elements.resolve_target(surface, getattr(d, "_snapshot", None), target)
 
 
+#: The only curl_cffi `proxies` value that actually means "no proxy". Passing
+#: None or {} leaves libcurl free to read HTTP(S)_PROXY / ALL_PROXY out of the
+#: daemon's inherited environment (measured: an https target is proxied under
+#: HTTPS_PROXY or ALL_PROXY even with proxies=None). Egress control is the whole
+#: point of these lanes, so "direct" has to be stated explicitly, not implied.
+_DIRECT_PROXIES = {"http": "", "https": ""}
+
+
 def register_extra(daemon) -> None:
     # ─── find (semantic locators) ─────────────────────────────────────────
 
@@ -841,6 +849,23 @@ def register_extra(daemon) -> None:
             return None
         if not isinstance(purl, str):
             raise ValueError(f"{verb} `proxy` must be a proxy URL string")
+        # SSRF guard on the PROXY host. The target URL has been guarded since
+        # 0.9.0, but an unguarded proxy reopens the same door from the other
+        # side: pointing it at a loopback/private address makes curl deliver the
+        # request to that service and hand its RESPONSE BODY back — measured, so
+        # this is not a theoretical "connection error only". `search` is the
+        # sharper case because its whole cap rationale is a fixed target
+        # allowlist. Same `allow_internal` opt-out as the target guard, so a
+        # legitimate proxy on a private LAN stays reachable deliberately.
+        from urllib.parse import urlsplit as _us
+        if not args.get("allow_internal"):
+            phost = _us(purl if "://" in purl else "http://" + purl).hostname
+            from .. import fetch as _fmod
+            if phost and _fmod.host_is_internal(phost):
+                raise ValueError(
+                    f"{verb} refuses an internal/loopback/link-local proxy "
+                    f"({phost}) — SSRF guard; pass allow_internal=true to "
+                    "override")
         # Imported here, not at module scope: `fetch` is an optional-extra lane
         # and the rest of this module must import without curl_cffi present.
         from .. import fetch as _fetch_mod
@@ -979,8 +1004,13 @@ def register_extra(daemon) -> None:
             cookies = _f.cookies_for_url(ck, url)
             if cookies:
                 kw["cookies"] = cookies
-        if proxies:
-            kw["proxies"] = proxies
+        # ALWAYS pass an explicit mapping. Omitting it (or passing None/{}) lets
+        # libcurl consult HTTP(S)_PROXY/ALL_PROXY from the DAEMON's environment,
+        # which it inherits from whatever shell first spawned it — so a user with
+        # HTTPS_PROXY exported would silently egress through it while every
+        # help string here promised direct. `_DIRECT_PROXIES` is the only value
+        # that actually suppresses that lookup.
+        kw["proxies"] = proxies or _DIRECT_PROXIES
         if isinstance(args.get("params"), dict):
             kw["params"] = args["params"]
         if args.get("json") is not None:
@@ -1089,8 +1119,8 @@ def register_extra(daemon) -> None:
                 try:
                     resp = await sess.get(
                         url, impersonate=impersonate, headers=headers or None,
-                        proxies=proxies, timeout=timeout_ms / 1000.0,
-                        allow_redirects=True)
+                        proxies=proxies or _DIRECT_PROXIES,
+                        timeout=timeout_ms / 1000.0, allow_redirects=True)
                 except Exception as e:  # noqa: BLE001 — one engine failing is not the request failing
                     return None, "", f"transport: {e}"
                 body, _truncated, is_text = _f.truncate_body(resp.content, 5_000_000)
@@ -2027,7 +2057,8 @@ def register_extra(daemon) -> None:
         Built-in targets:
           sannysoft  → bot.sannysoft.com (counts passed rows in the WebDriver table)
           creepjs    → abrahamjuliot.github.io/creepjs (trust score 0..100)
-          brotector  → ttlns.github.io/brotector (leak count, lower = better)
+          brotector  → ttlns.github.io/brotector (0..100, HIGHER = better —
+                       inverted from the page's own higher-is-worse average)
 
         Also accepts a raw URL via `--target https://...` plus an optional
         `--extract <js>` expression to override the score extraction.
