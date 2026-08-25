@@ -10,6 +10,9 @@
 
 **Agent-piloted browser automation that clears Cloudflare.**
 Patched Playwright + multi-session daemon + credential vault + vision clicking + prompt-injection safety. One MCP server, N parallel Chromes, persistent per-session profiles.
+Plus two renderer-free lanes on a Chrome TLS fingerprint: **`vb search`** to find
+URLs without a search API, **`vb fetch`** to read them — both with per-request
+`--proxy`, because engines and walls both rate-limit per IP.
 
 > **Where this fits.** Both Anthropic and Google now ship an agent that drives
 > *your own* signed-in Chrome — Claude in Chrome and Chrome Auto Browse. If that
@@ -71,33 +74,23 @@ vb --version               # confirm
 
 ## Why vibatchium
 
-Most of what used to sit in this table is now commodity. What follows keeps only
-the rows that still separate us — and concedes the ones that don't.
+Persistent logged-in profiles, credential vaults, CDP-attach, N named sessions —
+[agent-browser][ab] and [playwright-mcp][pmcp] all ship those now, at download
+volumes we won't match. A comparison table winning rows nobody contests was
+noise; it's gone.
 
-|  | Patchright | Browser-Use | agent-browser¹ | vibatchium |
-|---|---|---|---|---|
-| Compact, token-frugal page representation | ❌ | ❌ | ✅ | ✅ |
-| Per-session persistent profile (cookies, login) | manual | ✅ | ✅ | ✅ |
-| CDP-attach to a manually-logged-in Chrome | manual | ✅ | ✅ | ✅ |
-| Encrypted credential vault | ❌ | ❌ | ✅ | ✅ |
-| **Stealth / anti-bot patches in core** | ✅ | ❌ | plugin slot only² | ✅ |
-| **Session state encrypted at rest by default** | — | — | ❌ (opt-in)³ | ✅ |
-| **Vault key in the OS keyring, not beside the ciphertext** | — | — | ❌⁴ | ✅ |
-| **TOTP + IMAP email-code 2FA** | ❌ | ❌ | ❌ | ✅ |
-| **N parallel persistent sessions on one daemon** | manual | — | — | ✅⁵ |
-| Per-session proxy + WebRTC leak guard | manual | ❌ | — | ✅ |
-| Vision-first clicking with spend cap | ❌ | ✅ | — | ✅ |
-| **Prompt-injection scanning on scraped content** | ❌ | ❌ | ❌ | ✅ on by default⁶ |
-| Live-view stream with takeover (WebSocket) | ❌ | partial | — | ✅ |
-| Bearer-token REST shim + caps gating | ❌ | manual | — | ✅ |
+What's still ours: **stealth patches in core** (agent-browser's stealth issue has
+been open since Jan 2026 and the PR attempting it was closed), **prompt-injection
+scanning on by default** (nobody else in this lane ships it), **TOTP + IMAP 2FA**
+so an unattended run survives a login challenge, and the combination that only
+matters together — real stock Chrome + CDP stealth + headless + *unattended* + N
+persistent logins, on your own machine.
 
-<sub>Verified 2026-08-03 against agent-browser v0.33.2. — = not assessed, not a claim of absence.</sub><br>
-<sub>¹ [vercel-labs/agent-browser](https://github.com/vercel-labs/agent-browser), ~1.27M npm downloads/week — by far the largest overlap, and it covers four of the rows above.</sub><br>
-<sub>² Stealth is out of agent-browser core by policy; its docs designate a `launch.mutate` plugin capability as the extension point.</sub><br>
-<sub>³ agent-browser's own README: "State files contain session tokens in plaintext&nbsp;… for encryption at rest, set `AGENT_BROWSER_ENCRYPTION_KEY`". Its credential *vault* is always encrypted; the session state is what defaults to plaintext.</sub><br>
-<sub>⁴ agent-browser auto-generates its key into `~/.agent-browser/.encryption-key` — the same directory as the ciphertext.</sub><br>
-<sub>⁵ Scoped deliberately: this is a real differentiator against **playwright-mcp**, whose README notes a persistent profile can only be used by one browser instance at a time. It is *not* a differentiator against tools that give each named session its own browser instance.</sub><br>
-<sub>⁶ Defaults to `flag-only` since 0.18.9: responses gain `prompt_injection_risk` + `signals` and content is left byte-identical, so nothing downstream changes. `wrap` / `redact` rewrite content and stay opt-in; `VIBATCHIUM_SAFETY_MODE=off` restores zero overhead.</sub>
+If you don't need the stealth half, use one of the above. They're bigger, older
+and better tested than we are.
+
+[ab]: https://github.com/vercel-labs/agent-browser
+[pmcp]: https://github.com/microsoft/playwright-mcp
 
 ## Real Chrome vs fake Chrome
 
@@ -290,30 +283,73 @@ patches apply in *all* tiers, including attach (`connect_over_cdp`).
 > JSON/API endpoints at TLS-fingerprint-correct speed — but it runs no JS, so it
 > can't *clear* a JS challenge itself.
 
-### Finding the URL in the first place — `vb search`
+## Search — find the URL, not just read it
 
 Reading a walled page is only half a research loop; the other half is discovery,
 and search engines are anti-bot walled like everything else. `vb search` runs the
-SERP over the same curl_cffi lane — no browser, no session, no API key, no call
-budget to exhaust mid-run.
+SERP over the same curl_cffi lane — **no browser, no session, no API key, and no
+per-session call budget to run out of mid-run.**
 
 ```
 vb search "playwright stealth detection" -n 5
-vb search "cdp leak" --site github.com --urls | xargs -I{} vb fetch --no-cookies {}
+vb search "cdp leak" --site github.com -n 20
+vb search "postmortem" --urls | xargs -I{} vb fetch --no-cookies {}
 ```
 
 Engines are tried as a ladder (`ddg → ddg-lite → bing`) until one answers,
 because reachability moves: the endpoint serving results now may rate-limit
 (HTTP 202) on the next call. `--json` returns an `attempts` array naming every
-engine that declined and why, so `ok:false` reads as *all engines are walled
-right now* rather than *the web has nothing* — different problems, different
-fixes. Engines rate-limit *per IP*, so `--proxy` is the lever that keeps a wide
-fan-out on the first rung. The engine allowlist constrains the *target*; the
-proxy address gets its own SSRF guard, with `--allow-internal` to opt in to a
-proxy on your own LAN. Unlike `fetch` it never reuses session cookies (a SERP
-needs no login, and attaching one deanonymises the request), which is why it gets
-its own `search` cap instead of riding on `fetch` — and why changing egress
-changes nothing else about the request.
+engine that declined and why, and a `reason` separating *all engines are walled*
+from *the web has nothing* — different problems, different fixes, and the CLI
+exits non-zero only for the first.
+
+It never reuses session cookies (a SERP needs no login, and attaching one
+deanonymises the request), which is why it gets its own `search` cap instead of
+riding on `fetch`. No date filter is exposed on purpose: DuckDuckGo's mislabels
+article dates badly enough to corrupt a timeline. Engines rate-limit per IP — see
+proxies, below.
+
+## Proxies — per-request egress on both stealth lanes
+
+Egress is the axis most people get wrong, so it gets stated precisely rather than
+implied. Both curl_cffi lanes take `--proxy scheme://[user:pass@]host:port`:
+
+```
+vb fetch --no-cookies https://api.example/v1 --proxy http://user:pass@gw:12323
+vb search "site reliability postmortem" -n 20 --proxy http://user:pass@gw:12323
+vb --session work proxy set http://user:pass@gw:12323    # or per-session, for the browser
+```
+
+Measured, not asserted — same box, same command, only `--proxy` differing:
+
+| | egress IP |
+|---|---|
+| direct | `115.70.50.70` |
+| `--proxy` (authenticated gateway) | `212.69.0.85` |
+
+Four things worth knowing:
+
+- **Unset means direct, and that is enforced.** The daemon hands libcurl an
+  explicit empty proxy, which is the only value that stops it reading
+  `HTTP(S)_PROXY` / `ALL_PROXY` out of the environment it was spawned with. A
+  long-lived daemon inherits whatever shell first started it, so without this a
+  stray `HTTPS_PROXY` would silently reroute every request while the response
+  claimed direct egress. (It did, until 0.19.0 — see the changelog.)
+- **It matters most for `search`.** Engines rate-limit *per IP*, so a wide
+  research fan-out from one address is the fastest way to push every query onto
+  the last rung of the engine ladder. The response reports `proxied: true|false`
+  so you can tell which IP a thin result set came from.
+- **The proxy address is SSRF-guarded** like the target URL, with
+  `--allow-internal` to opt in to a proxy on your own LAN. An unguarded proxy
+  reaches internal services and returns their response bodies, not just
+  connection errors.
+- **A bad proxy is an error, never a fallback.** Silently egressing from the host
+  IP when you asked for a specific one is worse than failing, because the whole
+  point of asking was that the host IP must not be used. Proxy URLs are redacted
+  from the verb log; responses carry the boolean, never the URL.
+
+With a browser session, `vb proxy set` also wires the **WebRTC leak guard** — a
+tunnelled HTTP request still leaks the real IP via STUN without it.
 
 ## Attach mode — the practical Cloudflare workaround
 
