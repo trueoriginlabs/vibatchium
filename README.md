@@ -81,7 +81,8 @@ noise; it's gone.
 
 What's still ours: **stealth patches in core** (agent-browser's stealth issue has
 been open since Jan 2026 and the PR attempting it was closed), **prompt-injection
-scanning on by default** (nobody else in this lane ships it), **TOTP + IMAP 2FA**
+scanning on by default** for page content (nobody else in this lane ships it —
+though it does not yet cover the `fetch`/`search` lanes), **TOTP + IMAP 2FA**
 so an unattended run survives a login challenge, and the combination that only
 matters together — real stock Chrome + CDP stealth + headless + *unattended* + N
 persistent logins, on your own machine.
@@ -425,6 +426,11 @@ threat model is "a credential must never reach the model, a screenshot, or a log
   device telemetry across sessions *and* accounts. Use one profile per account,
   never share a profile between identities, and don't reuse a profile that has
   already been challenged.
+
+- **The `fetch` and `search` lanes are outside prompt-injection scanning.** The
+  scanner covers page-content verbs (`text`, `html`, `extract`, `map`, …). SERP
+  titles and fetched bodies are third-party text going straight into an agent's
+  context and are *not* scanned today. Treat them as untrusted input.
 
 ## Authorized use
 
