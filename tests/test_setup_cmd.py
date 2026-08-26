@@ -10,6 +10,7 @@ Coverage:
 from __future__ import annotations
 
 import json
+import re
 import shutil
 from pathlib import Path
 
@@ -451,3 +452,113 @@ def test_skill_advertises_search(monkeypatch):
     assert "search" in setup_cmd._SKILL_DESCRIPTION.lower()
     # And it must say why the search tool may be missing from MCP.
     assert "vb setup --force --caps lean,search" in md
+
+
+# ─── the skill must describe the SHIPPED surface, not an imagined one ────
+
+def test_skill_teaches_the_wall_escalation_ladder():
+    md = setup_cmd._skill_md("/x/vb")
+    assert "vb show" in md, "the human-solves-it path is the first thing to try"
+    assert "--headed" in md and "--backend nodriver" in md
+    # Headedness/backend are fixed at launch, so every rung needs a close first.
+    assert "session close" in md
+
+
+def test_skill_names_only_extras_that_actually_exist():
+    """`[vision]` was written here once; the lane is `vision`, the extra is
+    `[llm]`. A skill naming a nonexistent extra sends the agent to a failing
+    install command."""
+    import tomllib
+    real = set(tomllib.loads(Path("pyproject.toml").read_text())
+               ["project"]["optional-dependencies"])
+    md = setup_cmd._skill_md("/x/vb")
+    named = set(re.findall(r"`\[([a-z_]+)\]`", md))
+    assert named, "expected the skill to name some extras"
+    assert named <= real, f"skill names extras that don't exist: {named - real}"
+
+
+def test_skill_documents_the_fetch_lane_and_its_no_js_limit():
+    md = setup_cmd._skill_md("/x/vb")
+    assert "vb fetch" in md
+    assert "curl_cffi" in md
+    # The limit is the whole reason to pick explore instead — it must be stated.
+    assert "No JavaScript runs" in md
+
+
+def test_skill_warns_extras_belong_to_the_daemon_venv():
+    """The venv maze: a caller venv with curl_cffi still fails if the daemon
+    was spawned from one without it."""
+    md = setup_cmd._skill_md("/x/vb")
+    assert "daemon's venv" in md
+    assert "vb install" in md, "must point at the self-diagnosis command"
+    assert "vb shutdown" in md, "installing without a bounce doesn't take effect"
+
+
+def test_skill_says_explore_cannot_use_nodriver():
+    """explore's ephemeral auto-start passes no backend — silently patchright.
+    Guarded here because an agent that assumes otherwise debugs the wrong thing."""
+    md = setup_cmd._skill_md("/x/vb")
+    assert "only on `vb start`" in md
+
+
+# ─── the measured anti-patterns the skill exists to prevent ─────────────
+
+def test_skill_teaches_wait_over_blind_sleep():
+    """Mined transcripts: blind `sleep` outnumbered `vb wait` 15:1, and removing
+    sleeps was almost the entire 34s->7s win on a measured flow."""
+    md = setup_cmd._skill_md("/x/vb")
+    assert "wait selector" in md
+    assert "Never `sleep`" in md
+
+
+def test_skill_redirects_eval_to_cheaper_verbs():
+    """~76% of eval bodies re-implemented a verb in JS. The table names the
+    replacement for each of the five common shapes."""
+    md = setup_cmd._skill_md("/x/vb")
+    for verb in ("vb text", "vb count", "vb click", "vb attr", "vb scroll"):
+        assert verb in md, f"{verb} missing from the eval-replacement guidance"
+    assert "busy page" in md, "eval-on-a-busy-page trap must be stated"
+
+
+def test_skill_prefers_act_and_says_no_api_key_needed():
+    """act went unused partly because agents assumed it cost inference."""
+    md = setup_cmd._skill_md("/x/vb")
+    assert "act" in md and "heuristic" in md
+    assert "no API key" in md
+
+
+def test_skill_documents_selector_grammar_and_the_wait_exception():
+    """@text:/@label:/@role: resolve for click/fill/count but NOT for
+    `wait selector`, which errors 'Unsupported token'. Verified against
+    handlers._wait_selector, which bypasses elements.resolve_target."""
+    md = setup_cmd._skill_md("/x/vb")
+    for form in ("@text:", "@label:", "@role:button"):
+        assert form in md
+    assert "wait selector` does NOT accept" in md
+    assert "text=" in md, "must give the Playwright form that does work"
+
+
+def test_skill_covers_typing_not_just_clicking():
+    md = setup_cmd._skill_md("/x/vb")
+    for verb in ("vb --session work fill", "vb --session work type",
+                 "vb --session work select", "vb --session work press"):
+        assert verb in md
+    # fill-vs-type is the distinction agents get wrong.
+    assert "real keystrokes" in md
+
+
+def test_skill_teaches_session_hygiene():
+    """233 of 283 session names ever used were never explicitly closed; each
+    live session holds ~1.4GB of resident Chrome."""
+    md = setup_cmd._skill_md("/x/vb")
+    assert "session close" in md
+    assert "--ephemeral" in md
+
+
+def test_skill_examples_survive_str_format():
+    """_SKILL_BODY goes through .format(binary=...), so every literal brace in
+    an example (JSON, xargs -I{}) must be doubled. This has broken twice."""
+    md = setup_cmd._skill_md("/x/vb")
+    assert '{"title":"h1"' in md, "JSON example lost its braces"
+    assert "xargs -I{}" in md
+    assert "{{" not in md and "}}" not in md, "un-rendered doubled braces leaked"

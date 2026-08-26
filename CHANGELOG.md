@@ -4,6 +4,83 @@ All notable changes to vibatchium are documented here. Versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Until 1.0,
 minor bumps may include breaking changes; we'll always call them out here.
 
+## [0.19.2] — 2026-08-26
+
+### feat(skill): teach the agent the walled-page ladder and the optional lanes
+
+0.19.1 fixed the *delivery* of the Claude Code skill — `vb update` now rewrites
+it. This fills in what it says. Two capabilities were shipped and undocumented
+where an agent would look.
+
+**The escalation ladder.** `go` has always returned an `advice` string naming
+the exact recovery commands for that session, and the skill never mentioned it,
+so an agent that hit a wall retried the same way or gave up. The skill now
+points at `advice` first — it knows things a static file can't, like whether the
+daemon has a display — and describes the shape: `vb show` for the human-solves-
+it path (a separate windowed daemon; live sessions untouched), then headed
+retry, `humanize`, and `--backend nodriver` last. Every automatic rung needs the
+session **closed** first, because backend and headedness are fixed at launch —
+the version of this text that said "retry `--headed`" would have had the agent
+appending a flag to a running session and wondering why nothing changed.
+
+`--backend nodriver` is called out as available **only on `vb start`**:
+`explore` and `research` pass no backend and are silently always patchright, so
+an agent that assumes otherwise debugs the wrong layer. And its real value is
+stated rather than sold — the integration is two-layer (nodriver launches,
+patchright attaches over CDP), our own evals measure identical detector scores
+for both backends, so it changes the launch surface and not how the browser is
+driven. A skill that oversells a rung wastes the escalation.
+
+**The fetch lane.** `vb fetch` had no section at all despite being the cheapest
+way through a fingerprint wall — with the limit that decides between it and
+`explore` stated plainly: no JavaScript runs.
+
+**The four rules that actually decide speed.** Mined from thousands of real
+agent runs, and each is a measured failure mode rather than a style preference:
+
+- *Never blind-`sleep`.* Shell `sleep` inside `vb` commands outnumbered
+  `vb wait` roughly 15 to 1. Replacing them with `wait selector` took a measured
+  per-item flow from ~34s to ~7s — that swap was almost the entire win.
+- *Don't reach for `eval`.* Of the `eval` bodies sampled, ~76% re-implemented a
+  cheaper verb in JavaScript: reading text, counting nodes, clicking, reading
+  attributes, scrolling. The skill now carries the replacement table, plus the
+  reason not to `eval` on a busy page at all (isolated-world evaluation still
+  needs the main thread).
+- *Prefer `act` over probe-then-click* — and say plainly that it runs on the
+  heuristic tier with no API key, since the assumption that it costs inference
+  is why it went unused.
+- *Assert the side effect, not the exit code.* A click that "succeeded" in 4ms
+  did not happen.
+
+**Addressing elements**, which the skill previously only hinted at with `@eN`:
+`@text:` / `@label:` / `@role:button[name=Submit]` are documented, together with
+the inconsistency that will otherwise cost an afternoon — `wait selector` does
+**not** accept that grammar (it forwards the string to Playwright and errors
+`Unsupported token`), while `wait ref` does. Use `text=…` inside `wait`.
+
+**Typing.** The skill showed how to click and never how to fill anything in, so
+`fill` / `type` / `select` / `press` / `upload` are covered, with the
+`fill`-vs-`type` distinction that matters for fields which only react to real
+key events. `extract-fields` gets named as the one-round-trip structured pull.
+
+**Session hygiene.** Most sessions ever started were never explicitly closed,
+and each is a real Chrome holding on the order of a gigabyte. The skill now says
+to close them, points at `--ephemeral` and `explore` for one-shot work, and
+documents `--wait-until commit` for ad-heavy pages — including that killing the
+client does not release the daemon-side lock.
+
+**Optional lanes get one honest section** instead of a scattering of "needs the
+X extra" asides: check with `vb install` rather than guessing; the dependency
+belongs to the **daemon's** venv, not the caller's shell (a venv with curl_cffi
+still fails if the daemon was spawned from one without it); and the install
+command depends on how vibatchium was installed, so follow the failing verb's
+error rather than assuming `pip`. Then `vb shutdown`.
+
+A test now pins every extra the skill names to `pyproject.toml`'s real extras —
+added because this text shipped a `[vision]` extra that does not exist (the
+*lane* is vision, the *extra* is `[llm]`), which would have sent an agent to a
+failing install command.
+
 ## [0.19.1] — 2026-08-26
 
 ### fix: an upgrade that never reaches the agent isn't an upgrade
