@@ -10,6 +10,7 @@ import contextlib
 import logging
 import os
 import shlex
+import sys
 import time
 from pathlib import Path
 
@@ -22,6 +23,17 @@ from .paths import (
     set_active_session_name, validate_name,
 )
 from .registry import current_session_ctx, get_max_ephemeral, SessionLimitError
+
+
+def _package_root() -> str:
+    """Absolute path of the `vibatchium` package this daemon imported.
+
+    Reported by `status` so a client can tell WHICH checkout/venv is actually
+    serving it. On a box with several vb-bearing venvs the shared daemon is
+    whichever one spawned first, and that choice silently fixes both the code
+    version and the optional-extra availability for every later client.
+    """
+    return str(Path(__file__).resolve().parent.parent)
 
 log = logging.getLogger("vibatchium.handlers")
 
@@ -1609,6 +1621,18 @@ def register_all(daemon) -> None:
             "mode": entry.session.mode if entry else None,
             "pid": os.getpid(),
             "version": __version__,
+            # 0.19.1: when this daemon booted (epoch seconds) and where its
+            # code was imported FROM. Both exist for one reason: on an editable
+            # / git-checkout install `git pull` changes the source without
+            # changing __version__, so the version compare cannot see the skew.
+            # `started_at` vs the package's newest source mtime can.
+            # `source` also answers the other half of the venv maze — which
+            # interpreter's site-packages actually decides whether the optional
+            # extras (curl_cffi for fetch/search) are importable, since that is
+            # a property of the DAEMON's venv, not the caller's.
+            "started_at": d._started_at,
+            "source": _package_root(),
+            "python": sys.executable,
             "running_sessions": d.registry.list_running(),
             # 0.7.0 self-heal: how many times THIS session auto-recovered from a
             # Chrome renderer crash, and when (epoch seconds, None if never).

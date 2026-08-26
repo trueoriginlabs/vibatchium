@@ -69,7 +69,7 @@ def _doc_block(binary: str) -> str:
 # against typos that would make `vb mcp --caps=…` fail at registration time).
 # 0.8.0: the canonical value lives in caps.py (so the direct `vb mcp` default
 # and what setup registers stay identical); re-exported here for callers/tests.
-from .caps import LEAN_CAPS  # noqa: E402
+from .caps import LEAN_CAPS, resolve_caps  # noqa: E402
 
 # A Claude Code Skill installed at ~/.claude/skills/vibatchium/SKILL.md. Its
 # `description` is the trigger the host matches to AUTO-invoke vb without the
@@ -84,7 +84,8 @@ _SKILL_DESCRIPTION = (
     "authenticated pages, multi-step form/checkout flows, and parallel "
     "multi-site automation. Use whenever the user wants to browse, scrape, "
     "research, log into, or click through a website that blocks bots or needs "
-    "a real browser. Runs via the `vb` CLI + MCP tools."
+    "a real browser. Also does bulk web SEARCH (`vb search`) without spending "
+    "the host's capped WebSearch budget. Runs via the `vb` CLI + MCP tools."
 )
 
 _SKILL_BODY = """# vibatchium — agentic stealth browser
@@ -99,6 +100,29 @@ static HTML or a Google/news lookup, use WebFetch/WebSearch — it's cheaper.
 - `vb explore <url>` — look at a page: text + screenshot, auto-closes.
 - `vb research --target <url> --intent "..." --intent "..."` — parallel fan-out.
 - `vb observe` then `vb act "<instruction>"` — semantic see-then-do.
+- `vb search "<query>"` — find URLs. No browser, no API key, no host budget.
+
+## Finding pages (`vb search`)
+
+Your built-in WebSearch has a per-session call budget shared with every
+subagent — a wide fan-out drains it and the lanes that start afterwards get
+nothing. `vb search` has no such budget, so use it for bulk discovery and save
+WebSearch for what it can't serve.
+
+    vb search "playwright stealth detection" -n 5
+    vb search "cdp leak" --site github.com --urls | xargs -I{{}} vb fetch --no-cookies {{}}
+
+- Engine LADDER `ddg → ddg-lite → bing`, tried until one answers. Pin with
+  `--engine` when you need determinism.
+- Read `attempts` in `--json`: `ok:false` means **every engine declined**, not
+  that the web is empty. Those need different responses — retry/proxy vs.
+  rephrase the query.
+- Engines rate-limit **per IP**. On a wide fan-out pass `--proxy <url>` rather
+  than hammering one address. `HTTP(S)_PROXY` is never consulted — unset always
+  means direct egress.
+- Sessionless by design: never attaches a logged-in session's cookies to search
+  traffic. Pairs with `vb fetch --no-cookies <url>` to read what it finds.
+- Needs the `[fetch]` extra and the `search` cap (see Notes).
 
 ## Multi-step / logged-in flows
     vb session new work && vb --session work start
@@ -118,6 +142,11 @@ Sessions are independent Chromes — run several in parallel, no cookie bleed.
 - The MCP server exposes a curated subset of verbs; the full surface is always
   on the CLI (`vb --help`), and you can widen the MCP tools by re-registering
   the server with `--caps=all`.
+- `search` and `fetch` are **not** in the default MCP tool set — network egress
+  is opt-in, so an operator grants it deliberately. If you don't see a search
+  tool, that is expected: shell out to `vb search` on the CLI, which always
+  works. To expose them as MCP tools instead:
+  `vb setup --force --caps lean,search,fetch`.
 """
 
 
@@ -243,6 +272,35 @@ def ensure_md_block(path: Path, block: str, dry_run: bool = False) -> str:
     return _label("created")
 
 
+def _registered_caps(cli: str, name: str) -> str | None:
+    """The `--caps` value an already-registered MCP server was registered with.
+
+    Returns None when absent from the output. The caps string is frozen into the
+    agent's config at FIRST registration, so a later release that adds a bucket
+    (0.19.0 added `search`) is invisible to an existing registration no matter
+    how many times the package is upgraded — re-registering is the only fix, and
+    you can't prompt for it without first knowing what's actually installed.
+    """
+    try:
+        r = subprocess.run([cli, "mcp", "get", name],
+                          capture_output=True, text=True, timeout=10)
+        if r.returncode != 0:
+            return None
+        # Split on WHITESPACE only. The caps value is itself comma-separated
+        # ("core,nav,content"), so normalising commas to spaces first would
+        # shred it into its first bucket — silently reporting `core` for a
+        # perfectly current registration and prompting a pointless re-register.
+        toks = (r.stdout or "").split()
+        for i, tok in enumerate(toks):
+            if tok == "--caps" and i + 1 < len(toks):
+                # Trailing punctuation from a list-style rendering ("mcp,
+                # --caps, core,nav") is not part of the value.
+                return toks[i + 1].strip(",").strip()
+        return None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _mcp_already_registered(cli: str, name: str) -> bool:
     try:
         r = subprocess.run([cli, "mcp", "get", name],
@@ -257,32 +315,77 @@ def _mcp_already_registered(cli: str, name: str) -> bool:
 @dataclass
 class SetupResult:
     agent: str
-    mcp: str = "skipped"      # "registered" | "already" | "skipped" | "failed"
+    mcp: str = "skipped"      # "registered" | "re-registered" | "already" | "skipped" | "failed"
+    caps: str | None = None   # the caps the server is (or would be) registered with
     docs: str = "skipped"     # "created" | "updated" | "unchanged" | "skipped" | "failed"
     skill: str = "skipped"    # "created" | "updated" | "unchanged" | "skipped" | "failed"
     notes: list[str] = field(default_factory=list)
 
 
+def _register_mcp_cli(res: SetupResult, agent: str, binary: str,
+                      add_args: list[str], caps: str, *,
+                      dry_run: bool, force: bool) -> None:
+    """Register (or re-register) the MCP server through an agent's own CLI.
+
+    Mutates ``res``. Shared by codex and claude because the only difference
+    between them is ``add_args`` — and the force/drift logic is exactly the part
+    that must not diverge between the two.
+
+    `force` re-registers with ``caps`` even when a registration exists: an
+    existing entry's `--caps` string is frozen at first registration, so the
+    only way a new bucket (0.19.0's `search`) ever reaches an established user
+    is remove-then-add. Without `force` an existing registration is LEFT ALONE
+    on purpose — a plain re-run of `vb setup` must never silently narrow a
+    surface someone widened by hand (`--caps all` is a common customisation,
+    and clobbering it back to lean would remove tools mid-session).
+    """
+    cli = shutil.which(agent)
+    if not cli:
+        res.notes.append(f"`{agent}` not on PATH — skipping MCP registration")
+        return
+    existing = _registered_caps(agent, "vibatchium")
+    registered = _mcp_already_registered(agent, "vibatchium")
+    res.caps = caps
+    if registered and not force:
+        res.mcp = "already"
+        res.caps = existing
+        # Surface the drift rather than fixing it — see the docstring on why
+        # fixing it uninvited is the wrong move. Naming the exact command is
+        # the difference between a note someone acts on and one they scroll past.
+        if existing is not None and existing != caps:
+            res.notes.append(
+                f"registered with `--caps {existing}`; this version installs "
+                f"`--caps {caps}`. Re-register to pick up newer buckets: "
+                f"`vb setup --force` (or keep yours — `--caps` is yours to set).")
+        return
+    if dry_run:
+        res.mcp = "would-re-register" if registered else "would-register"
+        return
+    try:
+        if registered:
+            # `mcp add` refuses a duplicate name, so drop it first. A failure
+            # here is not fatal: add may still succeed (some CLIs upsert), and
+            # if it doesn't, the add error is the one worth reporting.
+            subprocess.run([cli, "mcp", "remove", "vibatchium"],
+                           capture_output=True, text=True, timeout=20)
+        subprocess.run([cli, "mcp", "add", *add_args, "--",
+                        binary, "mcp", "--caps", caps],
+                       capture_output=True, check=True, text=True, timeout=20)
+        res.mcp = "re-registered" if registered else "registered"
+    except subprocess.CalledProcessError as e:
+        res.mcp = "failed"
+        res.notes.append(f"{agent} mcp add failed: {e.stderr.strip()[:200]}")
+    except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+        res.mcp = "failed"
+        res.notes.append(f"{agent} mcp add failed: {e}")
+
+
 def setup_codex(binary: str, dry_run: bool = False,
-                write_docs: bool = True) -> SetupResult:
+                write_docs: bool = True, force: bool = False,
+                caps: str = LEAN_CAPS) -> SetupResult:
     res = SetupResult("codex")
-    cli = shutil.which("codex")
-    if cli:
-        if _mcp_already_registered("codex", "vibatchium"):
-            res.mcp = "already"
-        elif dry_run:
-            res.mcp = "would-register"
-        else:
-            try:
-                subprocess.run([cli, "mcp", "add", "vibatchium", "--",
-                                binary, "mcp", "--caps", LEAN_CAPS],
-                              capture_output=True, check=True, text=True, timeout=20)
-                res.mcp = "registered"
-            except subprocess.CalledProcessError as e:
-                res.mcp = "failed"
-                res.notes.append(f"codex mcp add failed: {e.stderr.strip()[:200]}")
-    else:
-        res.notes.append("`codex` not on PATH — skipping MCP registration")
+    _register_mcp_cli(res, "codex", binary, ["vibatchium"], caps,
+                      dry_run=dry_run, force=force)
     if write_docs:
         try:
             res.docs = ensure_md_block(Path.home() / ".codex" / "AGENTS.md",
@@ -296,25 +399,12 @@ def setup_codex(binary: str, dry_run: bool = False,
 
 
 def setup_claude(binary: str, dry_run: bool = False,
-                 write_docs: bool = True) -> SetupResult:
+                 write_docs: bool = True, force: bool = False,
+                 caps: str = LEAN_CAPS) -> SetupResult:
     res = SetupResult("claude")
-    cli = shutil.which("claude")
-    if cli:
-        if _mcp_already_registered("claude", "vibatchium"):
-            res.mcp = "already"
-        elif dry_run:
-            res.mcp = "would-register"
-        else:
-            try:
-                subprocess.run([cli, "mcp", "add", "--scope", "user",
-                              "vibatchium", "--", binary, "mcp", "--caps", LEAN_CAPS],
-                              capture_output=True, check=True, text=True, timeout=20)
-                res.mcp = "registered"
-            except subprocess.CalledProcessError as e:
-                res.mcp = "failed"
-                res.notes.append(f"claude mcp add failed: {e.stderr.strip()[:200]}")
-    else:
-        res.notes.append("`claude` not on PATH — skipping MCP registration")
+    _register_mcp_cli(res, "claude", binary,
+                      ["--scope", "user", "vibatchium"], caps,
+                      dry_run=dry_run, force=force)
     if write_docs:
         try:
             res.docs = ensure_md_block(Path.home() / ".claude" / "CLAUDE.md",
@@ -331,8 +421,18 @@ def setup_claude(binary: str, dry_run: bool = False,
     return res
 
 
+def _cursor_caps(entry: dict) -> str | None:
+    """The `--caps` value in a ~/.cursor/mcp.json server entry, if any."""
+    args = entry.get("args") or []
+    for i, a in enumerate(args):
+        if a == "--caps" and i + 1 < len(args):
+            return args[i + 1]
+    return None
+
+
 def setup_cursor(binary: str, dry_run: bool = False,
-                 write_docs: bool = True) -> SetupResult:
+                 write_docs: bool = True, force: bool = False,
+                 caps: str = LEAN_CAPS) -> SetupResult:
     """Cursor has no `mcp add` CLI — write ~/.cursor/mcp.json directly."""
     res = SetupResult("cursor")
     cfg = Path.home() / ".cursor" / "mcp.json"
@@ -345,17 +445,25 @@ def setup_cursor(binary: str, dry_run: bool = False,
             res.notes.append("~/.cursor/mcp.json is not valid JSON; refusing to overwrite")
             return res
     servers = existing.setdefault("mcpServers", {})
-    if servers.get("vibatchium", {}).get("command") == binary:
+    entry = servers.get("vibatchium", {})
+    registered = entry.get("command") == binary
+    res.caps = caps
+    if registered and not force:
         res.mcp = "already"
+        res.caps = _cursor_caps(entry)
+        # Same drift note as the CLI-driven agents — report, don't clobber.
+        if res.caps is not None and res.caps != caps:
+            res.notes.append(
+                f"registered with `--caps {res.caps}`; this version installs "
+                f"`--caps {caps}`. Re-register with `vb setup --force`.")
+    elif dry_run:
+        res.mcp = "would-re-register" if registered else "would-register"
     else:
-        if dry_run:
-            res.mcp = "would-register"
-        else:
-            servers["vibatchium"] = {"command": binary,
-                                     "args": ["mcp", "--caps", LEAN_CAPS]}
-            cfg.parent.mkdir(parents=True, exist_ok=True)
-            cfg.write_text(json.dumps(existing, indent=2))
-            res.mcp = "registered"
+        servers["vibatchium"] = {"command": binary,
+                                 "args": ["mcp", "--caps", caps]}
+        cfg.parent.mkdir(parents=True, exist_ok=True)
+        cfg.write_text(json.dumps(existing, indent=2))
+        res.mcp = "re-registered" if registered else "registered"
     # Cursor's MCP server is registered above (that surface IS read globally).
     # Cursor has NO user-scope auto-applied rule mechanism: global rules are
     # plain-text in Settings, and .mdc rules are project-scoped only
@@ -374,8 +482,17 @@ _DETECTORS = {"codex": detect_codex, "claude": detect_claude, "cursor": detect_c
 
 
 def run_setup(agents: list[str] | None = None, dry_run: bool = False,
-              write_docs: bool = True) -> dict:
-    """Top-level entry. `agents=None` → auto-detect all."""
+              write_docs: bool = True, force: bool = False,
+              caps: str | None = None) -> dict:
+    """Top-level entry. `agents=None` → auto-detect all.
+
+    `caps` overrides the cap set the MCP server is registered with (default:
+    LEAN_CAPS). Validated here so a typo fails BEFORE anything is written —
+    an invalid `--caps` only surfaces at MCP-server start otherwise, which is
+    the next agent session, long after the person who typed it walked away.
+    """
+    caps = caps or LEAN_CAPS
+    resolve_caps(caps)          # raises CapsError on an unknown bucket
     binary = resolve_vibatchium_binary()
     detected = {n: _DETECTORS[n]() for n in _SETUPPERS}
     if agents is None:
@@ -385,7 +502,9 @@ def run_setup(agents: list[str] | None = None, dry_run: bool = False,
         if name not in _SETUPPERS:
             results.append(SetupResult(name, notes=[f"unknown agent: {name}"]))
             continue
-        results.append(_SETUPPERS[name](binary, dry_run=dry_run, write_docs=write_docs))
+        results.append(_SETUPPERS[name](binary, dry_run=dry_run,
+                                        write_docs=write_docs,
+                                        force=force, caps=caps))
     return {
         "binary": binary,
         # Whether a bare `vb` is on PATH. The registered MCP command uses the
@@ -394,9 +513,11 @@ def run_setup(agents: list[str] | None = None, dry_run: bool = False,
         # isn't on PATH — surfaced so the CLI can warn + suggest a fix.
         "on_path": shutil.which("vb") is not None,
         "dry_run": dry_run,
+        "force": force,
+        "caps": caps,
         "detected": {n: {"detected": info.detected, "reason": info.reason}
                     for n, info in detected.items()},
-        "results": [{"agent": r.agent, "mcp": r.mcp, "docs": r.docs,
-                     "skill": r.skill, "notes": r.notes}
+        "results": [{"agent": r.agent, "mcp": r.mcp, "caps": r.caps,
+                     "docs": r.docs, "skill": r.skill, "notes": r.notes}
                    for r in results],
     }

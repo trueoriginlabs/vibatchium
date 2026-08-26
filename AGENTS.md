@@ -13,7 +13,19 @@ vb install          # verify: prints core readiness + which optional lanes (fetc
 
 After `setup`, any agent session in any cwd sees vibatchium as a registered MCP server. Restart agent sessions to pick up the registration.
 
-> `vb fetch` and `vb search` (the curl_cffi TLS-fingerprint HTTP lane) need the `[fetch]` extra. A core-only install can browse but `vb fetch` will say which interpreter to add curl_cffi to. On a **uv** venv (no pip): `uv pip install --python <venv>/bin/python curl_cffi`.
+> `vb fetch` and `vb search` (the curl_cffi TLS-fingerprint HTTP lane) need the `[fetch]` extra. A core-only install can browse but `vb fetch` will say which interpreter to add curl_cffi to. On a **uv** venv (no pip): `uv pip install --python <venv>/bin/python curl_cffi`. NB the extra is a property of the **daemon's** venv, not yours — whichever venv spawned the shared daemon decides whether the lane imports.
+
+### Staying current (read this if `vb` came from a git clone)
+
+`git pull` updates the source. Three things downstream of it can keep serving the old world, and only one of them announces itself:
+
+| What's stale | How to see it | Fix |
+|-|-|-|
+| The **binary** — a non-editable install copied the source, so a pull changes nothing | `vb --version` disagrees with `git describe --tags` (no warning otherwise) | `uv pip install -e '.[all]'` |
+| The **daemon** — long-lived, still executing the code it imported at boot | `vb status` → `stale_code: true` (the version compare can't see this: a pull doesn't move `__version__`) | `vb shutdown` — the next `vb` call respawns |
+| The **MCP cap set** — frozen into your agent's config at first registration, so buckets added later (0.19.0's `search`) never appear | `vb setup` reports the drift | `vb setup --force --caps lean,search`, then restart the agent session |
+
+`vb update` does the first two automatically and refreshes the skill/docs; it reports cap drift but won't overwrite a `--caps` you set by hand.
 
 ## TL;DR — the commands you actually need
 

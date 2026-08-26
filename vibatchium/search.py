@@ -85,17 +85,23 @@ _WS_RE = re.compile(r"\s+")
 # it; anything longer is malformed and deserves to be skipped.
 _MAX_INNER = 4000
 
-_ANCHOR_RE = re.compile(r"<a\b([^>]*)>(.{0,%d}?)</a>" % _MAX_INNER, re.S | re.I)
-_H2_RE = re.compile(r"<h2\b[^>]*>(.{0,%d}?)</h2>" % _MAX_INNER, re.S | re.I)
+# The lazy bounded repeat every inner-span capture below shares. Spliced in by
+# concatenation rather than an f-string: these patterns are dense with literal
+# regex braces, and doubling each one to satisfy f-string escaping would make
+# them harder to read — and to keep correct — than the bound is to inline.
+_INNER = "(." + "{0," + str(_MAX_INNER) + "}?)"
+
+_ANCHOR_RE = re.compile(r"<a\b([^>]*)>" + _INNER + r"</a>", re.S | re.I)
+_H2_RE = re.compile(r"<h2\b[^>]*>" + _INNER + r"</h2>", re.S | re.I)
 _DDG_SNIPPET_RE = re.compile(
-    r"<a\b[^>]*class=[\"']result__snippet[\"'][^>]*>(.{0,%d}?)</a>" % _MAX_INNER,
+    r"<a\b[^>]*class=[\"']result__snippet[\"'][^>]*>" + _INNER + r"</a>",
     re.S | re.I)
 _LITE_SNIPPET_RE = re.compile(
-    r"<td\b[^>]*class=[\"']result-snippet[\"'][^>]*>(.{0,%d}?)</td>" % _MAX_INNER,
+    r"<td\b[^>]*class=[\"']result-snippet[\"'][^>]*>" + _INNER + r"</td>",
     re.S | re.I)
 _BING_SNIPPET_RE = re.compile(
-    r"<p\b[^>]*class=[\"'][^\"']*b_lineclamp[^\"']*[\"'][^>]*>(.{0,%d}?)</p>"
-    % _MAX_INNER, re.S | re.I)
+    r"<p\b[^>]*class=[\"'][^\"']*b_lineclamp[^\"']*[\"'][^>]*>"
+    + _INNER + r"</p>", re.S | re.I)
 
 #: Hosts that belong to the engines themselves. A result URL still pointing at
 #: one of these is a redirector or an ad shim we failed to unwrap — emitting it

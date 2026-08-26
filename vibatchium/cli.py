@@ -1104,23 +1104,40 @@ def verify_url_cli(ctx, url, url_flag, check_http, timeout_ms):
               help="Dry-run: show what would change, write nothing.")
 @click.option("--no-docs", is_flag=True,
               help="Skip writing global AGENTS.md / CLAUDE.md blocks; only register MCP.")
+@click.option("--force", is_flag=True,
+              help="Re-register the MCP server even if one exists (picks up new "
+                   "cap buckets; overwrites a hand-edited --caps).")
+@click.option("--caps", "caps", default=None,
+              help="Cap buckets for the MCP server (default: the lean profile). "
+                   "e.g. `lean,search` to expose `vb search` as a tool, or `all`.")
 @click.pass_context
-def setup(ctx, agents, check, no_docs):
+def setup(ctx, agents, check, no_docs, force, caps):
     """Wire vibatchium into installed agent CLIs (Codex, Claude Code, Cursor).
 
     Registers vibatchium as an MCP server and writes a small pointer block in
     each agent's global docs so any future agent session knows vibatchium is
     available. Idempotent — safe to re-run.
 
+    An EXISTING MCP registration is left alone unless `--force`: its `--caps`
+    string is frozen at first registration, so a re-run can't silently narrow a
+    surface you widened by hand. The trade-off is that new cap buckets (0.19.0
+    added `search`) never reach an established registration on their own —
+    `vb setup` reports the drift and `--force` applies it.
+
     \b
-    vb setup              # auto-detect and wire everything
-    vb setup --check      # dry-run; show what would change
+    vb setup                          # auto-detect and wire everything
+    vb setup --check                  # dry-run; show what would change
     vb setup --agent codex --agent claude
-    vb setup --no-docs    # only MCP, skip global docs blocks
+    vb setup --no-docs                # only MCP, skip global docs blocks
+    vb setup --force --caps lean,search   # expose `vb search` as an MCP tool
     """
     from .setup_cmd import run_setup
-    result = run_setup(list(agents) or None, dry_run=check,
-                      write_docs=not no_docs)
+    from .caps import CapsError
+    try:
+        result = run_setup(list(agents) or None, dry_run=check,
+                          write_docs=not no_docs, force=force, caps=caps)
+    except CapsError as e:
+        raise click.BadParameter(str(e), param_hint="--caps") from e
     if ctx.obj["json"]:
         click.echo(json.dumps(result, indent=2))
         return
@@ -1140,15 +1157,19 @@ def setup(ctx, agents, check, no_docs):
         mark = "✓" if info["detected"] else "·"
         click.echo(f"  {mark} {name:8s} {info['reason']}")
     click.echo()
+    click.echo(f"caps: {result.get('caps')}")
+    click.echo()
     click.echo("results:")
     for r in result["results"]:
-        click.echo(f"  {r['agent']:8s}  mcp={r['mcp']:14s} docs={r['docs']:10s} "
+        click.echo(f"  {r['agent']:8s}  mcp={r['mcp']:17s} docs={r['docs']:10s} "
                    f"skill={r.get('skill', 'skipped')}")
         for note in r["notes"]:
             click.echo(f"      · {note}")
-    if not check and any(r["mcp"] == "registered" for r in result["results"]):
+    if not check and any(r["mcp"] in ("registered", "re-registered")
+                         for r in result["results"]):
         click.echo()
-        click.echo("Restart any agent CLI sessions to pick up the new MCP server.")
+        click.echo("Restart any agent CLI sessions to pick up the new MCP server "
+                   "— the tool list is read once, at session start.")
 
 
 @cli.command()
@@ -1156,8 +1177,10 @@ def setup(ctx, agents, check, no_docs):
               help="Install a specific version (e.g. 0.6.2). Default: latest.")
 @click.option("--no-restart", is_flag=True,
               help="Upgrade only; don't stop the running daemon.")
+@click.option("--no-setup", is_flag=True,
+              help="Skip refreshing the agent skill / docs blocks after upgrading.")
 @click.pass_context
-def update(ctx, version, no_restart):
+def update(ctx, version, no_restart, no_setup):
     """Upgrade vibatchium, then restart the daemon.
 
     Detects a pipx install (`pipx upgrade` / `pipx install --force`), a
@@ -1170,6 +1193,7 @@ def update(ctx, version, no_restart):
     vb update                  # latest from PyPI
     vb update --version 0.6.2  # pin a version
     vb update --no-restart     # upgrade only; bounce the daemon yourself
+    vb update --no-setup       # don't refresh the agent skill / docs blocks
     """
     target = f"vibatchium=={version}" if version else "vibatchium (latest)"
     click.echo(f"updating {target} …", err=True)
@@ -1179,25 +1203,79 @@ def update(ctx, version, no_restart):
     if rc != 0:
         click.echo(f"update failed (rc={rc})", err=True)
         sys.exit(rc)
-    # On an editable tree nothing was installed, so bouncing the daemon would
-    # just drop live sessions for no gain — skip the restart there.
-    if _is_editable_install():
-        click.echo("editable install — daemon left running ("
-                   "`git pull` already updated the code on disk; bounce with "
-                   "`vb shutdown` if a daemon is serving older code).", err=True)
-        return
     if not no_restart:
-        try:
-            if daemon_is_running():
-                call("shutdown", auto_spawn=False)
-                click.echo("daemon stopped — the next `vb` command starts the "
-                           "new version.", err=True)
-            else:
-                click.echo("daemon not running — nothing to restart.", err=True)
-        except Exception as exc:  # noqa: BLE001
-            click.echo(f"(could not stop daemon: {exc}; run `vb shutdown` "
-                       f"manually)", err=True)
+        _bounce_daemon_for_update(editable=_is_editable_install())
+    # The skill / docs blocks are generated CONTENT, not config: they describe
+    # the verbs this version ships, so an upgrade that leaves them untouched
+    # ships new features an agent is never told about. That was the actual
+    # 0.19.0 failure — `vb search` existed and no installed agent knew it did.
+    # MCP registration is deliberately NOT forced here (see run_setup): drift is
+    # reported, and applying it stays an explicit `vb setup --force`.
+    if not no_setup:
+        _refresh_agent_integration()
     click.echo("updated — confirm with `vb --version`.")
+
+
+def _bounce_daemon_for_update(*, editable: bool) -> None:
+    """Stop the running daemon so the next command loads the new code.
+
+    On an EDITABLE tree `vb update` installs nothing, so the old behaviour was
+    to skip the bounce entirely and print a hint. That reasoning holds only if
+    the source is unchanged — but the whole point of an editable install is that
+    it changes under you (`git pull`), and __version__ usually doesn't move with
+    it. So: bounce when the daemon is provably older than the source on disk,
+    stay hands-off when it isn't. A proven-stale bounce is strictly more
+    conservative than the unconditional bounce a released install already gets.
+    """
+    try:
+        if not daemon_is_running():
+            click.echo("daemon not running — nothing to restart.", err=True)
+            return
+        if editable:
+            try:
+                st = call("status", auto_spawn=False)
+            except Exception:  # noqa: BLE001
+                st = {}
+            if not _daemon_code_is_stale(st.get("started_at"), st.get("source")):
+                click.echo("editable install — daemon is already running the "
+                           "current source; left alone.", err=True)
+                return
+            click.echo("editable install — daemon predates the source on disk; "
+                       "bouncing it.", err=True)
+        call("shutdown", auto_spawn=False)
+        click.echo("daemon stopped — the next `vb` command starts the "
+                   "new version.", err=True)
+    except Exception as exc:  # noqa: BLE001
+        click.echo(f"(could not stop daemon: {exc}; run `vb shutdown` "
+                   f"manually)", err=True)
+
+
+def _refresh_agent_integration() -> None:
+    """Rewrite the agent skill + docs blocks to match the version now installed.
+
+    Best-effort and non-fatal: a failure here must never make `vb update` look
+    like it failed, because the package upgrade — the thing actually asked for —
+    already succeeded by this point.
+    """
+    try:
+        from .setup_cmd import run_setup
+        res = run_setup()
+    except Exception as exc:  # noqa: BLE001
+        click.echo(f"(agent docs not refreshed: {exc}; run `vb setup`)", err=True)
+        return
+    changed = [r for r in res["results"]
+               if r["docs"] in ("created", "updated")
+               or r.get("skill") in ("created", "updated")]
+    for r in changed:
+        click.echo(f"refreshed {r['agent']} integration "
+                   f"(docs={r['docs']}, skill={r.get('skill')})", err=True)
+    # Cap drift is the one thing the refresh cannot fix on its own.
+    for r in res["results"]:
+        for note in r["notes"]:
+            if "--caps" in note:
+                click.echo(f"[!] {r['agent']}: {note}", err=True)
+    if changed:
+        click.echo("restart any agent CLI sessions to pick this up.", err=True)
 
 
 @cli.command()
@@ -1229,6 +1307,7 @@ def status(ctx):
             "client_version": __version__,
             "daemon_version": None,
             "version_mismatch": False,
+            "stale_code": False,
         }
     else:
         result = call("status")
@@ -1238,11 +1317,25 @@ def status(ctx):
         result["version_mismatch"] = bool(
             result["daemon_version"]
             and result["daemon_version"] != __version__)
+        # 0.19.1: the version compare only fires when a RELEASE boundary was
+        # crossed. On a git checkout (`git pull` + editable install) the source
+        # changes constantly while __version__ sits still, so that check reports
+        # a clean bill of health for a daemon executing week-old code. Compare
+        # the daemon's boot stamp against the newest source mtime instead — that
+        # is the question actually being asked ("is it running what's on disk?").
+        result["stale_code"] = _daemon_code_is_stale(
+            result.get("started_at"), result.get("source"))
         if result["version_mismatch"] and not ctx.obj["json"]:
             click.echo(
                 f"⚠ daemon is running {result['daemon_version']} but the CLI is "
                 f"{__version__} — run `vb update` (or `vb shutdown`) so the next "
                 f"command loads the new version.", err=True)
+        elif result["stale_code"] and not ctx.obj["json"]:
+            click.echo(
+                "⚠ daemon booted before the current source was written — it is "
+                "serving OLDER code than what is on disk (same version string, "
+                "so the version check can't see it). Run `vb shutdown`; the next "
+                "`vb` command respawns on the new code.", err=True)
         # 0.7.0: surface self-heal activity for the active session.
         if not ctx.obj["json"] and result.get("recovered"):
             import time as _t
@@ -4256,6 +4349,58 @@ def _is_editable_install() -> bool:
         return bool(durl and '"editable":true' in durl.replace(" ", ""))
     except Exception:  # noqa: BLE001
         return False
+
+
+def _newest_source_mtime(root: str | None = None) -> float | None:
+    """Newest mtime across the package's .py files, or None if unreadable.
+
+    __pycache__ is skipped: a .pyc is written when the daemon IMPORTS a module,
+    so including it would stamp the tree with the daemon's own boot time and
+    make every daemon look permanently fresh — the bug this function exists to
+    avoid. Only hand-written source counts as "what is on disk".
+    """
+    base = Path(root) if root else Path(__file__).resolve().parent
+    try:
+        newest = 0.0
+        for f in base.rglob("*.py"):
+            if "__pycache__" in f.parts:
+                continue
+            try:
+                newest = max(newest, f.stat().st_mtime)
+            except OSError:
+                continue
+        return newest or None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _daemon_code_is_stale(started_at: float | None,
+                          source: str | None = None) -> bool:
+    """True when the daemon booted BEFORE the newest source edit on disk.
+
+    Only meaningful for a checkout you actually edit (editable install / git
+    clone). For a released install the source is immutable after install, so
+    this can't fire and the version compare stays the right signal.
+
+    Deliberately conservative: an older daemon that lacks `started_at`, an
+    unreadable tree, or a daemon serving a DIFFERENT checkout than this client
+    all return False. A false "you're stale" costs a needless bounce and drops
+    live sessions; staying quiet costs one confused user who re-runs `vb
+    status` — so this only speaks when it is sure.
+    """
+    if not started_at or not _is_editable_install():
+        return False
+    # A daemon spawned from another venv's checkout is not answerable to OUR
+    # source tree; comparing the two would be comparing unrelated timelines.
+    here = str(Path(__file__).resolve().parent)
+    if source and source != here:
+        return False
+    newest = _newest_source_mtime(source or here)
+    if newest is None:
+        return False
+    # 2s slack absorbs filesystem timestamp granularity and the gap between a
+    # write landing and the daemon finishing its imports.
+    return newest > (started_at + 2.0)
 
 
 def _pkg_install_cmd(pkg: str) -> str:

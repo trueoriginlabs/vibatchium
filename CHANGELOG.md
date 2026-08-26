@@ -4,6 +4,62 @@ All notable changes to vibatchium are documented here. Versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Until 1.0,
 minor bumps may include breaking changes; we'll always call them out here.
 
+## [0.19.1] — 2026-08-26
+
+### fix: an upgrade that never reaches the agent isn't an upgrade
+
+0.19.0 shipped `vb search` and, for anyone already set up, nothing changed.
+Three separate mechanisms each held a stale copy of "what vibatchium can do",
+and none of them said so.
+
+**The daemon can serve old code while reporting the right version.** The skew
+check compares the daemon's `__version__` against the CLI's, which only differs
+across a RELEASE boundary. On a git checkout — `git pull` plus an editable
+install, which is how most people run from source — the code changes constantly
+and `__version__` sits still, so the check reported a clean bill of health for a
+daemon executing week-old code. `status` now also reports `started_at`,
+`source` and `python`, and `vb status` compares the boot stamp against the
+newest source mtime: `stale_code: true` is the case the version compare
+structurally cannot see. `__pycache__` is excluded from that scan — a `.pyc` is
+written when the daemon imports a module, so counting it would stamp the tree
+with the daemon's own boot time and make every daemon look permanently fresh.
+
+`vb update` on an editable tree used to skip the daemon bounce entirely, on the
+reasoning that nothing was installed so a restart would drop live sessions for
+no gain. That holds only while the source is unchanged, which is precisely what
+an editable install does not guarantee. It now bounces when the daemon is
+*provably* older than the source and stays hands-off when it isn't — strictly
+more conservative than the unconditional bounce a released install already got.
+
+**The MCP cap set is frozen at first registration.** `vb setup` writes
+`--caps <lean>` into the agent's config once; `search` is a new bucket, so no
+amount of upgrading makes it appear. A re-run couldn't fix it either, because
+re-running deliberately leaves an existing registration alone — and it should,
+since `--caps all` is a common hand-customisation and silently narrowing it
+would remove tools from someone's running session. So the drift is now
+*reported* (with the exact command), and `vb setup --force` applies it. New
+`--caps` flag sets the bucket list; an unknown bucket is rejected before
+anything is written, rather than at the next agent session.
+
+**The skill file is generated content, not config.** `~/.claude/skills/vibatchium/SKILL.md`
+described the verbs of whatever version last ran `vb setup`, and `vb update`
+never rewrote it — so an agent kept spending its capped WebSearch budget next to
+an unmetered `vb search` it had never heard of. `vb update` now refreshes the
+skill and docs blocks (`--no-setup` opts out), and the skill documents `search`:
+the engine ladder, `attempts` meaning *walled* rather than *empty*, per-IP rate
+limiting, and why the MCP tool may be absent even when the CLI verb works.
+
+### chore: unbreak CI lint
+
+`search.py` shipped in 0.19.0 with five `UP031` violations (percent-format in
+the SERP regexes), and CI installs an unpinned `ruff` — so the lint job was red
+on master independently of anything here. Rewritten as concatenation rather than
+f-strings, because those patterns are dense with literal regex braces and
+doubling every one to satisfy f-string escaping costs more readability than the
+bound does inline. The compiled patterns are byte-identical; nothing about
+matching changed.
+
+
 ## [0.19.0] — 2026-08-25
 
 ### feat: `vb search` — the discovery half of a research loop
