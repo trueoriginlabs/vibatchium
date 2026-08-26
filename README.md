@@ -45,25 +45,28 @@ vb research --target https://example.com \          # parallel fan-out, N intent
   --intent "pricing model" --intent "customers" --intent "tech stack"
 ```
 
-**Status:** active development, alpha. **1,061 tests** green in CI (Linux, Python 3.11–3.13). Apache-2.0 (AGPL only via the opt-in `nodriver` extra).
+**Status:** active development, alpha. **1,195 tests** green in CI (Linux, Python 3.11–3.13). Apache-2.0 (AGPL only via the opt-in `nodriver` extra).
 
 <sub>Detector scores quoted below (bot.sannysoft, CreepJS, Cloudflare cold-launch) are **manual observations, not CI-asserted** — no test in the suite gates on them, and they are only as current as the last hand-run. The generated block under [Measured scores](#measured-scores) is the one to trust; it is empty until someone runs it.</sub>
 
 ## Updating
 
 ```bash
-vb update                  # upgrade to the latest PyPI release + restart the daemon
+vb update                  # upgrade + bounce the daemon + refresh the agent skill
 vb update --version 0.19.0   # or pin a specific version
 ```
 
 `vb update` detects how vibatchium was installed (pipx, `uv tool install`,
-a pip-less uv venv, or pip with a PEP-668 `--break-system-packages` fallback)
-and then **stops the running daemon** so the next command loads the new code.
+a pip-less uv venv, or pip with a PEP-668 `--break-system-packages` fallback),
+**stops the running daemon** so the next command loads the new code, and
+**rewrites the agent skill / docs blocks** so a coding agent is actually told
+about the verbs the new version ships (`--no-restart` / `--no-setup` opt out).
 Manual equivalent:
 
 ```bash
 pipx upgrade vibatchium    # or: uv tool upgrade vibatchium / pip install -U vibatchium
 vb shutdown                # bounce the daemon — it serves old code until you do
+vb setup                   # refresh the agent skill + docs
 vb --version               # confirm
 ```
 
@@ -71,6 +74,38 @@ vb --version               # confirm
 > serving the **old** version until it's bounced. `vb update` does it for you;
 > if you upgrade by hand, run `vb shutdown` (the next `vb` call auto-respawns the
 > new version). Optional features upgrade via `pipx install 'vibatchium[all]' --force`.
+
+### Running from a git checkout
+
+`git pull` updates the **source**; whether it updates what `vb` actually runs
+depends on the install, and two of the three ways it can fail are silent:
+
+```bash
+vb --version && git describe --tags   # do they agree? if not, the install COPIED
+                                      # the source — reinstall editable:
+                                      #   uv pip install -e '.[all]'
+vb status                             # warns when the daemon predates the source
+                                      # ("stale_code") — bounce with `vb shutdown`
+```
+
+A version-string compare cannot catch a checkout: `git pull` changes the code
+without changing `__version__`. `vb status` compares the daemon's boot time
+against the newest source file instead, and `vb update` bounces the daemon only
+when it is provably behind — so it never drops live sessions for nothing.
+
+### New cap buckets need a re-register
+
+The MCP server's `--caps` list is frozen into your agent's config at first
+registration, so a bucket added by a later release (0.19.0 added `search`) stays
+invisible no matter how many times you upgrade. Re-running `vb setup` reports
+the drift but deliberately won't overwrite a `--caps` you set by hand:
+
+```bash
+vb setup                              # reports any cap drift, changes nothing
+vb setup --force --caps lean,search   # apply it — exposes `vb search` as a tool
+```
+
+Restart the agent session afterwards: the MCP tool list is read once, at start.
 
 ## Why vibatchium
 

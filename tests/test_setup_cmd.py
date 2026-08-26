@@ -13,6 +13,8 @@ import json
 import shutil
 from pathlib import Path
 
+import pytest
+
 
 from vibatchium import setup_cmd
 
@@ -328,3 +330,124 @@ def test_setup_codex_registration_argv_has_separator_and_caps(tmp_path, monkeypa
     assert add == ["/fake/codex", "mcp", "add", "vibatchium", "--",
                    "/opt/vb", "mcp", "--caps", setup_cmd.LEAN_CAPS]
     assert add[add.index("/opt/vb") - 1] == "--"
+
+
+# ─── 0.19.1: --force / --caps re-registration ───────────────────────────
+
+def _fake_run_recorder(calls):
+    def _run(cmd, **kw):
+        calls.append(cmd)
+        class R:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+        return R()
+    return _run
+
+
+def test_registered_caps_parses_caps_from_mcp_get(monkeypatch):
+    class R:
+        returncode = 0
+        stdout = ("vibatchium:\n  Type: stdio\n  Command: /x/vb\n"
+                  "  Args: mcp --caps core,nav,content\n")
+    monkeypatch.setattr(setup_cmd.subprocess, "run", lambda *a, **k: R())
+    assert setup_cmd._registered_caps("claude", "vibatchium") == "core,nav,content"
+
+
+def test_registered_caps_none_when_absent(monkeypatch):
+    class R:
+        returncode = 1
+        stdout = 'No MCP server named "vibatchium".'
+    monkeypatch.setattr(setup_cmd.subprocess, "run", lambda *a, **k: R())
+    assert setup_cmd._registered_caps("claude", "vibatchium") is None
+
+
+def test_setup_claude_leaves_existing_registration_alone(monkeypatch, tmp_path):
+    """A plain re-run must NOT clobber a hand-widened --caps."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(shutil, "which", lambda n: "/usr/bin/claude")
+    monkeypatch.setattr(setup_cmd, "_mcp_already_registered", lambda *a: True)
+    monkeypatch.setattr(setup_cmd, "_registered_caps", lambda *a: "all")
+    calls: list = []
+    monkeypatch.setattr(setup_cmd.subprocess, "run", _fake_run_recorder(calls))
+    res = setup_cmd.setup_claude("/x/vb", write_docs=False)
+    assert res.mcp == "already"
+    assert res.caps == "all"
+    assert not any("add" in c for c in calls), "must not re-register without --force"
+    # ...but it must SAY the caps drifted, naming the fix.
+    assert any("--caps all" in n and "vb setup --force" in n for n in res.notes)
+
+
+def test_setup_claude_force_removes_then_adds_with_caps(monkeypatch, tmp_path):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(shutil, "which", lambda n: "/usr/bin/claude")
+    monkeypatch.setattr(setup_cmd, "_mcp_already_registered", lambda *a: True)
+    monkeypatch.setattr(setup_cmd, "_registered_caps", lambda *a: setup_cmd.LEAN_CAPS)
+    calls: list = []
+    monkeypatch.setattr(setup_cmd.subprocess, "run", _fake_run_recorder(calls))
+    res = setup_cmd.setup_claude("/x/vb", write_docs=False,
+                                 force=True, caps="lean,search")
+    assert res.mcp == "re-registered"
+    assert calls[0][1:3] == ["mcp", "remove"]
+    assert calls[1][1:3] == ["mcp", "add"]
+    assert calls[1][-2:] == ["--caps", "lean,search"]
+
+
+def test_setup_claude_force_dry_run_writes_nothing(monkeypatch, tmp_path):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(shutil, "which", lambda n: "/usr/bin/claude")
+    monkeypatch.setattr(setup_cmd, "_mcp_already_registered", lambda *a: True)
+    monkeypatch.setattr(setup_cmd, "_registered_caps", lambda *a: "lean")
+    calls: list = []
+    monkeypatch.setattr(setup_cmd.subprocess, "run", _fake_run_recorder(calls))
+    res = setup_cmd.setup_claude("/x/vb", write_docs=False, force=True, dry_run=True)
+    assert res.mcp == "would-re-register"
+    assert calls == []
+
+
+def test_setup_cursor_force_rewrites_caps(monkeypatch, tmp_path):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    cfg = tmp_path / ".cursor" / "mcp.json"
+    cfg.parent.mkdir(parents=True)
+    cfg.write_text(json.dumps({"mcpServers": {"vibatchium": {
+        "command": "/x/vb", "args": ["mcp", "--caps", "lean"]}}}))
+    res = setup_cmd.setup_cursor("/x/vb", force=True, caps="lean,search")
+    assert res.mcp == "re-registered"
+    args = json.loads(cfg.read_text())["mcpServers"]["vibatchium"]["args"]
+    assert args[-2:] == ["--caps", "lean,search"]
+
+
+def test_setup_cursor_without_force_reports_drift(monkeypatch, tmp_path):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    cfg = tmp_path / ".cursor" / "mcp.json"
+    cfg.parent.mkdir(parents=True)
+    cfg.write_text(json.dumps({"mcpServers": {"vibatchium": {
+        "command": "/x/vb", "args": ["mcp", "--caps", "lean"]}}}))
+    res = setup_cmd.setup_cursor("/x/vb", caps="lean,search")
+    assert res.mcp == "already"
+    assert any("vb setup --force" in n for n in res.notes)
+    # unchanged on disk
+    args = json.loads(cfg.read_text())["mcpServers"]["vibatchium"]["args"]
+    assert args[-2:] == ["--caps", "lean"]
+
+
+def test_run_setup_rejects_bad_caps_before_writing_anything(monkeypatch, tmp_path):
+    """An invalid --caps must fail HERE, not at the next agent session."""
+    from vibatchium.caps import CapsError
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(setup_cmd, "resolve_vibatchium_binary",
+                        lambda: (_ for _ in ()).throw(
+                            AssertionError("must not get this far")))
+    with pytest.raises(CapsError):
+        setup_cmd.run_setup(["claude"], caps="lean,serach")
+
+
+def test_skill_advertises_search(monkeypatch):
+    """0.19.0 shipped `vb search` and no installed agent was told."""
+    md = setup_cmd._skill_md("/x/vb")
+    assert "vb search" in md
+    assert "--engine" in md and "attempts" in md
+    # The description is the auto-invoke trigger — search must be in it.
+    assert "search" in setup_cmd._SKILL_DESCRIPTION.lower()
+    # And it must say why the search tool may be missing from MCP.
+    assert "vb setup --force --caps lean,search" in md

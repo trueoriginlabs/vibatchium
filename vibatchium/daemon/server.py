@@ -262,6 +262,14 @@ class Daemon:
         # and a monotonic activity stamp the reaper uses to decide idleness.
         self._lock_fd: int | None = None
         self._last_activity: float = time.monotonic()
+        # 0.19.1: WALL-CLOCK boot stamp (not monotonic — it crosses the socket
+        # to a different process, which has its own monotonic origin). This is
+        # the only reliable staleness signal for an EDITABLE install: a
+        # `git pull` changes the source on disk without changing __version__,
+        # so the daemon-vs-client version compare stays False while the daemon
+        # keeps executing the code it imported at boot. Comparing this against
+        # the package's newest source mtime catches exactly that case.
+        self._started_at: float = time.time()
         # ─── plugin state (see vibatchium/plugins/) ──────────────────────
         # _verb_meta: name → VerbSpec for every add_verb-registered verb.
         # _verb_lock_class: name → "session"|"registry"|"unlocked" override
