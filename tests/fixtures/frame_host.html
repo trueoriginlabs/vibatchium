@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>frame host</title></head>
+<body>
+<!--
+  Frames another page, for the vault origin tests (tests/test_secret_*.py).
+
+  Query parameters:
+    src=<url>    an iframe #fr loading that URL (use localhost:<port> vs
+                 127.0.0.1:<port> for two origins on one test server)
+    blank=1      an about:blank iframe #fr whose field #f this page writes in
+    srcdoc=1     an about:srcdoc iframe #fr containing a field #f
+-->
+<p id="lead">Fixture page that embeds another document in an iframe, used to
+check that vault secrets are judged by every frame between the field and the
+top of the page.</p>
+<div id="slot"></div>
+<script>
+(() => {
+  const q = new URLSearchParams(location.search);
+  const fr = document.createElement('iframe');
+  fr.id = 'fr';
+  fr.style.width = '640px'; fr.style.height = '420px';
+  if (q.get('src')) {
+    fr.src = q.get('src');
+  } else if (q.get('srcdoc')) {
+    fr.srcdoc = '<!doctype html><body><input id="f" autocomplete="off"></body>';
+  }
+  document.getElementById('slot').appendChild(fr);
+  if (q.get('blank')) {
+    const d = fr.contentDocument;
+    d.open();
+    d.write('<!doctype html><body><input id="f" autocomplete="off"></body>');
+    d.close();
+  }
+})();
+</script>
+</body>
+</html>

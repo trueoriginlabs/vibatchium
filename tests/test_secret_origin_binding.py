@@ -5,8 +5,10 @@ value and wrote it into whatever element was targeted on whatever page was open
 — so a prompt-injected agent could type a stored credential into evil.com and
 read it back. Now the value is only written into a document whose origin
 belongs to the secret's site (judged by the frame that OWNS the field), the
-check runs before the secret is resolved, and a field swapped / focus
-redirected mid-fill is cleared and refused.
+check runs before the secret is resolved, every frame above the field must be
+an allowed origin too, and a field swapped mid-write is cleared and refused.
+The read-back / caller-JS guards around a live secret are in
+test_secret_guards.py.
 
 Three layers here:
   * pure unit tests of the matching rules (no daemon);
@@ -17,12 +19,18 @@ from __future__ import annotations
 
 import asyncio
 import json
-import uuid
 
 import pytest
 
 from vibatchium import secrets as S
 from vibatchium.client import call
+
+from ._secret_pages import (
+    IN_EVIL, IN_FRAME, SENTINEL, go_form, go_frame_host, page_url, port_of,
+    probe, secret_site,
+)
+
+__all__ = ["secret_site"]   # pytest fixture, used by parameter name
 
 
 # ─── host matching ──────────────────────────────────────────────────────────
@@ -220,15 +228,40 @@ def test_split_secret_reference_does_not_touch_the_vault(monkeypatch):
 def test_agent_surface_violation():
     assert S.agent_surface_violation(
         "fill", {"use_secret": "a:b", "allow_cross_origin": True})
-    assert S.agent_surface_violation(
-        "secret_set", {"site": "github.com", "key": "origins", "value": "https://evil.com"})
-    assert S.agent_surface_violation(
-        "secret_set", {"site": "github.com", "key": " Origins ", "value": "x"})
     assert S.agent_surface_violation("fill", {"use_secret": "a:b"}) is None
     assert S.agent_surface_violation(
         "fill", {"use_secret": "a:b", "allow_cross_origin": False}) is None
-    assert S.agent_surface_violation(
-        "secret_set", {"site": "s", "key": "password", "value": "x"}) is None
+    assert S.agent_surface_violation("fill", {"target": "#q", "text": "x"}) is None
+
+
+@pytest.mark.parametrize("cmd,args", [
+    ("secret_init", {}),
+    ("secret_init", {"force": True}),
+    ("secret_set", {"site": "github.com", "key": "origins", "value": "https://evil.com"}),
+    ("secret_set", {"site": "github.com", "key": " Origins ", "value": "x"}),
+    ("secret_set", {"site": "s", "key": "password", "value": "x"}),     # any key
+    ("secret_set", {"site": "s", "key": "email-poll", "value": "imap://evil"}),
+    ("secret_delete", {"site": "github.com"}),
+    ("secret_delete", {"site": "github.com", "key": "origins"}),
+    ("secret_totp", {"site": "github.com"}),
+    ("wait_email_code", {"site": "github.com"}),
+])
+def test_operator_only_verbs_are_refused_on_agent_surfaces(cmd, args):
+    """Every vault mutation, and every verb that hands back a code without the
+    origin check `fill --use-secret` applies, is operator-only."""
+    msg = S.agent_surface_violation(cmd, args)
+    assert msg and "operator-only" in msg
+    assert cmd in S.OPERATOR_ONLY_VERBS
+
+
+@pytest.mark.parametrize("cmd,args", [
+    ("secret_list", {}),
+    ("secret_list", {"site": "github.com"}),
+    ("fill", {"target": "#f", "use_secret": "github.com:totp"}),
+    ("go", {"url": "https://github.com/login"}),
+])
+def test_agent_surface_allows_masked_and_bound_verbs(cmd, args):
+    assert S.agent_surface_violation(cmd, args) is None
 
 
 def _mcp_call(monkeypatch, name, arguments):
@@ -252,10 +285,80 @@ def test_mcp_refuses_allow_cross_origin(monkeypatch):
                                           getattr(out, "content", out)])
 
 
-def test_mcp_refuses_rewriting_an_origins_policy(monkeypatch):
-    out, seen = _mcp_call(monkeypatch, "secret_set", {
-        "site": "github.com", "key": "origins", "value": "https://evil.com"})
-    assert seen == []
+@pytest.mark.parametrize("name,arguments", [
+    ("secret_set", {"site": "github.com", "key": "origins", "value": "https://evil.com"}),
+    ("secret_set", {"site": "github.com", "key": "password", "value": "x"}),
+    ("secret_delete", {"site": "github.com"}),
+    ("secret_init", {}),
+    ("secret_totp", {"site": "github.com"}),
+    ("wait_email_code", {"site": "github.com"}),
+])
+def test_mcp_refuses_operator_only_verbs(monkeypatch, name, arguments):
+    """Whatever the cap set, MCP's call_tool refuses these before the daemon
+    (with _ACTIVE_CAPS=None every tool is reachable, so the refusal must come
+    from agent_surface_violation, not the cap filter)."""
+    from vibatchium import mcp_server as M
+    tool_names = {t[0] for t in M.TOOLS}
+    if name not in tool_names:
+        pytest.skip(f"{name} is not an MCP tool")
+    out, seen = _mcp_call(monkeypatch, name, arguments)
+    assert seen == [], "the call reached the daemon"
+    assert "operator-only" in json.dumps([getattr(b, "text", "") for b in
+                                          getattr(out, "content", out)])
+
+
+def test_mcp_call_tool_consults_the_surface_guard_on_every_call(monkeypatch):
+    """call_tool must hand EVERY call (cmd + mapped args) to
+    agent_surface_violation, not only a hard-coded list."""
+    from vibatchium import secrets as secrets_mod
+    seen_checks = []
+    real = secrets_mod.agent_surface_violation
+
+    def spy(cmd, args):
+        seen_checks.append(cmd)
+        return real(cmd, args)
+    monkeypatch.setattr(secrets_mod, "agent_surface_violation", spy)
+    for name, arguments in [("go", {"url": "https://example.com"}),
+                            ("title", {}),
+                            ("fill", {"target": "#f", "text": "x"})]:
+        _mcp_call(monkeypatch, name, arguments)
+    assert seen_checks == ["go", "title", "fill"]
+
+
+def _rest_client(monkeypatch, caps):
+    pytest.importorskip("fastapi")
+    pytest.importorskip("httpx")
+    from fastapi.testclient import TestClient
+    from vibatchium import client as C
+    from vibatchium import rest as R
+    seen = []
+    # build_app imports these from vibatchium.client when it builds the app.
+    monkeypatch.setattr(C, "call",
+                        lambda cmd, args=None, **kw: seen.append((cmd, args)) or {"ok": True})
+    monkeypatch.setattr(C, "daemon_is_running", lambda: True)
+    app = R.build_app(require_auth=False, caps=caps)
+    return TestClient(app), seen
+
+
+def test_restricted_rest_refuses_operator_only_verbs(monkeypatch):
+    """A caps-restricted REST shim serves untrusted clients: same refusals as
+    MCP, consulted on every call, even when the verb's bucket is granted."""
+    from vibatchium import secrets as secrets_mod
+    checks = []
+    real = secrets_mod.agent_surface_violation
+    monkeypatch.setattr(secrets_mod, "agent_surface_violation",
+                        lambda cmd, args: checks.append(cmd) or real(cmd, args))
+    client, seen = _rest_client(monkeypatch, "nav,secrets")
+    for verb, body in [("secret_set", {"site": "s", "key": "password", "value": "x"}),
+                       ("secret_totp", {"site": "s"}),
+                       ("secret_delete", {"site": "s"})]:
+        r = client.post(f"/v1/{verb}", json=body)
+        assert r.status_code == 403, (verb, r.status_code, r.text)
+        assert "operator-only" in r.text
+    r = client.post("/v1/title", json={})
+    assert r.status_code == 200, r.text
+    assert [c for c, _ in seen] == ["title"]
+    assert checks == ["secret_set", "secret_totp", "secret_delete", "title"]
 
 
 def test_mcp_fill_schema_does_not_offer_the_escape_hatch():
@@ -298,107 +401,76 @@ def test_safety_default_is_one_env_read(monkeypatch, env, expected):
 
 
 # ─── integration: the daemon refuses / allows real fills ────────────────────
-
-FIELD = '<input id="f" autocomplete="off">'
-SENTINEL = "ORIGIN-BOUND-SENTINEL-42"
-
-
-def _build(markup):
-    call("eval", {"expr": f"document.body.innerHTML = {markup!r}; 1"})
+#
+# Pages come from static fixtures configured by the query string, and what
+# landed is read through the page's own probe (tests/_secret_pages.py): since
+# 0.19.4 a secret fill refuses a document the caller ran `eval` in, and
+# `value` / `eval` are refused while the secret is in a field.
 
 
-def _val(expr="document.getElementById('f').value"):
-    return call("eval", {"expr": expr})["value"]
-
-
-@pytest.fixture
-def secret_site():
-    """Seed vault entries; delete every site the test created on teardown."""
-    made: list[str] = []
-
-    def make(site=None, **kv):
-        site = site or f"origin-test-{uuid.uuid4().hex[:8]}.example"
-        for k, v in kv.items():
-            call("secret_set", {"site": site, "key": k.replace("_", "-"), "value": v})
-        made.append(site)
-        return site
-
-    yield make
-    for site in made:
-        try:
-            call("secret_delete", {"site": site})
-        except Exception:  # noqa: BLE001
-            pass
-
-
-@pytest.fixture
-def blank(local_server):
-    call("go", {"url": f"{local_server}/blank.html"})
-    return local_server
-
-
-def test_fill_refused_on_a_foreign_origin(blank, secret_site):
+def test_fill_refused_on_a_foreign_origin(local_server, secret_site):
     """The core bug: a github.com secret must not go into a 127.0.0.1 page."""
     site = secret_site(password=SENTINEL)
-    _build(FIELD)
+    go_form(local_server)
     with pytest.raises(Exception, match="refusing to fill") as ei:
         call("fill", {"target": "#f", "use_secret": f"{site}:password"})
     assert SENTINEL not in str(ei.value)
     assert "127.0.0.1" in str(ei.value)          # names the page's origin
-    assert _val() == ""                           # nothing written
-    assert _val("document.getElementById('f').hasAttribute('data-vb-secret')") is False
+    snap = probe()
+    assert snap["vals"]["f"] == ""               # nothing written
+    assert snap["sec"] is False                  # not even masked
 
 
-def test_origin_is_checked_before_the_secret_is_resolved(blank, secret_site):
+def test_origin_is_checked_before_the_secret_is_resolved(local_server, secret_site):
     """A broken totp-seed would raise a base32 error IF it were resolved; the
     origin refusal must win — proving nothing was decoded/computed first. Same
     for a key that doesn't exist (no existence oracle off-site)."""
     site = secret_site(totp_seed="!!!not-base32!!!")
-    _build(FIELD)
+    go_form(local_server)
     with pytest.raises(Exception, match="refusing to fill"):
         call("fill", {"target": "#f", "use_secret": f"{site}:totp"})
     with pytest.raises(Exception, match="refusing to fill"):
         call("fill", {"target": "#f", "use_secret": f"{site}:no-such-key"})
 
 
-def test_fill_allowed_when_site_is_the_page_host(blank, secret_site):
+def test_fill_allowed_when_site_is_the_page_host(local_server, secret_site):
     site = secret_site(site="127.0.0.1", password=SENTINEL)
-    _build(FIELD)
+    go_form(local_server)
     res = call("fill", {"target": "#f", "use_secret": f"{site}:password"})
     assert res["origin_check"] == "site"
-    assert res["origin"] == blank                 # http://127.0.0.1:<port>
+    assert res["origin"] == local_server         # http://127.0.0.1:<port>
     assert SENTINEL not in json.dumps(res)
-    assert _val() == SENTINEL
+    assert probe()["vals"]["f"] == SENTINEL
 
 
-def test_totp_is_origin_bound_too(blank, secret_site):
+def test_totp_is_origin_bound_too(local_server, secret_site):
     seed = "JBSWY3DPEHPK3PXP"
     foreign = secret_site(totp_seed=seed)
-    _build(FIELD)
+    go_form(local_server)
     with pytest.raises(Exception, match="refusing to fill"):
         call("fill", {"target": "#f", "use_secret": f"{foreign}:totp"})
-    assert _val() == ""
+    assert probe()["vals"]["f"] == ""
     local = secret_site(site="127.0.0.1", totp_seed=seed)
     res = call("fill", {"target": "#f", "use_secret": f"{local}:totp"})
     assert res["origin_check"] == "site"
-    code = _val()
+    code = probe()["vals"]["f"]
     assert len(code) == 6 and code.isdigit()
 
 
-def test_origins_key_allows_and_restricts(blank, secret_site, local_server):
+def test_origins_key_allows_and_restricts(local_server, secret_site):
     site = secret_site(password=SENTINEL, origins=local_server)
-    _build(FIELD)
+    go_form(local_server)
     res = call("fill", {"target": "#f", "use_secret": f"{site}:password"})
     assert res["origin_check"] == "origins"
-    assert _val() == SENTINEL
+    assert probe()["vals"]["f"] == SENTINEL
     # An origins list that names a DIFFERENT port refuses this page.
-    port = int(local_server.rsplit(":", 1)[1])
+    port = int(port_of(local_server))
     other = secret_site(site="127.0.0.1", password=SENTINEL,
                         origins=f"http://127.0.0.1:{port + 1}")
-    _build(FIELD)
+    go_form(local_server)
     with pytest.raises(Exception, match="not in the entry's origins"):
         call("fill", {"target": "#f", "use_secret": f"{other}:password"})
-    assert _val() == ""
+    assert probe()["vals"]["f"] == ""
 
 
 def test_secret_set_validates_an_origins_value(secret_site):
@@ -407,103 +479,107 @@ def test_secret_set_validates_an_origins_value(secret_site):
         call("secret_set", {"site": site, "key": "origins", "value": "http://example.com"})
 
 
-def test_allow_cross_origin_is_an_explicit_bypass(blank, secret_site):
+def test_allow_cross_origin_is_an_explicit_bypass(local_server, secret_site):
     site = secret_site(password=SENTINEL)
-    _build(FIELD)
+    go_form(local_server)
     res = call("fill", {"target": "#f", "use_secret": f"{site}:password",
                         "allow_cross_origin": True})
     assert res["origin_check"] == "bypassed"
     assert res["render_masked"] == "masked"
-    assert _val() == SENTINEL
-
-
-def _iframe_page(local_server, inner_host):
-    """Top page on 127.0.0.1, an iframe on `inner_host` (a different ORIGIN on
-    the same server) containing an input."""
-    port = local_server.rsplit(":", 1)[1]
-    src = f"http://{inner_host}:{port}/simple.html"
-    call("go", {"url": f"{local_server}/blank.html"})
-    call("eval", {"expr": (
-        "new Promise(r => { const f = document.createElement('iframe');"
-        f" f.id = 'fr'; f.src = {src!r}; f.onload = () => r(1);"
-        " document.body.appendChild(f); })")})
-    return "#fr >> internal:control=enter-frame >> #q"
+    assert probe()["vals"]["f"] == SENTINEL
 
 
 def test_iframe_is_judged_by_its_own_origin_not_the_top_page(local_server, secret_site):
-    """The top page is 127.0.0.1 — a 127.0.0.1 secret would pass a page.url
-    check — but the field lives in a localhost frame, so it must be refused.
-    And a localhost secret is allowed INTO that frame."""
-    target = _iframe_page(local_server, "localhost")
+    """Top page on 127.0.0.1, the field in a localhost iframe (two origins on
+    one server). A 127.0.0.1 secret would pass a page.url check, but the field
+    is localhost's, so it's refused. A localhost secret matches the field but
+    the frame is embedded by 127.0.0.1 — refused by the ancestor rule — until
+    the entry's `origins` lists both."""
+    port = port_of(local_server)
+    go_frame_host(local_server, src=page_url(local_server, host="localhost"))
+    target = IN_FRAME + "#f"
     top = secret_site(site="127.0.0.1", password=SENTINEL)
     with pytest.raises(Exception, match="localhost"):
         call("fill", {"target": target, "use_secret": f"{top}:password"})
     inner = secret_site(site="localhost", password=SENTINEL)
-    res = call("fill", {"target": target, "use_secret": f"{inner}:password"})
+    with pytest.raises(Exception, match="embedded by http://127.0.0.1"):
+        call("fill", {"target": target, "use_secret": f"{inner}:password"})
+    assert probe(IN_FRAME)["vals"]["f"] == ""
+    both = secret_site(password=SENTINEL, origins=(
+        f"http://localhost:{port},http://127.0.0.1:{port}"))
+    res = call("fill", {"target": target, "use_secret": f"{both}:password"})
     assert res["origin"].startswith("http://localhost:")
+    assert probe(IN_FRAME)["vals"]["f"] == SENTINEL
 
 
-def test_field_swapped_on_focus_is_cleared_and_refused(blank, secret_site):
-    """The page replaces the input the moment it's focused (so the text lands
-    in a node we never checked or masked). Must refuse and leave no value."""
+def test_login_page_framed_by_a_foreign_origin_is_refused(local_server, secret_site):
+    """The setup for every focus / overlay / navigation game: a foreign top page
+    (localhost) frames the real login page (127.0.0.1). The field's own origin
+    is right, but its embedder isn't — refused, nothing written."""
+    port = port_of(local_server)
+    go_frame_host(local_server, host="localhost", src=page_url(local_server))
     site = secret_site(site="127.0.0.1", password=SENTINEL)
-    _build(FIELD)
-    call("eval", {"expr": (
-        "const el = document.getElementById('f');"
-        "el.addEventListener('focus', () => {"
-        "  const n = document.createElement('input'); n.id = 'f';"
-        "  el.replaceWith(n); n.focus(); }, {once: true}); 1")})
-    with pytest.raises(Exception, match="refusing|detached|replaced|not attached"):
+    with pytest.raises(Exception, match="embedded by http://localhost") as ei:
+        call("fill", {"target": IN_FRAME + "#f", "use_secret": f"{site}:password"})
+    assert SENTINEL not in str(ei.value)
+    snap = probe(IN_FRAME)
+    assert snap["vals"]["f"] == "" and snap["sec"] is False
+
+
+def test_field_swapped_during_the_write_is_cleared_and_refused(local_server, secret_site):
+    """The page replaces the input the moment the value arrives (so it would
+    sit in a node we never checked or masked). Must refuse and leave no value
+    anywhere."""
+    site = secret_site(site="127.0.0.1", password=SENTINEL)
+    go_form(local_server, swap="input")
+    with pytest.raises(Exception, match="refusing|detached|replaced|swapped"):
         call("fill", {"target": "#f", "use_secret": f"{site}:password"})
-    vals = call("eval", {"expr":
-        "JSON.stringify([...document.querySelectorAll('input')].map(i => i.value))"})
-    assert SENTINEL not in vals["value"], "secret left behind in a swapped node"
+    assert SENTINEL not in json.dumps(probe()["inputs"]), \
+        "secret left behind in a swapped node"
 
 
-def _page_with_foreign_iframe(local_server, event):
-    port = local_server.rsplit(":", 1)[1]
-    call("go", {"url": f"{local_server}/blank.html"})
-    call("eval", {"expr": (
-        "new Promise(r => {"
-        " document.body.innerHTML = '<input id=\"f\">';"
-        " const f = document.createElement('iframe'); f.id = 'evil';"
-        f" f.src = 'http://localhost:{port}/simple.html'; f.onload = () => r(1);"
-        " document.body.appendChild(f);"
-        f" document.getElementById('f').addEventListener({event!r},"
-        "   () => { f.focus(); }, {once: true}); })")})
-
-
-def test_focus_redirected_into_a_foreign_iframe_is_refused(local_server, secret_site):
-    """At `beforeinput` — i.e. as the text is being inserted, after Playwright's
-    own focus handling — the page moves focus into a cross-origin iframe, so
-    the text may go to ANOTHER document. Must refuse and clear the field."""
+@pytest.mark.parametrize("events", ["focus", "beforeinput", "blur",
+                                    "focus,beforeinput,blur,input,keydown"])
+def test_focus_moved_into_a_foreign_iframe_cannot_redirect_the_value(
+        local_server, secret_site, events):
+    """The old keyboard-insert fill could be redirected: Playwright focused the
+    field, then inserted text into WHATEVER was focused, so a page that moved
+    focus into a cross-origin iframe in that gap got the value. The write now
+    goes through the pinned node's value setter, with no focus or keyboard
+    involved — the value lands only in the checked field, and the foreign frame
+    (which autofocuses its own field and would receive any typed text) gets
+    nothing."""
     site = secret_site(site="127.0.0.1", password=SENTINEL)
-    _page_with_foreign_iframe(local_server, "beforeinput")
-    with pytest.raises(Exception, match="focus was redirected into a nested frame"):
-        call("fill", {"target": "#f", "use_secret": f"{site}:password"})
-    assert _val() == ""
-
-
-def test_focus_stolen_on_focus_event_is_already_harmless(local_server, secret_site):
-    """Control: a steal on the `focus` event is undone by Playwright's fill,
-    which re-focuses the target before inserting — the value lands in the
-    checked field and the guard (correctly) sees focus on it. Pinned so a
-    Playwright change in that behaviour shows up here."""
-    site = secret_site(site="127.0.0.1", password=SENTINEL)
-    _page_with_foreign_iframe(local_server, "focus")
+    evil = page_url(local_server, host="localhost", autofocus=1)
+    go_form(local_server, evil=evil, steal=events)
+    call("wait_selector", {"selector": IN_EVIL + "#probe"})
     res = call("fill", {"target": "#f", "use_secret": f"{site}:password"})
     assert res["origin_check"] == "site"
-    assert _val() == SENTINEL
+    assert probe()["vals"]["f"] == SENTINEL
+    inner = probe(IN_EVIL)
+    assert SENTINEL not in json.dumps(inner["vals"]), \
+        "the value reached the foreign iframe"
 
 
-def test_same_document_focus_move_is_not_a_false_positive(blank, secret_site):
+def test_same_document_focus_move_is_not_a_false_positive(local_server, secret_site):
     """A login page that auto-advances focus within ITS OWN document (OTP
     boxes, 'next field') is trusted with the value already — must not refuse."""
     site = secret_site(site="127.0.0.1", password=SENTINEL)
-    _build('<input id="f"><input id="g">')
-    call("eval", {"expr": (
-        "document.getElementById('f').addEventListener('input',"
-        " () => document.getElementById('g').focus()); 1")})
+    go_form(local_server, advance=1)
     res = call("fill", {"target": "#f", "use_secret": f"{site}:password"})
     assert res["origin_check"] == "site"
-    assert _val() == SENTINEL
+    snap = probe()
+    assert snap["vals"]["f"] == SENTINEL
+    assert snap["vals"]["g"] == ""
+
+
+def test_control_the_steal_does_redirect_keyboard_text(local_server):
+    """Control for the test above: the same page really does pull KEYBOARD
+    input into the foreign frame (what the old focus + insertText fill did), so
+    the clean result above is the write path's doing, not a dud fixture."""
+    evil = page_url(local_server, host="localhost", autofocus=1)
+    go_form(local_server, evil=evil, steal="beforeinput")
+    call("wait_selector", {"selector": IN_EVIL + "#probe"})
+    call("type", {"target": "#f", "text": "KEYS"})
+    inner = probe(IN_EVIL)
+    assert inner["vals"]["f"], f"steal had no effect on keyboard input: {inner}"

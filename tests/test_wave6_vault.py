@@ -251,8 +251,11 @@ def test_fill_use_secret_resolves_from_vault(local_server):
                              "use_secret": f"{site}:password"})
         # Response should NOT echo the value
         assert sentinel not in json.dumps(res)
-        # But the input should HAVE the value
-        actual = call("value", {"selector": "#q"})["value"]
+        # But the input should HAVE the value. 0.19.4: `value` is refused
+        # while a vault secret is live, so submit the form the way a login
+        # would — the page's own handler copies q's value into #result.
+        call("click", {"target": "#submit"})
+        actual = call("text", {"target": "#result"})["text"]
         assert actual == sentinel
     finally:
         try:
