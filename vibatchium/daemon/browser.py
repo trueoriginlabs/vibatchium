@@ -654,7 +654,13 @@ async def attach_session(cdp_url: str, *, pw: Playwright | None = None) -> Brows
     sess = BrowserSession(pw=pw, context=context, page=page, mode="attach",
                           cdp_url=cdp_url, owns_pw=owns_pw)
     _wire_page_tracking(sess)
-    await _file_guard.install(sess)
+    # No browser-wide file: guard here. Attach drives the USER'S own Chrome,
+    # with their own tabs, so a browser-target interceptor would pause and
+    # police file: pages they open themselves for as long as we're attached
+    # (and outlive us if the daemon died mid-session). Agent surfaces still
+    # refuse file: navigation outright and the CLI checks the URL it is given
+    # (fspolicy.check_nav_url); only file:->file: hops inside a page the
+    # operator opened are left to Chrome.
     return sess
 
 

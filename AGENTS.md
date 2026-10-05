@@ -624,9 +624,11 @@ runs it through the same read check. A denied one fails with
 `net::ERR_ACCESS_DENIED` (the page shows Chrome's "Access to the file was
 denied"). This is a browser-level CDP `Fetch` interceptor on `file://*` only:
 it never touches http(s) traffic and, unlike `route_add`, keeps the HTTP cache
-on. It is armed on launch, attach, self-heal relaunch and pre-warm. If it can't
-be armed, the daemon logs `file guard not installed` and the session works
-without it.
+on. It is armed on launch, self-heal relaunch and pre-warm — **not** on
+`attach`, where the browser is your own and a browser-wide interceptor would
+police your tabs too (agent surfaces still refuse `file:` outright there). If
+it can't be armed, the daemon logs `file guard not installed` and the session
+works without it.
 
 - **Always refused, on every surface (not overridable):**
   - *read or write* — `~/.ssh`, `~/.gnupg`, `~/.aws`, `~/.config/gcloud`,

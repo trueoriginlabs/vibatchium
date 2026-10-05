@@ -77,7 +77,7 @@ vb research --target https://example.com \          # parallel fan-out, N intent
   --intent "pricing model" --intent "customers" --intent "tech stack"
 ```
 
-**Status:** active development, alpha. **1,250 tests** green in CI (Linux, Python 3.11–3.14). Apache-2.0 (AGPL only via the opt-in `nodriver` extra).
+**Status:** active development, alpha. **1,807 tests** green in CI (Linux, Python 3.11–3.14). Apache-2.0 (AGPL only via the opt-in `nodriver` extra).
 
 <sub>Detector scores quoted below (bot.sannysoft, CreepJS, Cloudflare cold-launch) are **manual observations, not CI-asserted** — no test in the suite gates on them, and they are only as current as the last hand-run. The generated block under [Measured scores](#measured-scores) is the one to trust; it is empty until someone runs it.</sub>
 

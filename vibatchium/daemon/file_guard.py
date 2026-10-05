@@ -17,9 +17,10 @@ Why a BROWSER-level CDP ``Fetch.enable`` and not ``context.route``:
 * On the browser target the interceptor sits in the network layer for every
   target of that browser — existing pages, new tabs, popups, iframes — so
   there is no window between a popup's creation and a per-page hook.
-* It is installed by the launch/attach seam (``browser.launch_session`` /
-  ``attach_session``, which the nodriver backend reuses), so a self-heal
-  relaunch, a pre-warmed session and an attach all get it.
+* It is installed by the launch seam (``browser.launch_session``, which the
+  nodriver backend reuses), so a self-heal relaunch and a pre-warmed session
+  get it. NOT in attach mode: that browser is the user's own, and a
+  browser-wide interceptor would police their tabs too.
 
 If the guard can't be installed (no browser handle, CDP refused) the launch
 still succeeds and a warning is logged: agent surfaces don't depend on it —

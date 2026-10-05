@@ -205,8 +205,9 @@ filesystem.
   popup, sub-resource) goes through the same check as `upload`, and a denied
   one fails with `net::ERR_ACCESS_DENIED`. It sits in the network layer for
   the whole browser, so new tabs and popups are covered from their first
-  request. It is armed at launch and attach, so self-heal relaunches and
-  pre-warmed sessions get it too. It never sees an http(s) request, so unlike
+  request. It is armed at launch, so self-heal relaunches and pre-warmed
+  sessions get it too — but not on `attach`, where the browser is the user's
+  own and a browser-wide interceptor would police their tabs. It never sees an http(s) request, so unlike
   `route_add` (`context.route`) it leaves Chrome's HTTP cache on. If it can't be
   armed, the session still starts and a warning is logged; agent surfaces
   don't rely on it.
