@@ -39,7 +39,7 @@ from .. import fspolicy as _fspolicy
 from ..caps import resolve_caps as _resolve_caps, verb_in_caps
 from .paths import (
     CACHE_DIR, DEFAULT_SESSION_NAME, LOCK_PATH, LOG_PATH, PID_PATH, SOCK_PATH,
-    get_active_session_name,
+    get_active_session_name, validate_session_ref,
 )
 from . import ambient as _ambient
 from . import freeze as _freeze
@@ -469,7 +469,18 @@ class Daemon:
         args = req.get("args") or {}
         self._last_activity = time.monotonic()   # 0.9.1: feeds the idle reaper
         # Extract + consume the session selector; default to active session.
-        session_name = args.pop("_session", None) or get_active_session_name()
+        explicit_session = args.pop("_session", None)
+        if explicit_session is not None and explicit_session != "":
+            # A session NAME is one entry under PROFILES_DIR, never a path: an
+            # absolute `session="/abs/dir"` used to become the user-data-dir
+            # via session_dir() and skip the fspolicy check `start --profile`
+            # applies. Refused here, before any verb or lock — the one choke
+            # point every surface (CLI, SDK, MCP, REST) goes through.
+            try:
+                validate_session_ref(explicit_session)
+            except ValueError as exc:
+                return {"id": req_id, "ok": False, "error": f"ValueError: {exc}"}
+        session_name = explicit_session or get_active_session_name()
         # 0.19.4: agent-facing surfaces (MCP, caps-restricted REST) attach a
         # file-access scope (roots + their cwd) to every call; CLI/SDK calls
         # carry none. Validated up front and FAIL CLOSED — a malformed scope is

@@ -23,7 +23,7 @@ from . import secret_guard as _secret_guard
 from .paths import (
     CACHE_DIR, DEFAULT_SESSION_NAME, PROFILES_DIR, get_active_session_name,
     list_session_names, secure_mkdir, secure_write, session_dir,
-    set_active_session_name, validate_name,
+    set_active_session_name, validate_name, validate_session_ref,
 )
 from .registry import current_session_ctx, get_max_ephemeral, SessionLimitError
 
@@ -39,6 +39,15 @@ def _package_root() -> str:
     return str(Path(__file__).resolve().parent.parent)
 
 log = logging.getLogger("vibatchium.handlers")
+
+
+def _is_session_ref(name: str) -> bool:
+    """True iff ``name`` could be addressed later as ``--session name``."""
+    try:
+        validate_session_ref(name)
+    except ValueError:
+        return False
+    return True
 
 
 def _env_truthy(name: str) -> bool:
@@ -871,7 +880,7 @@ def register_all(daemon) -> None:
             else:
                 # bare name → also makes that the session name (so the user can do
                 # `vb start --profile work` and address it later as `--session work`)
-                if name == DEFAULT_SESSION_NAME:
+                if name == DEFAULT_SESSION_NAME and _is_session_ref(raw):
                     name = raw
                 profile_dir = PROFILES_DIR / raw
         else:

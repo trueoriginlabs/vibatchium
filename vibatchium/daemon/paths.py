@@ -61,6 +61,40 @@ def validate_name(name: str | None, *, kind: str = "name") -> str:
         )
     return name
 
+
+# A session NAME as a caller addresses it (`--session X`, MCP `session=X`, the
+# `_session` socket arg). Deliberately looser than validate_name: real profiles
+# on long-lived boxes carry names validate_name would refuse (spaces, e.g. a
+# `--session "Some Research Topic"`), and refusing those would strand the
+# identity behind them. What this DOES refuse is every shape that makes
+# `PROFILES_DIR / name` leave PROFILES_DIR or name something that isn't one
+# directory entry: an absolute path (pathlib discards the left operand — that is
+# how `session="/abs/dir"` used to bypass fspolicy.check_profile_dir), a path
+# separator, `.`/`..`, NUL and control characters, and anything longer than a
+# filesystem name can be.
+_SESSION_REF_MAX_BYTES = 255
+
+
+def validate_session_ref(name, *, kind: str = "session name") -> str:
+    """Validate a caller-addressed session name. Raises ValueError; returns
+    ``name`` unchanged on success."""
+    if not isinstance(name, str) or not name:
+        raise ValueError(f"bad {kind}: must be a non-empty string")
+    if name in {".", ".."}:
+        raise ValueError(f"bad {kind} {name!r}: reserved")
+    if "/" in name or "\\" in name or os.sep in name or (
+            os.altsep and os.altsep in name):
+        raise ValueError(
+            f"bad {kind} {name!r}: a session name is not a path — use "
+            f"`start --profile <dir>` to run a session on a directory of your "
+            f"choice")
+    if any(ord(c) < 0x20 or ord(c) == 0x7F for c in name):
+        raise ValueError(f"bad {kind} {name!r}: control characters not allowed")
+    if len(name.encode("utf-8", "surrogatepass")) > _SESSION_REF_MAX_BYTES:
+        raise ValueError(
+            f"bad {kind}: max {_SESSION_REF_MAX_BYTES} bytes")
+    return name
+
 _xdg_runtime = os.environ.get("XDG_RUNTIME_DIR")
 if _xdg_runtime and Path(_xdg_runtime).is_dir():
     CACHE_DIR = Path(_xdg_runtime) / "vibatchium"
@@ -348,15 +382,15 @@ def set_active_session_name(name: str) -> None:
 def session_dir(name: str) -> Path:
     """Return the on-disk dir for a session (creates if missing).
 
-    Names are validated by the caller (`session_new` handler). Absolute paths
-    are accepted as-is — useful for tests / ephemeral profiles.
+    Always ``PROFILES_DIR/<name>``. An absolute path or any other path-shaped
+    name raises ValueError (validate_session_ref): it used to be accepted
+    as-is, which let a caller-chosen session NAME pick an arbitrary
+    user-data-dir without the fspolicy check `start --profile` gets. A custom
+    directory is what `start --profile <dir>` is for.
     """
     if not name:
         name = DEFAULT_SESSION_NAME
-    p = Path(name)
-    if p.is_absolute():
-        p.mkdir(parents=True, exist_ok=True)
-        return p
+    validate_session_ref(name)
     out = PROFILES_DIR / name
     out.mkdir(parents=True, exist_ok=True)
     return out
