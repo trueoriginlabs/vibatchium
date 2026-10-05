@@ -3,6 +3,17 @@
 from vibatchium.client import call
 
 
+def _mock_host(local_server: str) -> str:
+    """The fixture server under `mock.localhost` (Chrome resolves *.localhost
+    to loopback) rather than 127.0.0.1 / localhost. Since
+    0.19.4 every origin a fulfill rule answered for is remembered for the
+    session, and the next vault fill into it is refused once (a fulfilled
+    response could have planted a service worker). The vault tests fill into
+    127.0.0.1 and localhost, so the mocking tests use a third origin on the
+    same server."""
+    return local_server.replace("127.0.0.1", "mock.localhost")
+
+
 def test_route_abort_blocks_request(local_server):
     """Routing **/api-test to abort means the page's fetch() rejects."""
     call("go", {"url": f"{local_server}/simple.html"})
@@ -21,7 +32,7 @@ def test_route_abort_blocks_request(local_server):
 
 
 def test_route_fulfill_returns_synthetic_body(local_server):
-    call("go", {"url": f"{local_server}/simple.html"})
+    call("go", {"url": f"{_mock_host(local_server)}/simple.html"})
     call("route_clear")
     call("route_add", {
         "pattern": "**/api-test",
@@ -38,7 +49,7 @@ def test_route_fulfill_returns_synthetic_body(local_server):
 
 def test_wait_response_captures_body(local_server):
     """wait_response with --body returns the JSON body of the matched response."""
-    call("go", {"url": f"{local_server}/simple.html"})
+    call("go", {"url": f"{_mock_host(local_server)}/simple.html"})
     call("route_clear")
     # arm wait in background-ish — start the wait, then fire the click, then check
     # In our synchronous client we can't easily background; instead we let the

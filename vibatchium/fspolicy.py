@@ -24,9 +24,17 @@ Policy:
   units, ``~/.local/bin``, cron spools, system dirs, vibatchium's runtime dir
   (socket, pidfile, caches — except its screenshot/explore output dirs) and
   state dir, and — anywhere on disk — ``.git``/``.claude``/``.vscode``/
-  ``.idea`` dirs, ``.mcp.json``/``.envrc`` files, ``site-packages``/
-  ``dist-packages``, ``*.pth`` files and ``.venv*/bin``. Matching is
-  case-insensitive (``~/.SSH`` is ``~/.ssh`` on a casefolded filesystem).
+  ``.idea``/``.cursor``/``.husky``/``.devcontainer`` dirs, CI workflows,
+  ``site-packages``/``dist-packages``, ``*.pth`` files, virtualenv ``bin/``
+  and project files that run code or instruct an agent (``conftest.py``,
+  ``Makefile``, ``package.json``, ``CLAUDE.md``, ``AGENTS.md`` …). Reads
+  additionally deny, anywhere on disk, secret-shaped file names (``.env``,
+  ``*.pem``, ``id_rsa*`` …). Matching is case-insensitive (``~/.SSH`` is
+  ``~/.ssh`` on a casefolded filesystem).
+* **file: URLs** — refused outright on agent surfaces (a loaded file: page
+  can reach any other file: URL); judged as a read on operator surfaces, and
+  every follow-on file: load is judged again by the browser-wide guard
+  (``daemon/file_guard.py`` → :func:`check_file_load`).
 * **Symlinks are resolved first** (like playwright-mcp 0.0.81): both the
   lexical path and its realpath must clear the deny list, so neither a tmp
   symlink into ``~/.ssh`` nor a ``~/.ssh`` that is itself a symlink elsewhere
@@ -73,11 +81,20 @@ _HOME_DENY_RW = (
     ".config/gh", ".password-store", ".vault-token", ".npmrc", ".pypirc",
     ".cargo/credentials", ".cargo/credentials.toml", ".config/rclone",
     ".Xauthority", ".local/share/keyrings",
+    # more credential / key stores (crypto wallets, secret managers, CLIs)
+    ".config/sops", ".config/solana", ".foundry/keystores",
+    ".ethereum/keystore", ".huggingface/token", ".cache/huggingface/token",
+    ".vercel", ".local/share/com.vercel.cli",
+    ".terraform.d/credentials.tfrc.json", ".config/op", ".config/hub",
+    ".config/doctl", ".netlify",
     # agent configs + their tokens
-    ".claude", ".claude.json", ".codex",
-    # shell / REPL histories
+    ".claude", ".claude.json", ".codex", ".gemini", ".config/github-copilot",
+    # messaging / mail profiles (session tokens, message stores)
+    ".config/Slack", ".config/discord", ".config/Signal", ".thunderbird",
+    # shell / REPL / DB-client histories
     ".bash_history", ".zsh_history", ".local/share/fish/fish_history",
-    ".python_history",
+    ".python_history", ".psql_history", ".mysql_history",
+    ".node_repl_history", ".rediscli_history", ".sqlite_history",
     # vibatchium itself: vault key, vault, profiles
     ".config/vibatchium",
     # real-browser profiles (native, Flatpak, Snap)
@@ -94,19 +111,34 @@ _HOME_DENY_W = (
     ".config/autostart", ".config/systemd", ".config/environment.d",
     ".local/share/systemd", ".local/share/applications",
     ".local/bin", "bin", ".gitconfig", ".config/git", ".config/pip", ".pip",
-    ".vimrc", ".vim", ".config/nvim", ".tmux.conf", ".emacs*",
-    ".cursor",
+    ".vimrc", ".vim", ".config/nvim", ".local/share/nvim", ".tmux.conf",
+    ".tmux", ".config/tmux", ".emacs*", ".config/direnv",
+    # tool configs / startup dirs that run code
+    ".cargo/config", ".cargo/config.toml", ".ipython", ".jupyter",
+    ".docker/cli-plugins",
+    # PATH dirs of language toolchains / version managers
+    ".cargo/bin", "go/bin", ".bun/bin", ".deno/bin", ".npm-global/bin",
+    ".pyenv/shims", ".pyenv/bin", ".nvm",
+    # agent + editor configs (MCP servers, tasks, hooks)
+    ".cursor", ".config/opencode", ".config/Code/User", ".config/Cursor/User",
+    # window managers / terminals (exec-on-start, keybinds that run commands)
+    ".config/hypr", ".config/i3", ".config/sway", ".config/kitty",
+    ".config/alacritty", ".config/wezterm", ".wezterm.lua",
 )
 # Relocated XDG dirs (only consulted when the env var is an absolute path).
 _XDG_CONFIG_DENY_RW = (
     "vibatchium", "google-chrome*", "chromium", "BraveSoftware",
     "microsoft-edge*", "vivaldi*", "opera*", "gcloud", "gh", "rclone",
+    "sops", "solana", "op", "hub", "github-copilot", "Slack", "discord",
+    "Signal",
 )
 _XDG_CONFIG_DENY_W = (
     "autostart", "systemd", "environment.d", "fish", "nvim", "git", "pip",
+    "direnv", "tmux", "opencode", "Code/User", "Cursor/User", "hypr", "i3",
+    "sway", "kitty", "alacritty", "wezterm",
 )
-_XDG_DATA_DENY_RW = ("keyrings", "fish/fish_history")
-_XDG_DATA_DENY_W = ("systemd", "applications")
+_XDG_DATA_DENY_RW = ("keyrings", "fish/fish_history", "com.vercel.cli")
+_XDG_DATA_DENY_W = ("systemd", "applications", "nvim")
 
 # Absolute locations (globs allowed) no caller path may read OR write.
 _SYS_DENY_RW = (
@@ -121,12 +153,42 @@ _SYS_DENY_W = (
 
 # Anywhere on disk, inside roots too: no caller path may WRITE a path with one
 # of these components (dirs that hold hooks / settings an agent or tool runs),
-# or with one of these file names / suffixes.
-_SEGMENT_DENY_W = (".git", ".claude", ".vscode", ".idea",
-                   "site-packages", "dist-packages")
-_NAME_DENY_W = (".mcp.json", ".envrc")
+# or with one of these file names / suffixes. The default agent roots include
+# the MCP server's cwd — the agent's own project — so this is what keeps a
+# downloaded or PDF-rendered file from becoming code the next `pytest`,
+# `make`, `npm install`, `git commit`, CI run or agent session executes.
+_SEGMENT_DENY_W = (".git", ".claude", ".vscode", ".idea", ".cursor",
+                   ".husky", ".devcontainer", "site-packages", "dist-packages")
+_NAME_DENY_W = (
+    ".mcp.json", ".envrc",
+    # Python imports these on start / test collection
+    "conftest.py", "sitecustomize.py", "usercustomize.py",
+    # build / package / hook manifests that name commands to run
+    "makefile", "gnumakefile", "package.json", ".pre-commit-config.yaml",
+    ".gitlab-ci.yml",
+    # agent instruction files (read as trusted instructions next session)
+    "claude.md", "claude.local.md", "agents.md", "gemini.md", ".cursorrules",
+    ".windsurfrules",
+)
 _SUFFIX_DENY_W = (".pth",)
+# Consecutive components (anywhere in the path) that are write-denied too.
+_SEQ_DENY_W = ((".github", "workflows"), (".github", "copilot-instructions.md"),
+               ("node_modules", ".bin"))
 _VENV_RE = re.compile(r"\.venv[^/]*", re.IGNORECASE)
+
+# Anywhere on disk, inside roots too: no caller path may READ (upload, file:
+# URL, restore) a file with one of these secret-shaped names. Kept tight:
+# names that are secrets by convention, not merely "might contain one".
+_NAME_DENY_R = (
+    ".env", ".envrc", ".npmrc", ".pypirc", ".netrc", ".pgpass",
+    ".git-credentials", "credentials.json", "application_default_credentials.json",
+)
+_GLOB_DENY_R = (
+    ".env.*", "*.pem", "*.key", "*.p12", "*.pfx", "*.kdbx",
+    "id_rsa*", "id_dsa*", "id_ecdsa*", "id_ed25519*", "service-account*.json",
+)
+# ...except these well-known templates, which hold no real values.
+_NAME_ALLOW_R = (".env.example", ".env.sample", ".env.template")
 
 # vibatchium's runtime dir: writable only in these output subdirs.
 _RUNTIME_WRITABLE = ("screenshots", "explores")
@@ -144,6 +206,9 @@ _scope_roots: contextvars.ContextVar[tuple[tuple[str, ...], ...]] = \
     contextvars.ContextVar("vb_fs_scope_roots", default=())
 _scope_cwd: contextvars.ContextVar[str | None] = \
     contextvars.ContextVar("vb_fs_scope_cwd", default=None)
+# True inside any call an agent surface made (even one with roots opted out).
+_scope_active: contextvars.ContextVar[bool] = \
+    contextvars.ContextVar("vb_fs_scope_active", default=False)
 
 
 def parse_scope(raw) -> tuple[tuple[str, ...] | None, str | None]:
@@ -171,13 +236,21 @@ def push_scope(raw):
     roots, cwd = parse_scope(raw)
     t_roots = _scope_roots.set(_scope_roots.get() + ((roots,) if roots is not None else ()))
     t_cwd = _scope_cwd.set(cwd if cwd is not None else _scope_cwd.get())
-    return (t_roots, t_cwd)
+    t_active = _scope_active.set(True)
+    return (t_roots, t_cwd, t_active)
 
 
 def pop_scope(token) -> None:
-    t_roots, t_cwd = token
+    t_roots, t_cwd, t_active = token
+    _scope_active.reset(t_active)
     _scope_cwd.reset(t_cwd)
     _scope_roots.reset(t_roots)
+
+
+def in_agent_scope() -> bool:
+    """True while handling a call an agent surface (MCP, a caps-restricted
+    REST shim) made — i.e. one that carried an ``_fs_scope``."""
+    return _scope_active.get()
 
 
 def _too_broad(path: str) -> bool:
@@ -336,8 +409,19 @@ def _matches(path: str, pat: str) -> bool:
     return _under(path, pat)
 
 
+def _is_venv_dir(path: str) -> bool:
+    """A virtualenv root: named ``.venv*`` or holding a ``pyvenv.cfg``."""
+    if _VENV_RE.fullmatch(_fold(os.path.basename(path))):
+        return True
+    try:
+        return os.path.isfile(os.path.join(path, "pyvenv.cfg"))
+    except OSError:
+        return False
+
+
 def _segment_hit(path: str) -> str | None:
-    parts = [_fold(x) for x in path.split(os.sep) if x]
+    raw_parts = [x for x in path.split(os.sep) if x]
+    parts = [_fold(x) for x in raw_parts]
     segs = {_fold(s) for s in _SEGMENT_DENY_W}
     for i, part in enumerate(parts):
         if part in segs:
@@ -349,14 +433,29 @@ def _segment_hit(path: str) -> str | None:
                     and parts[i + 1] == "worktrees":
                 continue
             return f"a {part!r} directory"
-        if _VENV_RE.fullmatch(part) and i + 1 < len(parts) and parts[i + 1] == "bin":
+        if part in ("bin", "scripts") and i > 0 and i + 1 < len(parts) \
+                and _is_venv_dir(os.sep + os.sep.join(raw_parts[:i])):
             return "a virtualenv's bin/"
+        for seq in _SEQ_DENY_W:
+            if tuple(parts[i:i + len(seq)]) == seq:
+                return f"a {'/'.join(seq)!r} path"
     if parts:
         name = parts[-1]
         if name in {_fold(n) for n in _NAME_DENY_W}:
-            return f"a {name!r} file"
+            return f"a {raw_parts[-1]!r} file (runs code or instructs an agent)"
         if name.endswith(tuple(_fold(s) for s in _SUFFIX_DENY_W)):
             return "a Python .pth file (runs at interpreter start)"
+    return None
+
+
+def _secret_name_hit(path: str) -> str | None:
+    """A secret-shaped file NAME, anywhere on disk (read rule)."""
+    name = _fold(os.path.basename(path.rstrip(os.sep)))
+    if not name or name in _NAME_ALLOW_R:
+        return None
+    if name in {_fold(n) for n in _NAME_DENY_R} or any(
+            fnmatch.fnmatchcase(name, _fold(g)) for g in _GLOB_DENY_R):
+        return f"a secret-shaped file name ({os.path.basename(path)!r})"
     return None
 
 
@@ -365,11 +464,10 @@ def _deny_hit(candidates: set[str], write: bool) -> str | None:
         for c in candidates:
             if _matches(c, pat) and not any(_matches(c, e) for e in exc):
                 return label
-    if write:
-        for c in candidates:
-            hit = _segment_hit(c)
-            if hit:
-                return hit
+    for c in candidates:
+        hit = _segment_hit(c) if write else _secret_name_hit(c)
+        if hit:
+            return hit
     return None
 
 
@@ -518,12 +616,18 @@ def check_nav_url(url, *, verb: str = "go") -> None:
     """Refuse navigations that read the local disk past the file policy.
 
     ``http(s)``, ``data:``, ``blob:``, ``about:blank``/``about:srcdoc`` pass.
-    ``file:`` URLs are mapped to a path and judged by :func:`check_read` (a
-    directory URL — which lists the dir — checks the dir itself). Everything
-    else that names a scheme (``view-source:``, ``chrome:``, ``devtools:``,
-    ``filesystem:``, ``chrome-extension:`` …) is refused. ``javascript:`` is
-    left to the secret guard, which handles it as ``eval``.
-    A string with no scheme is left to the browser, which rejects it."""
+    ``file:`` URLs are refused outright on an agent surface (a call carrying
+    an ``_fs_scope``): a loaded ``file:`` page may navigate to or frame any
+    other ``file:`` URL, so the first URL is not the only read it causes. On
+    the operator surfaces (CLI/SDK) a ``file:`` URL is mapped to a path and
+    judged by :func:`check_read` (a directory URL — which lists the dir —
+    checks the dir itself); the browser-wide file guard
+    (``daemon/file_guard.py``) then judges every follow-on ``file:`` load the
+    same way. Everything else that names a scheme (``view-source:``,
+    ``chrome:``, ``devtools:``, ``filesystem:``, ``chrome-extension:`` …) is
+    refused. ``javascript:`` is left to the secret guard, which handles it as
+    ``eval``. A string with no scheme is left to the browser, which rejects
+    it."""
     if not isinstance(url, str):
         return
     norm = _normalize_url(url)
@@ -539,6 +643,14 @@ def check_nav_url(url, *, verb: str = "go") -> None:
     if scheme == "chrome" and low.rstrip("/") in _CHROME_OK:
         return
     if scheme == "file":
+        if in_agent_scope():
+            raise FileAccessDenied(
+                f"navigation refused: {verb} to a file: URL from an agent "
+                f"surface (MCP / a --caps-restricted REST shim). A local page "
+                f"can navigate to or frame any other local file, so agent "
+                f"surfaces don't open file: URLs at all — not even with "
+                f"{ENV_ROOTS}={ROOTS_OFF}. Serve the file over http "
+                f"(e.g. `python3 -m http.server`) or use the CLI.")
         check_read(file_url_path(norm), verb=f"{verb} file:")
         return
     if scheme == "javascript":
@@ -552,3 +664,23 @@ def check_nav_url(url, *, verb: str = "go") -> None:
         f"http(s), data:, blob: and about:blank only (file: URLs are checked "
         f"against the file-access policy); {scheme}: can expose local files "
         f"or browser internals to page text.")
+
+
+def check_file_load(url: str) -> str | None:
+    """Judge one ``file:`` request the BROWSER is about to make (top-level,
+    iframe, popup or sub-resource), outside any call: why it must fail, or
+    None to let it load.
+
+    Runs in a fresh :class:`contextvars.Context`, so the verdict is the deny
+    list + the daemon's ``VIBATCHIUM_FILE_ROOTS`` only — never whatever call
+    scope happened to be current when the event loop picked the request up.
+    Fails closed: an unparseable URL is refused."""
+    def _judge() -> str | None:
+        try:
+            check_read(file_url_path(url), verb="file: load")
+        except FileAccessDenied as exc:
+            return str(exc)
+        except Exception as exc:  # noqa: BLE001 — fail closed
+            return f"file: load refused ({type(exc).__name__}: {exc})"
+        return None
+    return contextvars.Context().run(_judge)

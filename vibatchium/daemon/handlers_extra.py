@@ -629,7 +629,7 @@ def register_extra(daemon) -> None:
                 # 0.19.4: caller bytes served AS the requested origin — mark
                 # the document they land in, like caller JS (secret_guard).
                 with contextlib.suppress(Exception):
-                    await _secret_guard.record_fulfilled(request)
+                    await _secret_guard.record_fulfilled(request, s.context)
                 await route.fulfill(
                     status=rule["status"],
                     body=rule["body"],
@@ -663,25 +663,35 @@ def register_extra(daemon) -> None:
         s = _session(d)
         rules = getattr(s, "_routes", [])
         pattern = args.get("pattern")
+        out: dict
         if pattern:
             rule = next((r for r in rules if r["pattern"] == pattern), None)
             if rule is None:
-                return {"cleared": 0}
-            try:
-                await s.context.unroute(pattern, rule.get("_handler"))
-            except Exception:  # noqa: BLE001
-                pass
-            rules.remove(rule)
-            return {"cleared": 1, "pattern": pattern}
-        # clear all
-        n = len(rules)
-        for r in rules:
-            try:
-                await s.context.unroute(r["pattern"], r.get("_handler"))
-            except Exception:  # noqa: BLE001
-                pass
-        s._routes = []
-        return {"cleared": n}
+                out = {"cleared": 0}
+            else:
+                try:
+                    await s.context.unroute(pattern, rule.get("_handler"))
+                except Exception:  # noqa: BLE001
+                    pass
+                rules.remove(rule)
+                out = {"cleared": 1, "pattern": pattern}
+        else:
+            # clear all
+            n = len(rules)
+            for r in rules:
+                try:
+                    await s.context.unroute(r["pattern"], r.get("_handler"))
+                except Exception:  # noqa: BLE001
+                    pass
+            s._routes = []
+            out = {"cleared": n}
+        # 0.19.4: a fulfilled response may have planted a service worker (or
+        # Cache Storage entries) that keeps serving its origin after the rule
+        # is gone. Wipe them for every origin a fulfill rule ever answered.
+        wiped = await _secret_guard.clear_fulfilled_origins(s.context, s.page)
+        if wiped:
+            out["service_workers_cleared"] = wiped
+        return out
 
     @daemon.handler("wait_response")
     async def _wait_response(d, args):

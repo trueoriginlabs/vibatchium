@@ -402,14 +402,61 @@ def test_nav_file_url_in_normal_dir_allowed(home, work):
     fspolicy.check_nav_url(work.as_uri() + "/")           # listing a work dir
 
 
-def test_nav_file_url_obeys_scope_roots(home, work, tmp_path):
-    other = tmp_path / "other"
-    other.mkdir()
-    tok = fspolicy.push_scope({"roots": [str(work)], "cwd": str(work)})
+@pytest.mark.parametrize("scope", [
+    {"roots": ["{work}"], "cwd": "{work}"},          # path inside the roots
+    {"roots": None, "cwd": None},                    # roots opted out (`*`)
+])
+def test_nav_file_url_refused_on_agent_surface(home, work, scope):
+    """A loaded file: page can navigate to / frame any other file: URL, so an
+    agent surface (a call carrying `_fs_scope`) never opens file: at all."""
+    scope = {k: ([r.format(work=work) for r in v] if isinstance(v, list)
+                 else v.format(work=work) if isinstance(v, str) else v)
+             for k, v in scope.items()}
+    page = work / "a.html"
+    page.write_text("<p>hi</p>")
+    tok = fspolicy.push_scope(scope)
     try:
-        fspolicy.check_nav_url((work / "a.html").as_uri())
-        with pytest.raises(FileAccessDenied, match="file roots"):
-            fspolicy.check_nav_url((other / "a.html").as_uri())
+        assert fspolicy.in_agent_scope()
+        with pytest.raises(FileAccessDenied, match="agent surface"):
+            fspolicy.check_nav_url(page.as_uri())
+        fspolicy.check_nav_url("https://example.com/")     # web URLs unaffected
+        fspolicy.check_nav_url("data:text/html,<p>x</p>")
+    finally:
+        fspolicy.pop_scope(tok)
+    assert not fspolicy.in_agent_scope()
+    fspolicy.check_nav_url(page.as_uri())                  # operator: allowed
+
+
+@pytest.mark.parametrize("verb,args", [
+    ("go", {"url": "{uri}"}),
+    ("explore", {"url": "{uri}"}),
+])
+async def test_dispatch_scoped_call_refuses_file_url(home, work, verb, args):
+    """Through Daemon.dispatch: the scope rides in `_fs_scope` and the refusal
+    comes before any session or Chrome."""
+    import json
+    page = work / "a.html"
+    page.write_text("<p>hi</p>")
+    args = json.loads(json.dumps(args).replace("{uri}", page.as_uri()))
+    args["_fs_scope"] = {"roots": [str(work)], "cwd": str(work)}
+    d = _daemon()
+    res = await d.dispatch({"id": "1", "cmd": verb, "args": args})
+    assert not res["ok"] and "agent surface" in res["error"], res
+    assert d.registry.get("default") is None
+    assert not fspolicy.in_agent_scope()                    # didn't leak
+
+
+def test_check_file_load_ignores_call_scope(home, work):
+    """The browser-wide guard judges loads outside any call: deny list + the
+    daemon's roots, never the scope that happened to be current."""
+    ok = (work / "ok.html").as_uri()
+    assert fspolicy.check_file_load(ok) is None
+    assert "denied" in fspolicy.check_file_load((home / ".ssh" / "id_ed25519").as_uri())
+    assert "denied" in fspolicy.check_file_load((work / "id_rsa").as_uri())
+    assert fspolicy.check_file_load("file://otherhost/x") is not None
+    tok = fspolicy.push_scope({"roots": [str(home / "nowhere")], "cwd": None})
+    try:
+        assert fspolicy.check_file_load(ok) is None        # scope not applied
     finally:
         fspolicy.pop_scope(tok)
 
@@ -769,3 +816,151 @@ async def test_skill_import_local_git_checked(home, work, monkeypatch, spec):
 def test_local_git_path_classification(spec, expected):
     from vibatchium.skills.handlers import _local_git_path
     assert _local_git_path(spec) == expected
+
+
+# ─── review 2, item 3: secret-shaped names + project exec files ─────────
+
+@pytest.mark.parametrize("rel", [
+    ".env", ".env.local", ".env.production", "sub/.ENV", "certs/server.pem",
+    "tls/site.key", "keys/client.p12", "keys/client.pfx", "vault.kdbx",
+    "id_rsa", "id_rsa.pub", "backup/id_ed25519", "id_ecdsa_sk", "id_dsa",
+    ".npmrc", ".pypirc", ".netrc", ".pgpass", ".git-credentials",
+    "credentials.json", "gcp/service-account-prod.json", ".envrc",
+    "application_default_credentials.json",
+])
+def test_secret_shaped_names_read_denied_anywhere(home, work, rel):
+    p = work / rel
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("x")
+    with pytest.raises(FileAccessDenied, match="secret-shaped"):
+        check_read(p)
+    with pytest.raises(FileAccessDenied):
+        fspolicy.check_upload([str(p)])
+    with pytest.raises(FileAccessDenied):
+        fspolicy.check_nav_url(p.as_uri())
+
+
+def test_secret_name_inside_an_uploaded_dir_is_refused(home, work):
+    d = work / "project"
+    d.mkdir()
+    (d / "photo.png").write_text("png")
+    (d / ".env").write_text("API_KEY=x")
+    with pytest.raises(FileAccessDenied, match="secret-shaped"):
+        fspolicy.check_upload([str(d)])
+
+
+@pytest.mark.parametrize("rel", [
+    ".env.example", ".env.sample", ".env.template", "env.txt", "environment.md",
+    "keys.txt", "monkey.png", "pem-notes.md", "credentials.md",
+    "service-account.md", "id_card.png", "my.env.png",
+])
+def test_secret_name_lookalikes_readable(home, work, rel):
+    assert check_read(work / rel)
+
+
+@pytest.mark.parametrize("rel", [
+    "conftest.py", "tests/conftest.py", "sitecustomize.py", "usercustomize.py",
+    "Makefile", "makefile", "GNUmakefile", "package.json", "web/package.json",
+    ".husky/pre-commit", ".pre-commit-config.yaml", ".gitlab-ci.yml",
+    ".github/workflows/ci.yml", ".github/workflows", ".devcontainer/devcontainer.json",
+    "node_modules/.bin/jest", "CLAUDE.md", "sub/CLAUDE.md", "CLAUDE.local.md",
+    "AGENTS.md", "GEMINI.md", ".cursorrules", ".cursor/rules/x.mdc",
+    ".windsurfrules", ".github/copilot-instructions.md",
+])
+def test_project_exec_and_agent_files_write_denied(home, work, rel):
+    with pytest.raises(FileAccessDenied):
+        check_write(work / rel)
+
+
+def test_project_exec_files_stay_readable(home, work):
+    for rel in ("Makefile", "package.json", "AGENTS.md"):
+        (work / rel).write_text("x")
+        assert check_read(work / rel)
+
+
+@pytest.mark.parametrize("venv", ["venv", "env", "py313", ".venv-wt"])
+def test_any_virtualenv_bin_is_write_denied(home, work, venv):
+    root = work / venv
+    (root / "bin").mkdir(parents=True)
+    if not venv.startswith(".venv"):
+        (root / "pyvenv.cfg").write_text("home = /usr/bin\n")
+    with pytest.raises(FileAccessDenied, match="virtualenv"):
+        check_write(root / "bin" / "python")
+    with pytest.raises(FileAccessDenied, match="virtualenv"):
+        check_write(root / "bin" / "activate")
+
+
+def test_bin_without_pyvenv_cfg_is_not_a_venv(home, work):
+    (work / "tool" / "bin").mkdir(parents=True)
+    assert check_write(work / "tool" / "bin" / "out.png")
+
+
+@pytest.mark.parametrize("rel,write", [
+    # what this box's bots actually do: screenshots / media / state in their
+    # own project dirs, uploads of images from there
+    ("projects/twitter_persona/assets/hoodie/groupie-2082.gif", False),
+    ("projects/twitter_persona/assets/meme-templates/drake.png", False),
+    ("projects/twitter_persona/data/craft-evidence.json", False),
+    ("projects/twitter_persona/assets/stockrip/shot-0001.png", True),
+    ("projects/twitter_persona/tmp/ac.png", True),
+    ("projects/twitter_persona/logs/tick-shot.png", True),
+    ("projects/flow_twitter_bot/state/session.json", True),
+    ("projects/flow_twitter_bot/state/cookies-export.json", True),
+    ("projects/au-deepdive/assets/chart.png", True),
+    ("Downloads/report.pdf", True),
+])
+def test_realistic_bot_paths_stay_allowed(home, rel, write):
+    p = home / rel
+    p.parent.mkdir(parents=True, exist_ok=True)
+    if not write:
+        p.write_bytes(b"x")
+    assert (check_write if write else check_read)(p)
+
+
+# ─── review 2, item 4: home deny-list gaps ──────────────────────────────
+
+@pytest.mark.parametrize("rel", [
+    ".config/sops/age/keys.txt", ".config/solana/id.json",
+    ".foundry/keystores/deployer", ".ethereum/keystore/UTC--x",
+    ".huggingface/token", ".cache/huggingface/token", ".vercel/auth.json",
+    ".local/share/com.vercel.cli/auth.json",
+    ".terraform.d/credentials.tfrc.json", ".gemini/oauth_creds.json",
+    ".config/github-copilot/hosts.json", ".config/Slack/Cookies",
+    ".config/discord/Local Storage/x", ".config/Signal/config.json",
+    ".thunderbird/x.default/logins.json", ".psql_history", ".mysql_history",
+    ".node_repl_history", ".rediscli_history", ".sqlite_history",
+    ".config/doctl/config.yaml", ".netlify/config.json",
+])
+def test_review2_home_read_deny(home, rel):
+    with pytest.raises(FileAccessDenied):
+        check_read(home / rel)
+
+
+@pytest.mark.parametrize("rel", [
+    ".cargo/config.toml", ".cargo/bin/cargo-x", ".ipython/profile_default/startup/x.py",
+    ".jupyter/jupyter_server_config.py", ".config/direnv/direnvrc",
+    ".local/share/nvim/site/plugin/x.lua", ".tmux/plugins/x", ".config/tmux/tmux.conf",
+    "go/bin/x", ".bun/bin/x", ".deno/bin/x", ".pyenv/shims/python", ".pyenv/bin/pyenv",
+    ".nvm/nvm.sh", ".docker/cli-plugins/docker-x", ".gemini/settings.json",
+    ".config/opencode/opencode.json", ".config/Code/User/settings.json",
+    ".config/Cursor/User/settings.json", ".config/hypr/hyprland.conf",
+    ".config/i3/config", ".config/sway/config", ".config/kitty/kitty.conf",
+    ".config/alacritty/alacritty.toml", ".config/wezterm/wezterm.lua", ".wezterm.lua",
+])
+def test_review2_home_write_deny(home, rel):
+    with pytest.raises(FileAccessDenied):
+        check_write(home / rel)
+
+
+@pytest.mark.parametrize("var,rel,write", [
+    ("XDG_CONFIG_HOME", "sops/age/keys.txt", False),
+    ("XDG_CONFIG_HOME", "Slack/Cookies", False),
+    ("XDG_CONFIG_HOME", "kitty/kitty.conf", True),
+    ("XDG_CONFIG_HOME", "Code/User/tasks.json", True),
+    ("XDG_DATA_HOME", "nvim/site/plugin/x.lua", True),
+    ("XDG_DATA_HOME", "com.vercel.cli/auth.json", False),
+])
+def test_review2_relocated_xdg_deny(home, work, clean_xdg, monkeypatch, var, rel, write):
+    monkeypatch.setenv(var, str(work / "xdg"))
+    with pytest.raises(FileAccessDenied):
+        (check_write if write else check_read)(work / "xdg" / rel)

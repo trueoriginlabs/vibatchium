@@ -54,7 +54,20 @@ for it.
   caller bytes the browser attributes to the real origin — refuses a secret fill
   until it is reloaded. So does any session with a fulfill rule installed. The
   mark is the main frame's loader id: `reload` or a fresh `go` clears it, an
-  in-page `pushState` doesn't.
+  in-page `pushState` doesn't. When the loader id can't be read (no CDP
+  session, which can happen on attach/nodriver connections) the mark covers
+  the whole tab and stays until the tab is closed.
+- **Fulfill-planted service workers.** A fulfilled response can register a
+  service worker (or fill Cache Storage) that outlives the rule, `route_clear`
+  and `reload`, and serves a later document of that origin. That document has
+  a fresh loader id, so the taint check would call it clean. Every origin a
+  fulfill rule answered for is therefore recorded per browser context.
+  `route_clear` wipes those origins' service workers and Cache Storage (CDP
+  `Storage.clearDataForOrigin`). A secret fill into a recorded origin wipes
+  them again, forgets the origin, and is refused once ("reload … and fill
+  again"), because the page on screen may be worker-served. The record lives in
+  daemon memory: a daemon restart or a session relaunch forgets it, while a
+  worker in the profile survives both.
 - **No keyboard.** The old fill was Playwright's: focus the field, then insert
   text into *whatever was focused* — so a page that moved focus into a foreign
   iframe in that gap got the value. The write now runs in the isolated world,
@@ -91,7 +104,14 @@ masked.
 What this doesn't cover, by design: an unrestricted `vb serve` REST shim, or any
 agent with a shell, is the operator and can use the escape hatches. And the
 network capture verbs (`network_*`, `har`, outside the lean caps) record request
-bodies, so they see the credential once the form is submitted.
+bodies, so they see the credential once the form is submitted. The read-back
+refusal tracks only the fields vibatchium filled. If the site copies the value
+somewhere else (a hidden input, or a username echoed back after a failed
+submit), that copy is readable once the original field is empty. And `wait_fn`
+is caller JS: running it on a login page taints the page, so the next secret
+fill is refused until a reload. To wait on a login page use `wait selector`
+(`text=…` / `role=…`), `wait url`, `wait load` or `expect` with `text_contains`.
+None of those run caller JS.
 
 Also: the session-default safety mode was read from two env vars. New sessions
 used `VIBATCHIUM_DEFAULT_SAFETY`; the fallback read `VIBATCHIUM_SAFETY_MODE`,
@@ -121,36 +141,82 @@ filesystem.
     `~/.kube`, `~/.docker/config.json`, `~/.netrc`, `~/.pgpass`,
     `~/.git-credentials`, `~/.config/gh`, `~/.cargo/credentials*`,
     `~/.config/rclone`, `~/.Xauthority`, `~/.claude`, `~/.claude.json`,
-    `~/.codex`, shell/REPL histories, `~/.config/vibatchium` (vault key, vault,
-    profiles), real-browser profiles (Chrome/Chromium/Brave/Edge/Vivaldi/Opera,
+    `~/.codex`, `~/.gemini`, `~/.config/github-copilot`, shell/REPL/DB-client
+    histories (`psql`, `mysql`, `node`, `redis-cli`, `sqlite3`),
+    `~/.config/vibatchium` (vault key, vault, profiles), wallet and secret-
+    manager keys (`~/.config/sops`, `~/.config/solana`, `~/.foundry/keystores`,
+    `~/.ethereum/keystore`, `~/.config/op`), CLI tokens (Hugging Face, Vercel,
+    Terraform Cloud, `hub`, `doctl`, Netlify), Slack/Discord/Signal/Thunderbird
+    profiles, real-browser profiles (Chrome/Chromium/Brave/Edge/Vivaldi/Opera,
     `~/.mozilla`, Flatpak `~/.var/app`, Snap `~/snap/{chromium,firefox,brave}`),
     keyrings, `/proc`, `/sys`, `/dev`, `/etc/shadow`, `/etc/sudoers*`.
-  - *write* — shell rc files and `~/.bashrc.d`, vim/nvim/tmux/emacs/pip/git
-    configs, autostart and systemd user units (incl. `~/.local/share/systemd`,
-    `~/.local/share/applications` and their relocated `$XDG_CONFIG_HOME` /
-    `$XDG_DATA_HOME` twins), `~/.local/bin`, cron spools, system dirs, and
-    vibatchium's own runtime dir (`daemon.sock`, pidfile, lock, observe/vision
-    caches — only `screenshots/` and `explores/` stay writable) and state dir.
-  - *write, anywhere on disk* — any path through a `.git`, `.claude`, `.vscode`
-    or `.idea` dir, `.mcp.json` / `.envrc` files, `site-packages` /
-    `dist-packages`, `*.pth` files and `.venv*/bin`: a project's hooks and
-    agent settings are code execution too. A Claude Code agent worktree's
-    content (`<repo>/.claude/worktrees/<name>/…`) is an ordinary checkout and
-    stays writable.
+  - *read, anywhere on disk* — files whose **name** says secret: `.env` and
+    `.env.*` (but not `.env.example` / `.sample` / `.template`), `.envrc`,
+    `*.pem`, `*.key`, `*.p12`, `*.pfx`, `*.kdbx`, `id_rsa*` / `id_ed25519*` /
+    `id_ecdsa*` / `id_dsa*`, `.npmrc`, `.pypirc`, `.netrc`, `.pgpass`,
+    `.git-credentials`, `credentials.json`,
+    `application_default_credentials.json`, `service-account*.json`. The
+    agent roots include the agent's own project, and that is where `.env`
+    lives. An uploaded directory holding one is refused whole.
+  - *write* — shell rc files and `~/.bashrc.d`, vim/nvim/tmux/emacs/pip/git/
+    direnv configs, IPython/Jupyter startup, `~/.cargo/config.toml`, Docker CLI
+    plugins, toolchain PATH dirs (`~/.cargo/bin`, `~/go/bin`, `~/.bun/bin`,
+    `~/.deno/bin`, `~/.pyenv/{shims,bin}`, `~/.nvm`), editor/agent configs
+    (`~/.config/Code/User`, `~/.config/Cursor/User`, `~/.cursor`,
+    `~/.config/opencode`, `~/.gemini`), window-manager and terminal configs
+    (hypr, i3, sway, kitty, alacritty, wezterm), autostart and systemd user
+    units (incl. `~/.local/share/systemd`, `~/.local/share/applications` and
+    their relocated `$XDG_CONFIG_HOME` / `$XDG_DATA_HOME` twins),
+    `~/.local/bin`, cron spools, system dirs, and vibatchium's own runtime dir
+    (`daemon.sock`, pidfile, lock, observe/vision caches — only `screenshots/`
+    and `explores/` stay writable) and state dir.
+  - *write, anywhere on disk* — any path through a `.git`, `.claude`, `.vscode`,
+    `.idea`, `.cursor`, `.husky` or `.devcontainer` dir, `.github/workflows`,
+    `node_modules/.bin`, `site-packages` / `dist-packages`, a virtualenv's
+    `bin/` (a `.venv*` dir, or any dir holding a `pyvenv.cfg`), `*.pth` files,
+    and files the next `pytest` / `make` / `npm` / CI run / agent session
+    executes or obeys: `conftest.py`, `sitecustomize.py`, `usercustomize.py`,
+    `Makefile`, `package.json`, `.pre-commit-config.yaml`, `.gitlab-ci.yml`,
+    `.mcp.json`, `.envrc`, `CLAUDE.md`, `CLAUDE.local.md`, `AGENTS.md`,
+    `GEMINI.md`, `.cursorrules`, `.windsurfrules`,
+    `.github/copilot-instructions.md`. The agent's project is inside its
+    default roots, so these are what keep a downloaded or PDF-rendered file
+    from becoming code. A Claude Code agent worktree's content
+    (`<repo>/.claude/worktrees/<name>/…`) is an ordinary checkout and stays
+    writable — minus the files above.
 - **Navigation is a file read too.** `go`, `explore`, `storage restore`
-  origins, `checkpoint load` tabs and `fingerprint --url` map a `file:` URL to
-  its path and judge it like `upload` would (a directory URL — a listing —
-  checks the dir). `view-source:`, `chrome:`, `devtools:`, `filesystem:` and
-  other non-web schemes are refused; `http(s)`, `data:`, `blob:` and
+  origins, `checkpoint load` tabs and `fingerprint --url` judge their URL
+  before anything loads. On an **agent surface** (MCP, a `--caps`-restricted
+  REST shim) a `file:` URL is refused outright, whatever the path and even
+  with `VIBATCHIUM_FILE_ROOTS=*`: a loaded `file:` page can navigate to, frame
+  or pop up any other `file:` URL, so judging the first one isn't enough (a
+  lean `pdf --path /tmp/x.html` whose page title carried a script, then
+  `go file:///tmp/x.html`, redirected to a key). Serve the file over http
+  instead. On the CLI/SDK a `file:` URL maps to its path and is judged like
+  `upload` would (a directory URL — a listing — checks the dir).
+  `view-source:`, `chrome:`, `devtools:`, `filesystem:` and other non-web
+  schemes are refused everywhere; `http(s)`, `data:`, `blob:` and
   `about:blank` pass (plus `chrome://crash`/`kill`, which only kill the
   session's own renderer). `javascript:` runs in the current page's origin, so
   it is `eval` by another name and the secret guard handles it as one.
+- **Follow-on `file:` loads are judged too, on every surface.** Each session's
+  browser carries a CDP `Fetch` interceptor on the browser target whose only
+  pattern is `file://*`. Every `file:` request (top-level, redirect, iframe,
+  popup, sub-resource) goes through the same check as `upload`, and a denied
+  one fails with `net::ERR_ACCESS_DENIED`. It sits in the network layer for
+  the whole browser, so new tabs and popups are covered from their first
+  request. It is armed at launch and attach, so self-heal relaunches and
+  pre-warmed sessions get it too. It never sees an http(s) request, so unlike
+  `route_add` (`context.route`) it leaves Chrome's HTTP cache on. If it can't be
+  armed, the session still starts and a warning is logged; agent surfaces
+  don't rely on it.
 - **Agent surfaces get roots by default.** `vb mcp` (and a `--caps`-restricted
   `vb rest`) confine caller paths to the server's cwd — the agent's project dir,
   skipped if it is `/` or all of `$HOME` — plus `/tmp`, `$TMPDIR`,
   `~/Downloads` and vibatchium's screenshot/explore output dirs; relative paths
   resolve against that cwd rather than the daemon's. `VIBATCHIUM_FILE_ROOTS` in
-  the MCP server's env replaces the defaults; `VIBATCHIUM_FILE_ROOTS=*` opts out.
+  the MCP server's env replaces the defaults; `VIBATCHIUM_FILE_ROOTS=*` opts out
+  of the roots (not the deny list, and not the `file:` navigation refusal).
   The surface sends this as an internal `_fs_scope` arg on every call and
   strips any caller-supplied copy; the daemon validates it fail-closed and a
   nested scope can only narrow. CLI and SDK calls carry no scope, so bots

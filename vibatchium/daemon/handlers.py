@@ -525,8 +525,14 @@ async def _fill_secret(args, loc, entry=None):
                 raise _secrets.SecretOriginError(problem)
         page = frame.page
         taint = await _guard.caller_js_violation(page, pre_origin, site)
+        # Evaluated even when the taint check already refuses: it wipes a
+        # fulfill-planted service worker, so the caller's `reload` (which the
+        # taint refusal asks for) fetches the real page, not the worker's.
+        planted = await _guard.fulfilled_origin_violation(page, pre_origin, site)
         if taint:
             raise _guard.CallerJsTaintError(taint)
+        if planted:
+            raise _guard.CallerJsTaintError(planted)
         fulfill = _guard.fulfill_route_violation(
             getattr(entry, "session", None), site)
         if fulfill:

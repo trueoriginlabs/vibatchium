@@ -16,6 +16,8 @@ from patchright.async_api import (
     async_playwright,
 )
 
+from . import file_guard as _file_guard
+
 log = logging.getLogger("vibatchium.browser")
 
 
@@ -225,6 +227,9 @@ class BrowserSession:
     # can await it and reuse its fresh page instead of opening a second one.
     _reviving: bool = False
     _revive_task: object = None
+    # 0.19.4: the browser-level CDP session of the file: load guard
+    # (daemon/file_guard.py), or None if it couldn't be armed.
+    file_guard: object = None
 
     @property
     def target(self):
@@ -625,6 +630,7 @@ async def launch_session(profile_dir: Path, headless: bool = False,
                           gpu=bool(gpu and headless), gpu_node=effective_node,
                           device_scale_factor=scale)
     _wire_page_tracking(sess)
+    await _file_guard.install(sess)
     return sess
 
 
@@ -648,6 +654,7 @@ async def attach_session(cdp_url: str, *, pw: Playwright | None = None) -> Brows
     sess = BrowserSession(pw=pw, context=context, page=page, mode="attach",
                           cdp_url=cdp_url, owns_pw=owns_pw)
     _wire_page_tracking(sess)
+    await _file_guard.install(sess)
     return sess
 
 
@@ -663,6 +670,9 @@ async def close_session(session: BrowserSession) -> None:
             await cdp.detach()
         session.console["_cdp"] = None
         session.console["capturing"] = False
+    # 0.19.4: release the file: guard — in attach mode the user's Chrome
+    # outlives the session and must not keep pausing its file: loads.
+    await _file_guard.uninstall(session)
     try:
         if session.mode == "launch":
             await session.context.close()

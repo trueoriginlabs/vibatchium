@@ -196,6 +196,88 @@ def test_route_fulfill_cannot_serve_a_fake_login_page(local_server, local_site):
     assert _fill(local_site)["origin_check"] == "site"
 
 
+# A fulfilled page registers a fulfilled service worker that serves a fake
+# login page for secret_form.html — and keeps serving it after the rule is gone.
+_SW_JS = (
+    "self.addEventListener('install', e => self.skipWaiting());"
+    "self.addEventListener('activate', e => e.waitUntil(clients.claim()));"
+    "self.addEventListener('fetch', e => {"
+    " if (new URL(e.request.url).pathname.endsWith('/secret_form.html'))"
+    "  e.respondWith(new Response('<!doctype html><title>sw-fake</title><p>'"
+    "   + 'worker-served '.repeat(12) + '</p><input id=\"f\">',"
+    "   {headers: {'content-type': 'text/html'}}));"
+    "});")
+_SW_PLANT = (
+    "<!doctype html><title>planting</title><p>" + "plant " * 30 + "</p><script>"
+    "navigator.serviceWorker.register('/sw_planted.js')"
+    ".then(() => navigator.serviceWorker.ready)"
+    ".then(() => { document.title = 'sw-ready'; })"
+    ".catch(e => { document.title = 'sw-error ' + e; });"
+    "</script>")
+
+
+def _plant_service_worker(local_server):
+    call("route_add", {"pattern": "**/sw_plant.html", "mode": "fulfill",
+                       "body": _SW_PLANT, "content_type": "text/html"})
+    call("route_add", {"pattern": "**/sw_planted.js", "mode": "fulfill",
+                       "body": _SW_JS, "content_type": "application/javascript"})
+    call("go", {"url": f"{local_server}/sw_plant.html"})
+    _wait_title("sw-ready")
+    call("go", {"url": f"{local_server}/secret_form.html"})
+    assert call("title", {})["title"] == "sw-fake"       # the worker serves it
+
+
+def _wait_title(want, timeout=10.0):
+    import time
+    end = time.time() + timeout
+    title = None
+    while time.time() < end:
+        title = call("title", {})["title"]
+        if title == want:
+            return
+        time.sleep(0.1)
+    raise AssertionError(f"title stayed {title!r}, wanted {want!r}")
+
+
+def test_route_clear_wipes_a_fulfill_planted_service_worker(local_server, local_site):
+    """A service worker planted by fulfilled bytes survives the rule; the taint
+    check keys on document loader ids, so a fresh worker-served document would
+    look clean. `route_clear` wipes the worker; the next fill into that origin
+    is still refused once (the origin was fulfill-served) and succeeds after a
+    reload."""
+    try:
+        _plant_service_worker(local_server)
+    finally:
+        res = call("route_clear", {})
+    assert local_server in res.get("service_workers_cleared", [])
+    call("go", {"url": f"{local_server}/secret_form.html"})
+    assert call("title", {})["title"] == "secret form"   # worker is gone
+    with pytest.raises(Exception, match="service worker"):
+        _fill(local_site)
+    call("reload", {})
+    assert call("title", {})["title"] == "secret form"
+    assert _fill(local_site)["origin_check"] == "site"
+
+
+def test_fill_wipes_a_planted_worker_that_outlived_its_rule(local_server, local_site):
+    """Without a `route_clear` (the rule was flipped to passthrough) the worker
+    still serves the login page: the fill is refused, the worker wiped, and
+    after a reload the real page loads and the fill goes through."""
+    try:
+        _plant_service_worker(local_server)
+        for pat in ("**/sw_plant.html", "**/sw_planted.js"):
+            call("route_add", {"pattern": pat, "mode": "passthrough"})
+        call("go", {"url": f"{local_server}/secret_form.html"})
+        assert call("title", {})["title"] == "sw-fake"   # outlived the rule
+        with pytest.raises(Exception, match="service worker"):
+            _fill(local_site)
+        call("reload", {})
+        assert call("title", {})["title"] == "secret form"
+        assert _fill(local_site)["origin_check"] == "site"
+    finally:
+        call("route_clear", {})
+
+
 # ─── opaque frames ──────────────────────────────────────────────────────────
 
 @pytest.mark.parametrize("kind", ["blank", "srcdoc"])

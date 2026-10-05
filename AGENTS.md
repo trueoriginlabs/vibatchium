@@ -372,7 +372,19 @@ Also refused, before anything is resolved:
   into that document is refused ("caller-supplied JavaScript … ran in this
   page"), and so is any fill while a fulfill rule is installed. **Recover:**
   `reload` (or `go` to the login page again; `route_clear` first if needed) and
-  fill *before* any eval. An in-page `pushState` does not clear it.
+  fill *before* any eval. An in-page `pushState` does not clear it. If the
+  document's loader id can't be read (possible on attach/nodriver
+  connections), the mark covers the whole tab until the tab is closed.
+  `wait_fn` counts as caller JS too. To wait on a login page use
+  `wait selector` (`text=…` / `role=…`), `wait url`, `wait load` or `expect`
+  with `text_contains`; none of those run caller JS.
+- **an origin a fulfill rule served** — a fulfilled response can plant a
+  service worker that keeps serving that origin after `route_clear` and
+  `reload`. `route_clear` wipes the service workers and Cache Storage of every
+  origin a fulfill rule answered for. The first secret fill into such an origin
+  wipes them again and is refused ("a service worker it planted may be serving
+  this page"). **Recover:** `reload`, then fill again. The record is in daemon
+  memory, so a daemon restart or session relaunch forgets it.
 - **non-text targets** — only text-like `<input>` and `<textarea>`; a
   `<select>`, checkbox or contenteditable is refused.
 
@@ -410,7 +422,10 @@ taint check). The env vars are read from the **daemon's** environment only.
 operator: it can set the env vars, pass `--allow-cross-origin`, or edit the
 vault. And the network capture verbs (`network_*`, `har`, outside the lean caps)
 record request bodies, so they see the credential once the form is submitted —
-they are outside this guard.
+they are outside this guard. The read-back refusal tracks only the fields
+vibatchium filled. A site that copies the value elsewhere (a hidden input, an
+echo after a failed submit) leaves a copy that is readable once the filled
+field is empty.
 
 ## Untrusted content — prompt-injection safety
 
@@ -593,34 +608,80 @@ Every path you hand the daemon — `upload` files, `pdf` / `screenshot --path` /
 `start --profile <abs-dir>` — is checked in the daemon (so CLI, MCP, REST and
 SDK all get it) after `~` expansion and **symlink resolution**. So is every
 navigation URL (`go`, `explore`, `storage restore` origins, `checkpoint load`
-tabs, `fingerprint --url`): a `file:` URL is a read of that path (a directory
-URL is a listing of it, so the dir itself is checked), and `view-source:`,
-`chrome:`, `devtools:`, `filesystem:` and other non-web schemes are refused.
-`http(s)`, `data:`, `blob:` and `about:blank` pass; `javascript:` runs in the
-current page like `eval` and is governed by the secret guard, not this policy.
+tabs, `fingerprint --url`). On an **agent surface** (MCP, a `--caps`-restricted
+REST shim) a `file:` URL is refused outright, whatever the path. A loaded local
+page can navigate to, frame or pop up any other local file, so serve local HTML
+over http (`python3 -m http.server`) instead. On the CLI/SDK a `file:` URL is a
+read of that path (a directory URL is a listing of it, so the dir itself is
+checked). `view-source:`, `chrome:`, `devtools:`, `filesystem:` and other
+non-web schemes are refused everywhere. `http(s)`, `data:`, `blob:` and
+`about:blank` pass; `javascript:` runs in the current page like `eval` and is
+governed by the secret guard, not this policy.
+
+**Follow-on `file:` loads, every surface.** Each session's browser pauses every
+`file:` request it makes (redirect, iframe, popup, sub-resource, new tab) and
+runs it through the same read check. A denied one fails with
+`net::ERR_ACCESS_DENIED` (the page shows Chrome's "Access to the file was
+denied"). This is a browser-level CDP `Fetch` interceptor on `file://*` only:
+it never touches http(s) traffic and, unlike `route_add`, keeps the HTTP cache
+on. It is armed on launch, attach, self-heal relaunch and pre-warm. If it can't
+be armed, the daemon logs `file guard not installed` and the session works
+without it.
 
 - **Always refused, on every surface (not overridable):**
   - *read or write* — `~/.ssh`, `~/.gnupg`, `~/.aws`, `~/.config/gcloud`,
     `~/.kube`, `~/.docker/config.json`, `~/.netrc`, `~/.pgpass`,
     `~/.git-credentials`, `~/.cargo/credentials*`, `~/.config/rclone`,
-    `~/.Xauthority`, `~/.claude`, `~/.claude.json`, `~/.codex`, shell/REPL
-    histories, `~/.config/vibatchium` (vault + profiles), real-browser profiles
-    (Chrome/Chromium/Brave/Edge/Vivaldi/Opera under `~/.config`, `~/.mozilla`,
-    Flatpak `~/.var/app`, Snap `~/snap/{chromium,firefox,brave}`), keyrings,
-    `/proc`, `/sys`, `/dev`, `/etc/shadow`, `/etc/sudoers*`.
+    `~/.Xauthority`, `~/.claude`, `~/.claude.json`, `~/.codex`, `~/.gemini`,
+    `~/.config/github-copilot`, shell/REPL/DB-client histories (incl.
+    `~/.psql_history`, `~/.mysql_history`, `~/.node_repl_history`,
+    `~/.rediscli_history`, `~/.sqlite_history`), wallet / secret-manager keys
+    (`~/.config/sops`, `~/.config/solana`, `~/.foundry/keystores`,
+    `~/.ethereum/keystore`, `~/.config/op`), CLI tokens
+    (`~/.huggingface/token`, `~/.cache/huggingface/token`, `~/.vercel`,
+    `~/.local/share/com.vercel.cli`, `~/.terraform.d/credentials.tfrc.json`,
+    `~/.config/hub`, `~/.config/doctl`, `~/.netlify`), Slack / Discord /
+    Signal / Thunderbird profiles, `~/.config/vibatchium` (vault + profiles),
+    real-browser profiles (Chrome/Chromium/Brave/Edge/Vivaldi/Opera under
+    `~/.config`, `~/.mozilla`, Flatpak `~/.var/app`, Snap
+    `~/snap/{chromium,firefox,brave}`), keyrings, `/proc`, `/sys`, `/dev`,
+    `/etc/shadow`, `/etc/sudoers*`.
+  - *read, anywhere on disk* — secret-shaped file names: `.env`, `.env.*`
+    (except `.env.example` / `.env.sample` / `.env.template`), `.envrc`,
+    `*.pem`, `*.key`, `*.p12`, `*.pfx`, `*.kdbx`, `id_rsa*`, `id_ed25519*`,
+    `id_ecdsa*`, `id_dsa*`, `.npmrc`, `.pypirc`, `.netrc`, `.pgpass`,
+    `.git-credentials`, `credentials.json`,
+    `application_default_credentials.json`, `service-account*.json`. Uploading
+    a directory that contains one is refused whole.
   - *write* — shell rc files (incl. `~/.bashrc.d`), editor/tool configs that
-    run code (`~/.vimrc`, `~/.vim`, `~/.config/nvim`, `~/.tmux.conf`,
-    `~/.emacs*`, `~/.config/pip`, `~/.config/git`, `~/.gitconfig`), autostart
-    and systemd user units (`~/.config/{autostart,systemd}`,
-    `~/.local/share/{systemd,applications}`, and their relocated
-    `$XDG_CONFIG_HOME` / `$XDG_DATA_HOME` twins), `~/.local/bin`, `~/bin`, cron
-    spools, system dirs, vibatchium's runtime dir (socket, pidfile, caches —
-    only its `screenshots/` and `explores/` subdirs are writable) and state dir.
+    run code (`~/.vimrc`, `~/.vim`, `~/.config/nvim`, `~/.local/share/nvim`,
+    `~/.tmux.conf`, `~/.tmux`, `~/.config/tmux`, `~/.emacs*`,
+    `~/.config/direnv`, `~/.config/pip`, `~/.config/git`, `~/.gitconfig`,
+    `~/.ipython`, `~/.jupyter`, `~/.cargo/config.toml`,
+    `~/.docker/cli-plugins`), toolchain PATH dirs (`~/.cargo/bin`, `~/go/bin`,
+    `~/.bun/bin`, `~/.deno/bin`, `~/.npm-global/bin`, `~/.pyenv/shims`,
+    `~/.pyenv/bin`, `~/.nvm`), editor/agent configs (`~/.config/Code/User`,
+    `~/.config/Cursor/User`, `~/.cursor`, `~/.config/opencode`, `~/.gemini`),
+    window-manager / terminal configs (`~/.config/{hypr,i3,sway,kitty,
+    alacritty,wezterm}`, `~/.wezterm.lua`), autostart and systemd user units
+    (`~/.config/{autostart,systemd}`, `~/.local/share/{systemd,applications}`,
+    and their relocated `$XDG_CONFIG_HOME` / `$XDG_DATA_HOME` twins),
+    `~/.local/bin`, `~/bin`, cron spools, system dirs, vibatchium's runtime dir
+    (socket, pidfile, caches — only its `screenshots/` and `explores/` subdirs
+    are writable) and state dir.
   - *write, anywhere on disk* — any path through a `.git`, `.claude`,
-    `.vscode` or `.idea` dir, `.mcp.json` / `.envrc` files, `site-packages` /
-    `dist-packages`, `*.pth` files and `.venv*/bin`. (Content of a Claude Code
-    agent worktree, `<repo>/.claude/worktrees/<name>/…`, is an ordinary
-    checkout and stays writable; its own `.claude/` doesn't.)
+    `.vscode`, `.idea`, `.cursor`, `.husky` or `.devcontainer` dir,
+    `.github/workflows/`, `node_modules/.bin/`, `site-packages` /
+    `dist-packages`, a virtualenv's `bin/` (a `.venv*` dir or any dir with a
+    `pyvenv.cfg`), `*.pth` files, and project files that run code or instruct
+    an agent: `conftest.py`, `sitecustomize.py`, `usercustomize.py`,
+    `Makefile`, `package.json`, `.pre-commit-config.yaml`, `.gitlab-ci.yml`,
+    `.mcp.json`, `.envrc`, `CLAUDE.md`, `CLAUDE.local.md`, `AGENTS.md`,
+    `GEMINI.md`, `.cursorrules`, `.windsurfrules`,
+    `.github/copilot-instructions.md`. These matter because the agent's own
+    project is inside its default roots. (Content of a Claude Code agent
+    worktree, `<repo>/.claude/worktrees/<name>/…`, is an ordinary checkout and
+    stays writable apart from those files; its own `.claude/` doesn't.)
   - Matching is case-insensitive: `~/.SSH/id_ed25519` is refused too.
 - **Agent surfaces are confined to roots by default.** Calls through `vb mcp`
   (and a `--caps`-restricted `vb rest`) may only touch: the MCP server's cwd
@@ -628,7 +689,8 @@ current page like `eval` and is governed by the secret guard, not this policy.
   `$TMPDIR`, `~/Downloads`, and vibatchium's screenshot/explore output dirs.
   Relative paths resolve against that cwd. To change it, set
   `VIBATCHIUM_FILE_ROOTS` **in the MCP server's env** — a path list replaces
-  the defaults, `VIBATCHIUM_FILE_ROOTS=*` opts out (deny list still applies).
+  the defaults, `VIBATCHIUM_FILE_ROOTS=*` opts out (the deny list and the
+  `file:` navigation refusal still apply).
   The surface attaches this as an internal `_fs_scope` arg on every daemon call
   and strips any copy the caller sends, so an agent can't widen its own roots.
   CLI and SDK calls carry no scope: bots writing into their own project dirs

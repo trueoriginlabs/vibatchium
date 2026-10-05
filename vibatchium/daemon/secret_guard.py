@@ -20,6 +20,16 @@ reads the value for it.
   the isolated world that caller JS shares. A document is identified by its
   CDP loader id, so a navigation or reload clears the mark and an in-page
   `history.pushState` does not.
+* **Fulfilled origins.** A fulfilled response can register a service worker
+  (or fill Cache Storage) that outlives the rule, `route_clear` and `reload`,
+  and serves a LATER document of that origin — a fresh loader id the taint
+  check would call clean. So every origin a fulfill rule answered for is
+  recorded per browser context. `route_clear` wipes those origins' service
+  workers + Cache Storage (CDP `Storage.clearDataForOrigin`); a secret fill
+  into a recorded origin wipes them again, forgets the origin and is refused
+  once ("reload and fill again"), because the current document may be
+  worker-served. The record is in memory: a daemon restart or a session
+  relaunch forgets it.
 
 `VIBATCHIUM_SECRET_ALLOW_READBACK=1` in the daemon's env turns both off. It is
 read from the daemon's environment only; no verb argument can set it.
@@ -46,6 +56,9 @@ _TAINT: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
 _CDP: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
 # page -> [ElementHandle] of fields we filled from the vault
 _FILLED: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+# browser context -> {serialized origin a fulfill rule answered a request for}
+_FULFILLED_ORIGINS: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+_SW_STORAGE = "service_workers,cache_storage"
 _MAX_TRACKED = 16
 
 # Every element in the document (through OPEN shadow roots) that we tagged as a
@@ -127,14 +140,101 @@ def is_javascript_url(url) -> bool:
     return s[:11].lower() == "javascript:"
 
 
-async def record_fulfilled(request) -> None:
+def _origin_str(url) -> str | None:
+    o = _secrets.url_origin(url)
+    return _secrets.format_origin(o) if o else None
+
+
+def _record_fulfilled_origins(request, context) -> None:
+    """Remember every origin caller bytes from this response can act as: the
+    request's own (a document, a worker script) and, for a sub-resource, the
+    document it lands in (a fulfilled script runs as that origin)."""
+    found = {_origin_str(getattr(request, "url", None))}
+    with contextlib.suppress(Exception):
+        frame = request.frame
+        if context is None:
+            context = frame.page.context
+        if not request.is_navigation_request():
+            found.add(_origin_str(frame.url))
+    with contextlib.suppress(Exception):
+        sw = request.service_worker
+        if sw is not None:
+            found.add(_origin_str(sw.url))
+    found.discard(None)
+    if context is None or not found:
+        return
+    _FULFILLED_ORIGINS.setdefault(context, set()).update(found)
+
+
+def fulfilled_origins(context) -> set[str]:
+    return set(_FULFILLED_ORIGINS.get(context) or ())
+
+
+async def clear_origin_workers(page, origin: str) -> bool:
+    """Unregister `origin`'s service workers and drop its Cache Storage.
+    Returns True if CDP accepted the call."""
+    for _attempt in range(2):
+        try:
+            sess = await _cdp(page)
+            await asyncio.wait_for(sess.send("Storage.clearDataForOrigin", {
+                "origin": origin, "storageTypes": _SW_STORAGE}), 10)
+            return True
+        except Exception:  # noqa: BLE001 — stale session: drop and retry once
+            _CDP.pop(page, None)
+    log.warning("could not clear service workers for %s", origin)
+    return False
+
+
+async def clear_fulfilled_origins(context, page) -> list[str]:
+    """`route_clear`: wipe service workers + Cache Storage of every origin a
+    fulfill rule served. The origins stay recorded, so the next secret fill
+    into one of them is still refused once (see `fulfilled_origin_violation`):
+    a document loaded while the worker was alive may still be on screen."""
+    origins = sorted(fulfilled_origins(context))
+    for origin in origins:
+        await clear_origin_workers(page, origin)
+    return origins
+
+
+async def fulfilled_origin_violation(page, pre_origin, site: str) -> str | None:
+    """Why a secret must not be written into `page` now, or None: a fulfill
+    rule once answered for the target's origin, so a service worker it
+    registered may be serving this document. Wipes the origin's service
+    workers + Cache Storage and forgets the origin before returning, so the
+    caller's `reload` gets the real page and the next fill goes through."""
+    if _secrets.readback_env_enabled() or pre_origin is None:
+        return None
+    try:
+        context = page.context
+    except Exception:  # noqa: BLE001
+        return None
+    marks = _FULFILLED_ORIGINS.get(context)
+    origin = _secrets.format_origin(pre_origin)
+    if not marks or origin not in marks:
+        return None
+    if not await clear_origin_workers(page, origin):
+        return (f"refusing to fill a {site!r} secret: a `route_add --mode "
+                f"fulfill` rule served content for {origin} in this session, "
+                f"and its service workers could not be cleared. Close the "
+                f"session and start it again before filling.")
+    marks.discard(origin)
+    return (f"refusing to fill a {site!r} secret: a `route_add --mode fulfill` "
+            f"rule served content for {origin} earlier in this session, so a "
+            f"service worker it planted may be serving this page. Cleared "
+            f"{origin}'s service workers and Cache Storage — `reload` the login "
+            f"page and fill again.")
+
+
+async def record_fulfilled(request, context=None) -> None:
     """A `route_add --mode fulfill` rule just answered `request` with caller-
-    written bytes. Mark the document they end up in as touched by caller JS:
-    a fulfilled main-frame navigation becomes the NEXT document of the page (so
-    mark it once it commits), anything else (script, iframe, XHR) lands in the
-    current one."""
+    written bytes. Record the origins it can act as (see
+    `_record_fulfilled_origins`), then mark the document they end up in as
+    touched by caller JS: a fulfilled main-frame navigation becomes the NEXT
+    document of the page (so mark it once it commits), anything else (script,
+    iframe, XHR) lands in the current one."""
     if _secrets.readback_env_enabled():
         return
+    _record_fulfilled_origins(request, context)
     try:
         frame = request.frame
         page = frame.page
