@@ -2029,7 +2029,7 @@ requires-dist = [
     { name = "keyring", marker = "extra == 'secrets'", specifier = ">=24.0,<26.0" },
     { name = "mcp", specifier = ">=1.30.0,<2.0" },
     { name = "nodriver", marker = "extra == 'nodriver'", specifier = ">=0.50.0,<1.0" },
-    { name = "patchright", specifier = ">=1.59.1,!=1.61.1,<1.62" },
+    { name = "patchright", specifier = ">=1.61.2,<1.62" },
     { name = "pillow", marker = "extra == 'all'", specifier = ">=10.0,<13.0" },
     { name = "pillow", marker = "extra == 'annotate'", specifier = ">=10.0,<13.0" },
     { name = "pynacl", marker = "extra == 'all'", specifier = ">=1.5,<2.0" },

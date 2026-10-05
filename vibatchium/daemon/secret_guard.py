@@ -309,16 +309,48 @@ async def caller_js_violation(page, pre_origin, site: str) -> str | None:
 
 # ─── live-secret tracking + read-back refusal ───────────────────────────────
 
-def track_secret_field(page, handle) -> bool:
+# A tracked handle is only ever evaluated while the document it came from is
+# still loaded. Evaluating a handle whose execution context died in a
+# navigation is an ordinary error on Patchright 1.61+, but on 1.60 it kills the
+# shared Playwright driver — every session on the daemon with it. So each fill
+# stamps a token into its frame's document (isolated world, read via the FRAME,
+# which always targets the current document) and the handle is touched only
+# while that token is still there.
+_DOC_STAMP_JS = """t => { (window.__vbSecretDocs = window.__vbSecretDocs || new Set()).add(t); return true; }"""
+_DOC_HAS_JS = """t => !!(window.__vbSecretDocs && window.__vbSecretDocs.has(t))"""
+
+
+async def track_secret_field(page, handle, frame=None) -> bool:
     """Remember a field we filled from the vault. Returns True if the caller
     must NOT dispose `handle` (we kept it)."""
+    import secrets as _pysecrets
+    token = _pysecrets.token_hex(8)
+    if frame is not None:
+        try:
+            await asyncio.wait_for(frame.evaluate(_DOC_STAMP_JS, token), 3)
+        except Exception:  # noqa: BLE001 — unstamped: the DOM sweep still covers it
+            frame = None
     handles = _FILLED.setdefault(page, [])
-    handles.append(handle)
-    while len(handles) > _MAX_TRACKED:
-        old = handles.pop(0)
-        with contextlib.suppress(Exception):
-            asyncio.get_running_loop().create_task(old.dispose())
+    handles.append((handle, frame, token))
+    # Evicted entries are dropped, not disposed: disposing a handle whose
+    # document is gone is the same driver-killing call on Patchright 1.60.
+    del handles[:-_MAX_TRACKED]
     return True
+
+
+async def _same_document(frame, token) -> bool | None:
+    """True if `frame` still holds the document the token was stamped into,
+    False if it navigated / detached, None if it can't tell in time."""
+    if frame is None:
+        return False
+    try:
+        if frame.is_detached():
+            return False
+        return bool(await asyncio.wait_for(frame.evaluate(_DOC_HAS_JS, token), 3))
+    except TimeoutError:
+        return None
+    except Exception:  # noqa: BLE001 — context gone mid-check
+        return False
 
 
 async def secret_live(page) -> bool:
@@ -328,23 +360,30 @@ async def secret_live(page) -> bool:
     handles = _FILLED.get(page) or []
     keep = []
     live = False
-    for h in handles:
+    for entry in handles:
         if live:
-            keep.append(h)
+            keep.append(entry)
             continue
+        h, frame, token = entry
+        same = await _same_document(frame, token)
+        if same is None:
+            live = True          # page wedged — can't prove it's gone
+            keep.append(entry)
+            continue
+        if not same:
+            continue             # its document is gone; never touch the handle
         try:
             if await asyncio.wait_for(h.evaluate(_HANDLE_LIVE_JS), 3):
                 live = True
-                keep.append(h)
+                keep.append(entry)
             else:
                 with contextlib.suppress(Exception):
                     await h.dispose()
         except TimeoutError:
             live = True          # page wedged — can't prove it's gone
-            keep.append(h)
-        except Exception:  # noqa: BLE001 — context destroyed / detached
-            with contextlib.suppress(Exception):
-                await h.dispose()
+            keep.append(entry)
+        except Exception:  # noqa: BLE001 — node detached
+            pass
     if handles:
         _FILLED[page] = keep
     if live:

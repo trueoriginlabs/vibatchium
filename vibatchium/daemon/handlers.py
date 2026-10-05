@@ -609,7 +609,7 @@ async def _fill_secret(args, loc, entry=None):
                 f"after fill ({recheck}); cleared the field")
         # Track the node so read-back verbs are refused while it holds a value
         # (works across frames and closed shadow roots, unlike a DOM sweep).
-        keep_handle = _guard.track_secret_field(page, handle)
+        keep_handle = await _guard.track_secret_field(page, handle, frame)
         return {"filled": args["target"], "from_secret": ref,
                 "render_masked": recheck, "origin": shown,
                 "origin_check": origin_check}
