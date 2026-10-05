@@ -39,8 +39,10 @@ something the engine does for real (worker scheduling throughput, the V8 heap
 limit, re-rendering the same canvas twice, glyph metrics, worker
 ``navigator.languages``). A detectable lie is worse than a twin.
 
-Opt-in, per-session, persisted in ``persona.json`` next to gpu.json/display.json,
-generated ONCE from a random seed and never re-derived — the same identity must
+Opt-in, per-session, persisted in ``persona.json`` next to gpu.json/display.json
+(for a caller-chosen ``start --profile <dir>`` outside vibatchium's profiles dir,
+in the operator-only pins store instead — the same trust rule as browser.json:
+a persona.json planted inside such a dir is ignored), generated ONCE from a random seed and never re-derived — the same identity must
 come back with the same screen on every launch and every self-heal relaunch (a
 logged-in account whose monitor changes size every restart is its own tell).
 Default sessions launch byte-identically to before: no persona.json, no args.
@@ -99,8 +101,15 @@ MIN_WINDOW = (1024, 680)
 P_MAXIMIZED = 0.55
 
 
+FILE_NAME = "persona.json"
+
+
 def session_persona_path(profile_dir: Path) -> Path:
-    return profile_dir / "persona.json"
+    """Where this profile's persona lives: in the profile dir when vibatchium
+    manages it, else in the operator-only pins store (see browser_binary.py for
+    why a caller-chosen dir can't carry its own launch config)."""
+    from .daemon.paths import profile_config_dir
+    return profile_config_dir(profile_dir) / FILE_NAME
 
 
 def _pick(rng: random.Random, table, weight_idx: int = -1):
@@ -197,15 +206,38 @@ def persona_launch_args(p: dict) -> list[str]:
 # ── per-session storage (mirrors gpu.py / display.py) ───────────────────────
 
 
-def _node_usage(profiles_root: Path, *, exclude: Path | None = None) -> dict[str, int]:
-    """How many sibling profiles already render on each GPU node — an explicit
-    gpu.json pin, else a persona-supplied node for a GPU-on profile."""
+def _node_usage(profiles_root: Path | None = None, *,
+                exclude: Path | None = None,
+                pins_root: Path | None = None) -> dict[str, int]:
+    """How many OTHER vibatchium profiles already render on each GPU node — an
+    explicit gpu.json pin, else a persona-supplied node for a GPU-on profile.
+
+    Scans only vibatchium's own stores: the managed profiles dir and the pins
+    store (whose entries name the caller-chosen dir they configure). Never the
+    parent of a caller-chosen dir — for ``start --profile /tmp/x`` that was all
+    of /tmp.
+    """
+    from .daemon import paths as _paths
     from .gpu import load_session_gpu
+    if profiles_root is None:
+        profiles_root = _paths.PROFILES_DIR
+    if pins_root is None:
+        pins_root = _paths.PINS_DIR
+    skip = os.path.realpath(exclude) if exclude is not None else None
+    dirs: list[Path] = []
+    if profiles_root.is_dir():
+        dirs += [d for d in profiles_root.iterdir() if d.is_dir()]
+    if pins_root.is_dir():
+        for e in pins_root.iterdir():
+            try:
+                ref = (e / "profile").read_text().strip()
+            except OSError:
+                continue
+            if ref and os.path.isabs(ref) and os.path.isdir(ref):
+                dirs.append(Path(ref))
     usage: dict[str, int] = {}
-    if not profiles_root.is_dir():
-        return usage
-    for d in profiles_root.iterdir():
-        if not d.is_dir() or (exclude is not None and d == exclude):
+    for d in dirs:
+        if skip is not None and os.path.realpath(d) == skip:
             continue
         g = load_session_gpu(d) or {}
         node = g.get("node")
@@ -226,7 +258,8 @@ def save_session_persona(profile_dir: Path, p: dict | None) -> None:
         return
     if validate_persona(p) is None:
         raise ValueError("refusing to persist an incoherent persona")
-    profile_dir.mkdir(parents=True, exist_ok=True)
+    from .daemon.paths import ensure_profile_config_dir
+    ensure_profile_config_dir(profile_dir)
     path.write_text(json.dumps(p))
     os.chmod(path, 0o600)
 
@@ -253,7 +286,7 @@ def ensure_session_persona(profile_dir: Path, *, reroll: bool = False) -> dict:
             return cur
     from .gpu import available_gpu_nodes
     nodes = available_gpu_nodes()
-    usage = _node_usage(profile_dir.parent, exclude=profile_dir) if nodes else {}
+    usage = _node_usage(exclude=profile_dir) if nodes else {}
     p = generate_persona(secrets.token_hex(8), gpu_nodes=nodes, node_usage=usage)
     save_session_persona(profile_dir, p)
     return p
@@ -262,6 +295,8 @@ def ensure_session_persona(profile_dir: Path, *, reroll: bool = False) -> dict:
 def resolve_persona(profile_dir: Path, *, name: str = "?") -> dict | None:
     """Effective persona for a launch: the persisted persona.json or None. Pure
     read (the registry calls it on every launch AND relaunch)."""
+    from .browser_binary import warn_untrusted_in_profile
+    warn_untrusted_in_profile(profile_dir, FILE_NAME, "a persona", name=name)
     p = load_session_persona(profile_dir)
     if p is not None:
         log.info("session %s: persona screen=%sx%s window=%sx%s@%s,%s",

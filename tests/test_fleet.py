@@ -22,6 +22,18 @@ def _mk_async(val):
     return _f
 
 
+@pytest.fixture(autouse=True)
+def stores(monkeypatch, tmp_path_factory):
+    """In-process tests get a private managed-profiles dir and pins store —
+    never the real ~/.config/vibatchium."""
+    from vibatchium.daemon import paths
+    out = SimpleNamespace(profiles=tmp_path_factory.mktemp("profiles"),
+                          pins=tmp_path_factory.mktemp("pins"))
+    monkeypatch.setattr(paths, "PROFILES_DIR", out.profiles)
+    monkeypatch.setattr(paths, "PINS_DIR", out.pins)
+    return out
+
+
 # ─── vector diff / scoring ──────────────────────────────────────────────
 
 
@@ -264,15 +276,35 @@ def test_gpu_node_balances_least_used():
 # ─── persona: persistence ───────────────────────────────────────────────
 
 
-def test_save_load_round_trip_perms_and_none(tmp_path):
+def test_save_load_round_trip_perms_and_none(stores):
     p = persona.generate_persona("rt")
-    persona.save_session_persona(tmp_path / "new", p)
-    f = tmp_path / "new" / "persona.json"
-    assert persona.load_session_persona(tmp_path / "new") == p
+    pdir = stores.profiles / "new"
+    persona.save_session_persona(pdir, p)
+    f = pdir / "persona.json"
+    assert persona.load_session_persona(pdir) == p
     assert (f.stat().st_mode & 0o777) == 0o600
-    persona.save_session_persona(tmp_path / "new", None)
+    persona.save_session_persona(pdir, None)
     assert not f.exists()
-    assert persona.load_session_persona(tmp_path / "new") is None
+    assert persona.load_session_persona(pdir) is None
+
+
+def test_unmanaged_profile_persona_lives_in_the_pins_store(tmp_path, stores):
+    p = persona.generate_persona("pin")
+    pdir = tmp_path / "custom"
+    persona.save_session_persona(pdir, p)
+    assert not (pdir / "persona.json").exists()
+    [entry] = list(stores.pins.iterdir())
+    assert (entry / "persona.json").exists()
+    assert persona.resolve_persona(pdir) == p
+
+
+def test_planted_persona_in_a_caller_chosen_dir_is_ignored(tmp_path, caplog):
+    pdir = tmp_path / "custom"
+    pdir.mkdir()
+    (pdir / "persona.json").write_text(json.dumps(persona.generate_persona("x")))
+    with caplog.at_level("WARNING"):
+        assert persona.resolve_persona(pdir, name="s") is None
+    assert "ignoring persona.json" in caplog.text
 
 
 def test_save_refuses_incoherent(tmp_path):
@@ -281,10 +313,12 @@ def test_save_refuses_incoherent(tmp_path):
 
 
 @pytest.mark.parametrize("payload", ["not json", "42", '"x"', "[1]", '{"v": 1}'])
-def test_load_degrades_to_none_on_corrupt(tmp_path, payload):
-    (tmp_path / "persona.json").write_text(payload)
-    assert persona.load_session_persona(tmp_path) is None
-    assert persona.resolve_persona(tmp_path) is None
+def test_load_degrades_to_none_on_corrupt(stores, payload):
+    pdir = stores.profiles / "c"
+    pdir.mkdir(exist_ok=True)
+    (pdir / "persona.json").write_text(payload)
+    assert persona.load_session_persona(pdir) is None
+    assert persona.resolve_persona(pdir) is None
 
 
 def test_ensure_creates_once_and_is_stable(tmp_path, monkeypatch):
@@ -299,10 +333,10 @@ def test_ensure_creates_once_and_is_stable(tmp_path, monkeypatch):
     assert persona.load_session_persona(pdir) == c
 
 
-def test_ensure_alternates_nodes_across_sibling_profiles(tmp_path, monkeypatch):
+def test_ensure_alternates_nodes_across_sibling_profiles(stores, monkeypatch):
     from vibatchium import gpu
     monkeypatch.setattr(gpu, "available_gpu_nodes", lambda: ["intel", "nvidia"])
-    root = tmp_path / "profiles"
+    root = stores.profiles
     picked = []
     for i in range(4):
         pdir = root / f"acct{i}"
@@ -314,6 +348,25 @@ def test_ensure_alternates_nodes_across_sibling_profiles(tmp_path, monkeypatch):
     gpu.save_session_gpu(pinned, {"on": True, "node": "nvidia"})
     usage = persona._node_usage(root)
     assert usage == {"intel": 2, "nvidia": 3}
+
+
+def test_node_usage_never_scans_the_parent_of_a_custom_profile(tmp_path, stores,
+                                                               monkeypatch):
+    # `start --profile /tmp/x` used to make the balancer walk all of /tmp.
+    from vibatchium import gpu
+    monkeypatch.setattr(gpu, "available_gpu_nodes", lambda: ["intel", "nvidia"])
+    for i in range(3):            # strangers next to the custom profile
+        gpu.save_session_gpu(tmp_path / f"stranger{i}", {"on": True, "node": "intel"})
+    custom = tmp_path / "custom"
+    gpu.save_session_gpu(custom, {"on": True, "node": None})
+    assert persona._node_usage(exclude=custom) == {}
+    # ...but a custom profile configured through the pins store does count
+    other = tmp_path / "other-custom"
+    gpu.save_session_gpu(other, {"on": True, "node": None})
+    persona.save_session_persona(other, persona.generate_persona(
+        "o", gpu_nodes=["nvidia"]))
+    assert persona._node_usage(exclude=custom) == {"nvidia": 1}
+    assert persona.ensure_session_persona(custom)["gpu_node"] == "intel"
 
 
 # ─── launch plumbing (no real Chrome) ───────────────────────────────────
@@ -472,3 +525,4 @@ def test_fleet_check_live_two_sessions():
         from vibatchium.daemon.paths import PROFILES_DIR
         for n in res.get("sessions", []):
             assert not (PROFILES_DIR / n).exists(), f"leaked profile {n}"
+

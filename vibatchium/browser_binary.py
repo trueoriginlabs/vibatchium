@@ -12,8 +12,11 @@ RESOLUTION (first hit wins), re-read on every launch AND relaunch so a
 self-heal comes back on the same binary — the same persist-never-re-derive rule
 as display.json / gpu.json:
 
-  1. ``browser.json`` ``{"path": "/abs/path"}`` in the session's profile dir,
-     written by ``vb start --browser-binary PATH`` (``""`` removes it);
+  1. ``browser.json`` ``{"path": "/abs/path"}``, written by
+     ``vb start --browser-binary PATH`` (``""`` removes it) — in the session's
+     profile dir when vibatchium manages it (``PROFILES_DIR/<name>``), else in
+     the operator-only pins store (``~/.config/vibatchium/pins/<sha256 of the
+     dir's realpath>/``, see :func:`vibatchium.daemon.paths.profile_config_dir`);
   2. ``VIBATCHIUM_BROWSER_BINARY`` in the DAEMON's environment — a daemon-wide
      default for every session without its own pin;
   3. neither → ``channel="chrome"``, byte-identical to before this existed.
@@ -26,12 +29,16 @@ operator-only:
     :func:`vibatchium.fspolicy.check_exec`. It is deliberately NOT in the MCP
     ``start`` schema either: a parameter that is always refused there only
     costs tokens and invites an agent to try it.
-  * A persisted ``browser.json`` is trusted on an agent surface only inside a
-    profile dir vibatchium manages (``PROFILES_DIR``, which no caller path may
-    read or write). An agent may point ``start --profile`` at a dir under its
-    own roots (``/tmp``, its cwd), and an agent can get attacker-chosen bytes
-    into such a dir (``download_save``) — so a ``browser.json`` there is
-    refused on agent surfaces rather than run.
+  * Trust follows WHO WROTE THE PIN, not who triggers the launch. Both places a
+    pin can live are unreachable by every caller path (PROFILES_DIR and the
+    pins store are under ``~/.config/vibatchium``, on fspolicy's read+write deny
+    list), so whatever is there was written by the operator — and is honoured
+    on every launch and self-heal relaunch, whichever surface caused it.
+  * A ``browser.json`` found INSIDE a caller-chosen profile dir is never read:
+    an agent may point ``start --profile`` at a dir under its own roots
+    (``/tmp``, its cwd) and get attacker-chosen bytes into it
+    (``download_save``). It is ignored with a warning, on every surface — an
+    operator start or a self-heal relaunch included.
   * The env default is the operator's own configuration and is honoured on
     every surface.
 
@@ -57,28 +64,41 @@ log = logging.getLogger("vibatchium.browser_binary")
 ENV_BROWSER_BINARY = "VIBATCHIUM_BROWSER_BINARY"
 
 
-def session_browser_path(profile_dir: Path) -> Path:
-    return profile_dir / "browser.json"
+FILE_NAME = "browser.json"
 
 
-def save_session_browser(profile_dir: Path, path: str | None) -> None:
-    """Persist ``{"path": path}`` on the profile dir; ``None``/``""`` removes it.
+def session_browser_path(profile_dir: Path, *, managed_root: Path | None = None,
+                         pins_root: Path | None = None) -> Path:
+    """Where this profile's pin lives (see the module docstring)."""
+    from .daemon.paths import profile_config_dir
+    return profile_config_dir(profile_dir, managed_root=managed_root,
+                              pins_root=pins_root) / FILE_NAME
+
+
+def save_session_browser(profile_dir: Path, path: str | None, *,
+                         managed_root: Path | None = None,
+                         pins_root: Path | None = None) -> None:
+    """Persist ``{"path": path}`` for the profile dir; ``None``/``""`` removes it.
 
     The caller validates ``path`` first (fspolicy.check_exec) — this only
-    writes. Creates the profile dir so a start-time persist works on a brand-new
+    writes. Creates the config dir so a start-time persist works on a brand-new
     profile, and keeps the 0600 invariant for vibatchium-written files.
     """
-    p = session_browser_path(profile_dir)
+    p = session_browser_path(profile_dir, managed_root=managed_root,
+                             pins_root=pins_root)
     if not path:
         if p.exists():
             p.unlink()
         return
-    profile_dir.mkdir(parents=True, exist_ok=True)
+    from .daemon.paths import ensure_profile_config_dir
+    ensure_profile_config_dir(profile_dir, managed_root=managed_root,
+                              pins_root=pins_root)
     p.write_text(json.dumps({"path": str(path)}))
     os.chmod(p, 0o600)
 
 
-def load_session_browser(profile_dir: Path) -> str | None:
+def load_session_browser(profile_dir: Path, *, managed_root: Path | None = None,
+                         pins_root: Path | None = None) -> str | None:
     """The persisted binary path, or None if unset/corrupt.
 
     A corrupt file (bad JSON, non-dict JSON, a non-string or relative path)
@@ -86,7 +106,8 @@ def load_session_browser(profile_dir: Path) -> str | None:
     A well-formed pin to a binary that no longer exists is NOT treated as unset
     here; :func:`resolve_browser_binary` fails the launch on it.
     """
-    p = session_browser_path(profile_dir)
+    p = session_browser_path(profile_dir, managed_root=managed_root,
+                             pins_root=pins_root)
     if not p.exists():
         return None
     try:
@@ -101,41 +122,53 @@ def load_session_browser(profile_dir: Path) -> str | None:
     return path
 
 
-def _is_managed(profile_dir: Path, managed_root: Path | None) -> bool:
-    if managed_root is None:
-        from .daemon.paths import PROFILES_DIR
-        managed_root = PROFILES_DIR
-    real = os.path.realpath(profile_dir)
-    root = os.path.realpath(managed_root)
-    return real != root and real.startswith(root.rstrip(os.sep) + os.sep)
+def warn_untrusted_in_profile(profile_dir: Path, file_name: str, what: str, *,
+                              name: str = "?",
+                              managed_root: Path | None = None) -> bool:
+    """Log (and return True) when a caller-chosen profile dir carries its own
+    ``file_name`` — which is ignored: config for unmanaged dirs is read only
+    from the operator-only pins store."""
+    from .daemon.paths import is_managed_profile
+    try:
+        planted = (not is_managed_profile(profile_dir, managed_root)
+                   and (Path(profile_dir) / file_name).exists())
+    except OSError:
+        return False
+    if planted:
+        log.warning("session %s: ignoring %s in caller-chosen profile dir %s — "
+                    "%s for a profile outside vibatchium's profiles dir is read "
+                    "only from the operator-only pins store", name, file_name,
+                    profile_dir, what)
+    return planted
 
 
 def resolve_browser_binary(profile_dir: Path, *, name: str = "?",
-                           managed_root: Path | None = None
+                           managed_root: Path | None = None,
+                           pins_root: Path | None = None
                            ) -> tuple[str | None, str | None]:
     """Effective executable for this profile → ``(path, source)``.
 
     ``source`` is ``"session"`` (browser.json), ``"env"``
     (VIBATCHIUM_BROWSER_BINARY) or ``None`` (channel Chrome, path None).
-    Raises ValueError for a configured binary that is not a runnable file, and
-    FileAccessDenied for an untrusted browser.json on an agent surface.
+    Raises ValueError for a configured binary that is not a runnable file. A
+    browser.json inside a caller-chosen profile dir is ignored (logged).
     """
     from . import fspolicy
-    pinned = load_session_browser(profile_dir)
+    warn_untrusted_in_profile(profile_dir, FILE_NAME, "a browser pin", name=name,
+                              managed_root=managed_root)
+    pinned = load_session_browser(profile_dir, managed_root=managed_root,
+                                  pins_root=pins_root)
     if pinned is not None:
-        if fspolicy.in_agent_scope() and not _is_managed(profile_dir, managed_root):
-            raise fspolicy.FileAccessDenied(
-                f"session {name!r}: refusing the browser pin in {profile_dir} on "
-                f"an agent surface — that profile dir is caller-chosen, so its "
-                f"browser.json can't be trusted to name what the daemon runs. "
-                f"Start this session from the CLI, or use a vibatchium-managed "
-                f"profile (a session name / `--profile <name>`).")
         try:
             fspolicy.validate_executable(pinned, verb="browser.json")
         except ValueError as exc:
+            from .daemon.paths import is_managed_profile
+            prof = ("" if is_managed_profile(profile_dir, managed_root)
+                    else f" --profile {profile_dir}")
             raise ValueError(
                 f"session {name!r}: pinned browser binary is unusable ({exc}). "
-                f"`vb --session {name} start --browser-binary ''` clears the pin."
+                f"`vb --session {name} start{prof} --browser-binary ''` clears "
+                f"the pin."
             ) from None
         log.info("session %s: browser binary %s (pinned)", name, pinned)
         return pinned, "session"

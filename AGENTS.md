@@ -538,8 +538,10 @@ VIBATCHIUM_BROWSER_BINARY=/usr/bin/chromium vb daemon start         # daemon-wid
 ```
 
 Swaps the executable and nothing else — profile, proxy, geo, gpu and scale
-apply unchanged. Precedence: the session's pin (`browser.json` in its profile
-dir) → `VIBATCHIUM_BROWSER_BINARY` → channel Chrome. `start` reports
+apply unchanged. Precedence: the session's pin → `VIBATCHIUM_BROWSER_BINARY` →
+channel Chrome. The pin is `browser.json` in the session's profile dir — or, for
+a `start --profile <dir>` outside vibatchium's profiles dir, in the
+operator-only store `~/.config/vibatchium/pins/<sha256 of the dir>/`. `start` reports
 `browser_binary` (null = channel Chrome) and `browser_version`, which is what
 the browser itself said after launch — read it to confirm which build ran. On a
 running session the pin is persisted and `browser_binary_pending` says so; close
@@ -547,9 +549,10 @@ and start to apply.
 
 - **Operator-only.** Picking the program the daemon runs is code execution, so
   MCP and a `--caps`-restricted REST shim refuse it (the clear too), and it is
-  not in the MCP `start` schema. A pin in a caller-chosen `--profile` dir is
-  also refused on those surfaces — only pins in vibatchium's own profiles dir
-  are trusted there.
+  not in the MCP `start` schema. A `browser.json` (or `persona.json`) found
+  *inside* a caller-chosen `--profile` dir is ignored with a warning on every
+  surface — an agent can get bytes into such a dir, so trust follows who wrote
+  the file, not who started the session.
 - **A vanished binary fails the launch**, with the clear command in the error.
   It never silently falls back to a different browser.
 - **Ubuntu 23.10+:** Chrome for Testing and tarball Chromium builds abort with

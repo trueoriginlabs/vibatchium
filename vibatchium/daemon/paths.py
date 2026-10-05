@@ -143,6 +143,59 @@ if _legacy_chrome_profile.is_dir():
         os.chmod(_legacy_chrome_profile, 0o700)
     except OSError:
         pass
+# 0.20.0: operator-written launch config (browser.json, persona.json) for
+# profile dirs vibatchium does NOT manage — `start --profile /some/dir`. Such a
+# dir is caller-chosen: an agent may point `start --profile` at a directory
+# under its own roots and get attacker bytes into it (`download_save`), so a
+# config file INSIDE it can't be trusted to name the executable the daemon
+# runs. Pins for those dirs live here instead, keyed by the dir's realpath.
+# CONFIG_DIR is on fspolicy's read+write deny list, so no caller path reaches
+# it. It sits beside, not inside, PROFILES_DIR so it never lists as a session
+# or gets swept as a stale profile. Created lazily on the first write — a
+# box that never pins an unmanaged dir never grows it.
+PINS_DIR = CONFIG_DIR / "pins"
+
+
+def is_managed_profile(profile_dir, managed_root=None) -> bool:
+    """True iff ``profile_dir`` is strictly inside vibatchium's PROFILES_DIR
+    (realpath on both sides, so a symlink can't fake membership)."""
+    root = os.path.realpath(os.fspath(managed_root if managed_root is not None
+                                      else PROFILES_DIR))
+    real = os.path.realpath(os.path.abspath(os.path.expanduser(
+        os.fspath(profile_dir))))
+    return real != root and real.startswith(root.rstrip(os.sep) + os.sep)
+
+
+def profile_config_dir(profile_dir, *, managed_root=None, pins_root=None) -> Path:
+    """Where operator-only launch config for ``profile_dir`` lives: the profile
+    dir itself when vibatchium manages it, else ``PINS_DIR/<sha256(realpath)>``.
+    Pure — creates nothing (reads of a never-pinned dir must leave no trace)."""
+    if is_managed_profile(profile_dir, managed_root):
+        return Path(profile_dir)
+    real = os.path.realpath(os.path.abspath(os.path.expanduser(
+        os.fspath(profile_dir))))
+    key = hashlib.sha256(real.encode("utf-8", "surrogateescape")).hexdigest()
+    return Path(pins_root if pins_root is not None else PINS_DIR) / key
+
+
+def ensure_profile_config_dir(profile_dir, *, managed_root=None,
+                              pins_root=None) -> Path:
+    """profile_config_dir(), created (0700) for a write. A pins-store entry
+    also records which profile dir it belongs to (``profile``), so an operator
+    — and the persona GPU-node balancer — can map it back."""
+    out = profile_config_dir(profile_dir, managed_root=managed_root,
+                             pins_root=pins_root)
+    if out == Path(profile_dir):
+        out.mkdir(parents=True, exist_ok=True)
+        return out
+    secure_mkdir(out.parent)
+    secure_mkdir(out)
+    real = os.path.realpath(os.path.abspath(os.path.expanduser(
+        os.fspath(profile_dir))))
+    secure_write(out / "profile", real)
+    return out
+
+
 ACTIVE_PROFILE_PATH = CONFIG_DIR / "active-profile"
 ACTIVE_SESSION_PATH = CONFIG_DIR / "active-session"
 

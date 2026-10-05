@@ -9,6 +9,7 @@ proves the plumbing by asking the browser which version it is.
 from __future__ import annotations
 
 import glob
+import json
 import os
 import re
 import subprocess
@@ -50,6 +51,15 @@ def agent_scope():
 @pytest.fixture(autouse=True)
 def _no_env_default(monkeypatch):
     monkeypatch.delenv(bb.ENV_BROWSER_BINARY, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def pins(monkeypatch, tmp_path_factory):
+    """In-process tests never touch the real ~/.config/vibatchium/pins."""
+    from vibatchium.daemon import paths
+    root = tmp_path_factory.mktemp("pins")
+    monkeypatch.setattr(paths, "PINS_DIR", root)
+    return root
 
 
 # ─── validation ─────────────────────────────────────────────────────────
@@ -120,8 +130,10 @@ def test_save_creates_a_brand_new_profile_dir(tmp_path, fake_bin):
 @pytest.mark.parametrize("payload", ["42", "[1]", "null", "{bad", '{"path": 7}',
                                      '{"path": "relative/chrome"}', "{}"])
 def test_load_corrupt_reads_as_unset(tmp_path, payload):
-    bb.session_browser_path(tmp_path).write_text(payload)
-    assert bb.load_session_browser(tmp_path) is None
+    prof = tmp_path / "s"
+    prof.mkdir()
+    bb.session_browser_path(prof, managed_root=tmp_path).write_text(payload)
+    assert bb.load_session_browser(prof, managed_root=tmp_path) is None
 
 
 # ─── resolution precedence ──────────────────────────────────────────────
@@ -144,7 +156,7 @@ def test_resolve_pin_beats_env(tmp_path, fake_bin, monkeypatch):
     other.chmod(0o755)
     monkeypatch.setenv(bb.ENV_BROWSER_BINARY, str(other))
     prof = tmp_path / "prof"
-    bb.save_session_browser(prof, str(fake_bin))
+    bb.save_session_browser(prof, str(fake_bin), managed_root=tmp_path)
     assert bb.resolve_browser_binary(prof, managed_root=tmp_path) == \
         (str(fake_bin), "session")
 
@@ -152,10 +164,21 @@ def test_resolve_pin_beats_env(tmp_path, fake_bin, monkeypatch):
 def test_resolve_vanished_pin_fails_loudly_with_the_clear_hint(tmp_path, fake_bin):
     # Never silently run a different browser than the one pinned.
     prof = tmp_path / "prof"
-    bb.save_session_browser(prof, str(fake_bin))
+    bb.save_session_browser(prof, str(fake_bin), managed_root=tmp_path)
     fake_bin.unlink()
-    with pytest.raises(ValueError, match="--browser-binary ''"):
+    with pytest.raises(ValueError, match="start --browser-binary ''"):
         bb.resolve_browser_binary(prof, name="s", managed_root=tmp_path)
+
+
+def test_vanished_pin_hint_names_the_custom_profile(tmp_path, fake_bin):
+    # The clear has to reach the same (unmanaged) pin it complains about.
+    managed = tmp_path / "managed"
+    managed.mkdir()
+    prof = tmp_path / "custom"
+    bb.save_session_browser(prof, str(fake_bin), managed_root=managed)
+    fake_bin.unlink()
+    with pytest.raises(ValueError, match=f"--profile {prof} --browser-binary ''"):
+        bb.resolve_browser_binary(prof, name="s", managed_root=managed)
 
 
 @pytest.mark.parametrize("val", ["chrome", "/nonexistent/chrome"])
@@ -165,26 +188,68 @@ def test_resolve_bad_env_fails_loudly(tmp_path, monkeypatch, val):
         bb.resolve_browser_binary(tmp_path, managed_root=tmp_path.parent)
 
 
-def test_agent_surface_refuses_a_pin_in_a_caller_chosen_profile(tmp_path, fake_bin,
-                                                              agent_scope):
-    # An agent can `start --profile /tmp/x` and can get attacker bytes into
-    # /tmp/x (download_save) — a browser.json there must not pick the binary.
+def test_managed_profile_keeps_its_pin_in_the_profile_dir(tmp_path, fake_bin, pins):
+    # PROFILES_DIR is off-limits to every caller path, so browser.json there
+    # can only have been written by the operator.
+    prof = tmp_path / "s"
+    bb.save_session_browser(prof, str(fake_bin), managed_root=tmp_path)
+    assert (prof / "browser.json").exists()
+    assert not any(pins.iterdir()), "managed pin leaked into the pins store"
+    assert bb.resolve_browser_binary(prof, managed_root=tmp_path) == \
+        (str(fake_bin), "session")
+
+
+def test_unmanaged_profile_pin_lives_in_the_operator_only_store(tmp_path, fake_bin,
+                                                                pins):
     managed = tmp_path / "managed"
     managed.mkdir()
     prof = tmp_path / "caller-chosen"
-    bb.save_session_browser(prof, str(fake_bin))
-    with pytest.raises(fspolicy.FileAccessDenied, match="can't be trusted"):
-        bb.resolve_browser_binary(prof, managed_root=managed)
-
-
-def test_agent_surface_honours_a_pin_in_a_managed_profile(tmp_path, fake_bin,
-                                                         agent_scope):
-    # PROFILES_DIR is off-limits to every caller path, so a pin there was
-    # written by the operator — an agent's self-heal must keep using it.
-    prof = tmp_path / "s"
-    bb.save_session_browser(prof, str(fake_bin))
-    assert bb.resolve_browser_binary(prof, managed_root=tmp_path) == \
+    bb.save_session_browser(prof, str(fake_bin), managed_root=managed)
+    assert not (prof / "browser.json").exists(), \
+        "an operator pin was written where a caller can rewrite it"
+    [entry] = list(pins.iterdir())
+    assert (entry / "browser.json").exists()
+    assert (entry / "profile").read_text() == os.path.realpath(prof)
+    assert (entry.stat().st_mode & 0o777) == 0o700
+    assert ((entry / "browser.json").stat().st_mode & 0o777) == 0o600
+    assert bb.resolve_browser_binary(prof, managed_root=managed) == \
         (str(fake_bin), "session")
+    bb.save_session_browser(prof, "", managed_root=managed)
+    assert bb.resolve_browser_binary(prof, managed_root=managed) == (None, None)
+
+
+@pytest.mark.parametrize("scoped", [False, True])
+def test_planted_pin_in_a_caller_chosen_dir_is_ignored_on_every_surface(
+        tmp_path, fake_bin, scoped, caplog):
+    # An agent can `start --profile /tmp/x` and get bytes into /tmp/x
+    # (download_save). Trust follows who WROTE the file, not who triggers the
+    # launch: an operator start or a self-heal relaunch must not honour it
+    # either.
+    managed = tmp_path / "managed"
+    managed.mkdir()
+    prof = tmp_path / "caller-chosen"
+    prof.mkdir()
+    (prof / "browser.json").write_text(json.dumps({"path": str(fake_bin)}))
+    tok = fspolicy.push_scope(AGENT_SCOPE) if scoped else None
+    try:
+        with caplog.at_level("WARNING", logger="vibatchium.browser_binary"):
+            assert bb.resolve_browser_binary(prof, name="s",
+                                             managed_root=managed) == (None, None)
+    finally:
+        if tok is not None:
+            fspolicy.pop_scope(tok)
+    assert "ignoring browser.json" in caplog.text
+
+
+def test_symlink_into_profiles_dir_is_judged_by_realpath(tmp_path, fake_bin):
+    managed = tmp_path / "managed"
+    (managed / "s").mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    link = managed / "link"
+    link.symlink_to(outside)
+    (outside / "browser.json").write_text(json.dumps({"path": str(fake_bin)}))
+    assert bb.resolve_browser_binary(link, managed_root=managed) == (None, None)
 
 
 def test_agent_surface_honours_the_env_default(tmp_path, fake_bin, monkeypatch,
@@ -500,16 +565,22 @@ def test_daemon_refuses_browser_binary_from_an_agent_surface(fake_bin):
         _cleanup(name)
 
 
-def test_daemon_refuses_a_planted_pin_on_an_agent_surface(tmp_path, fake_bin):
-    name = "bbin_plant"
+@pytest.mark.parametrize("scoped", [True, False])
+def test_daemon_ignores_a_planted_pin(tmp_path, fake_bin, scoped):
+    # A browser.json planted in a caller-chosen profile names a "browser" that
+    # exits at once: honouring it would fail the launch. Ignored, the session
+    # comes up on channel Chrome — from an agent surface AND from the CLI.
+    name = f"bbin_plant_{int(scoped)}"
     prof = tmp_path / "prof"
-    bb.save_session_browser(prof, str(fake_bin))
+    prof.mkdir()
+    (prof / "browser.json").write_text(json.dumps({"path": str(fake_bin)}))
+    args = {"headless": True, "profile": str(prof)}
+    if scoped:
+        args[fspolicy.SCOPE_ARG] = {"roots": [str(tmp_path)], "cwd": str(tmp_path)}
     try:
-        with pytest.raises(Exception, match="can't be trusted"):
-            call("start", {"headless": True, "profile": str(prof),
-                           fspolicy.SCOPE_ARG: {"roots": [str(tmp_path)],
-                                                "cwd": str(tmp_path)}},
-                 session=name)
+        res = call("start", args, session=name)
+        assert res.get("started") is True, res
+        assert res.get("browser_binary") is None, res
     finally:
         _cleanup(name)
 
