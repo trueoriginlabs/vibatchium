@@ -74,8 +74,12 @@ log = logging.getLogger("vibatchium.browser")
 # We probe the real Chrome's UA once per daemon lifetime (so the string
 # reflects the ACTUAL installed version — no staleness tell) and cache it
 # in-process. The lock keeps a cold-start fan-out from racing N probes.
-_HEADLESS_UA_CACHE: str | None = None
-_HEADLESS_UA_PROBED = False
+#
+# Keyed by executable (None = channel Chrome): a session launched with
+# `--browser-binary` must be stamped with THAT binary's UA. Reusing the channel
+# Chrome's string would hand, say, a Chromium 148 a `Chrome/153` UA — a version
+# that contradicts its own client hints and JS feature surface.
+_HEADLESS_UA_CACHE: dict[str | None, str | None] = {}
 _HEADLESS_UA_LOCK = asyncio.Lock()
 
 #: Per-session disk cache ceiling, MB. 0 = let Chrome size it off free disk
@@ -94,23 +98,28 @@ def disk_cache_mb() -> int:
         return DISK_CACHE_MB_DEFAULT
 
 
-async def coherent_headless_ua(pw: Playwright) -> str | None:
+async def coherent_headless_ua(pw: Playwright,
+                               executable_path: str | None = None) -> str | None:
     """Clean UA (HeadlessChrome→Chrome) for headless launches, or None if this
     Chrome doesn't stamp the Headless token (nothing to fix) or the probe fails
     (launch proceeds un-overridden rather than blocking).
 
     Returned as a string to pass via the browser-wide ``--user-agent`` flag —
     see the module comment for why a launch flag, not a context option.
+
+    ``executable_path`` probes that binary instead of channel Chrome (and
+    caches per binary) — see the cache comment above.
     """
-    global _HEADLESS_UA_CACHE, _HEADLESS_UA_PROBED
-    if _HEADLESS_UA_PROBED:
-        return _HEADLESS_UA_CACHE
+    key = executable_path or None
+    if key in _HEADLESS_UA_CACHE:
+        return _HEADLESS_UA_CACHE[key]
     async with _HEADLESS_UA_LOCK:
-        if _HEADLESS_UA_PROBED:  # filled while we waited on the lock
-            return _HEADLESS_UA_CACHE
+        if key in _HEADLESS_UA_CACHE:  # filled while we waited on the lock
+            return _HEADLESS_UA_CACHE[key]
+        target = ({"executable_path": key} if key else {"channel": "chrome"})
         try:
             browser = await pw.chromium.launch(
-                channel="chrome", headless=True, args=["--disable-dev-shm-usage"],
+                **target, headless=True, args=["--disable-dev-shm-usage"],
             )
             try:
                 page = await browser.new_page()
@@ -120,14 +129,15 @@ async def coherent_headless_ua(pw: Playwright) -> str | None:
         except Exception as e:  # noqa: BLE001 — never let a probe failure block a launch
             log.warning("headless UA probe failed (%s) — launching without UA "
                         "override; will retry on next headless launch", e)
-            return None  # leave _PROBED False so the next launch retries
+            return None  # leave it uncached so the next launch retries
         if "HeadlessChrome" in raw:
-            _HEADLESS_UA_CACHE = raw.replace("HeadlessChrome", "Chrome")
-            log.info("headless UA override active: %s", _HEADLESS_UA_CACHE)
+            clean = raw.replace("HeadlessChrome", "Chrome")
+            log.info("headless UA override active (%s): %s",
+                     key or "channel chrome", clean)
         else:
-            _HEADLESS_UA_CACHE = None  # this Chrome doesn't leak — leave UA untouched
-        _HEADLESS_UA_PROBED = True
-        return _HEADLESS_UA_CACHE
+            clean = None  # this Chrome doesn't leak — leave UA untouched
+        _HEADLESS_UA_CACHE[key] = clean
+        return clean
 
 
 # ─── 0.7.0 self-heal: renderer-crash detection ───────────────────────────
@@ -198,6 +208,13 @@ class BrowserSession:
     # warm-claim/self-heal posture check, mirroring `gpu`. Only ever > 1 on a
     # patchright launch — nodriver connects over CDP to a context it didn't create.
     device_scale_factor: float = 1.0
+    # The executable this session launched (`start --browser-binary` /
+    # VIBATCHIUM_BROWSER_BINARY), or None for channel Chrome. Recorded for the
+    # `start` response and the warm-claim posture check, mirroring `gpu`.
+    browser_binary: str | None = None
+    # `browser.version` read after launch (e.g. "153.0.8010.36"), or None if the
+    # driver didn't expose it. Observability only.
+    browser_version: str | None = None
     frame_ref: object = None         # patchright.Frame | None
     dialog_policy: dict = field(default_factory=lambda: {"action": "dismiss"})
     downloads: list = field(default_factory=list)
@@ -439,6 +456,17 @@ def _schedule_revive(session: BrowserSession) -> None:
         session._reviving = False
 
 
+def _browser_version(context) -> str | None:
+    """`context.browser.version` (Patchright exposes the Browser on a persistent
+    context), or None — never let an observability read fail a launch."""
+    try:
+        b = context.browser
+        v = b.version if b is not None else None
+        return v if isinstance(v, str) and v else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 async def launch_session(profile_dir: Path, headless: bool = False,
                          *, pw: Playwright | None = None,
                          proxy: dict | None = None,
@@ -446,7 +474,8 @@ async def launch_session(profile_dir: Path, headless: bool = False,
                          gpu: bool = False,
                          gpu_node: str | None = None,
                          device_scale_factor: float | None = None,
-                         viewport: dict | None = None) -> BrowserSession:
+                         viewport: dict | None = None,
+                         executable_path: str | None = None) -> BrowserSession:
     """Cold-launch real Chrome with persistent context (canonical Patchright config).
 
     The Playwright driver (Node.js subprocess) can be shared across multiple
@@ -491,13 +520,18 @@ async def launch_session(profile_dir: Path, headless: bool = False,
     Ignored unless `device_scale_factor` > 1 — on its own it would trade the
     no_viewport stealth default for nothing. `vb viewport` resizes afterwards and
     Playwright re-applies the scale, so this is only the starting size.
+
+    `executable_path`: launch this Chromium binary instead of `channel="chrome"`
+    (see browser_binary.py — the registry resolves it per session and validates
+    it). None = channel Chrome, unchanged. The headless UA probe runs against the
+    same binary so the de-Headless'd UA names the version actually running.
     """
     profile_dir.mkdir(parents=True, exist_ok=True)
     scale = float(device_scale_factor or 1.0)
     log.info("launch persistent context profile=%s headless=%s proxy=%s gpu=%s "
-             "node=%s scale=%s",
+             "node=%s scale=%s binary=%s",
              profile_dir, headless, bool(proxy), bool(gpu and headless), gpu_node,
-             scale if scale > 1 else None)
+             scale if scale > 1 else None, executable_path or "channel:chrome")
 
     owns_pw = pw is None
     if pw is None:
@@ -538,7 +572,8 @@ async def launch_session(profile_dir: Path, headless: bool = False,
     # `user_agent` would miss SharedWorkers (see coherent_headless_ua). Headed
     # already reports `Chrome`, so this is headless-only.
     if headless:
-        clean_ua = await coherent_headless_ua(pw)
+        clean_ua = (await coherent_headless_ua(pw, executable_path)
+                    if executable_path else await coherent_headless_ua(pw))
         if clean_ua:
             extra_args = list(extra_args) + [f"--user-agent={clean_ua}"]
     # Wave 6.2a: WebRTC leak guard when a proxy is configured.
@@ -585,6 +620,11 @@ async def launch_session(profile_dir: Path, headless: bool = False,
         "no_viewport": True,
         "args": extra_args if extra_args else None,
     }
+    # A caller-chosen binary REPLACES the channel rather than riding next to it,
+    # so there's no question which one Playwright honours.
+    if executable_path:
+        launch_kwargs.pop("channel")
+        launch_kwargs["executable_path"] = executable_path
     # 0.19.3: a device-scale pin and `no_viewport` are mutually exclusive —
     # Playwright hard-errors with `"deviceScaleFactor" option is not supported
     # with null "viewport"`, and passing both viewport and no_viewport is also
@@ -611,7 +651,24 @@ async def launch_session(profile_dir: Path, headless: bool = False,
     # launches stay byte-identical to v1 (Playwright defaults env to process.env).
     if launch_env is not None:
         launch_kwargs["env"] = launch_env
-    context = await pw.chromium.launch_persistent_context(**launch_kwargs)
+    try:
+        context = await pw.chromium.launch_persistent_context(**launch_kwargs)
+    except Exception as exc:
+        # The #1 way a caller-chosen binary fails on a modern Ubuntu: AppArmor
+        # restricts unprivileged user namespaces, so a Chromium that ships no
+        # AppArmor profile (Chrome for Testing, a tarball build) can't sandbox
+        # and aborts. /opt/google/chrome works because its package installs a
+        # profile. Playwright buries that under a page of stack trace — lift it.
+        if executable_path and "No usable sandbox" in str(exc):
+            raise RuntimeError(
+                f"{executable_path} can't start its sandbox on this host (Linux "
+                f"restricts unprivileged user namespaces — Ubuntu 23.10+ AppArmor; "
+                f"the system Chrome package ships a profile for its own binary, "
+                f"this one has none). Give it an AppArmor profile, use a "
+                f"packaged browser, or set VIBATCHIUM_DISABLE_SANDBOX=1 on the "
+                f"daemon (adds --no-sandbox: a visible infobar and a fingerprint "
+                f"signal).") from None
+        raise
     # Wave 7.5d stealth note: bare Patchright leaves `window.chrome.runtime`
     # undefined, which IS a known fingerprint signal — but Patchright
     # deliberately filters `Page.addScriptToEvaluateOnNewDocument` (the CDP
@@ -628,7 +685,9 @@ async def launch_session(profile_dir: Path, headless: bool = False,
                           profile_dir=profile_dir, owns_pw=owns_pw,
                           headless=headless, timezone_id=timezone_id,
                           gpu=bool(gpu and headless), gpu_node=effective_node,
-                          device_scale_factor=scale)
+                          device_scale_factor=scale,
+                          browser_binary=executable_path or None,
+                          browser_version=_browser_version(context))
     _wire_page_tracking(sess)
     await _file_guard.install(sess)
     return sess

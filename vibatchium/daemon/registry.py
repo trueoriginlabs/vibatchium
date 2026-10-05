@@ -478,8 +478,13 @@ class SessionRegistry:
             try:
                 pw = await self._ensure_pw()
                 from . import backends as _backends
+                # Prewarm the binary a claim would want (browser.json / the
+                # env default), or create()'s guard throws the warm Chrome away.
+                from ..browser_binary import resolve_browser_binary
+                binary, _src = resolve_browser_binary(profile_dir, name=name)
+                bin_kw = {"executable_path": binary} if binary else {}
                 sess = await _backends.launch("patchright", profile_dir,
-                                              headless=headless, pw=pw)
+                                              headless=headless, pw=pw, **bin_kw)
                 # Only stash if still unclaimed (might race with real create)
                 if name not in self._entries and name not in self._warm_sessions:
                     self._warm_sessions[name] = sess
@@ -701,6 +706,10 @@ class SessionRegistry:
         # a plain disk read with no proxy→geo-style inference).
         from ..display import resolve_display
         display_cfg = resolve_display(pdir, name=name)
+        # The browser executable, for the same warm-claim guard: a prewarm is
+        # only claimable if it launched the binary this request would.
+        from ..browser_binary import resolve_browser_binary
+        want_binary, _ = resolve_browser_binary(pdir, name=name)
         # Wave 6.1b: prefer a pre-warmed session if one is available for this
         # name AND the requested config matches (backend, headless, no proxy,
         # no geo, no gpu, no scale). Proxy-/geo-/gpu-/scale-configured sessions
@@ -721,7 +730,8 @@ class SessionRegistry:
                 and warm.profile_dir == pdir and warm.headless == headless
                 and proxy_cfg is None and geo_cfg is None
                 and not gpu_on  # prewarm never launches with GPU, so gpu_on=True → cold
-                and display_cfg is None):  # ...nor with a device-scale pin
+                and display_cfg is None  # ...nor with a device-scale pin
+                and getattr(warm, "browser_binary", None) == want_binary):
             sess = warm
             log.info("session %s claimed pre-warmed Chrome", name)
         else:
@@ -852,13 +862,22 @@ class SessionRegistry:
              gpu_node) = self._load_session_overrides(name, profile_dir)
         from ..display import resolve_display
         display_cfg = resolve_display(profile_dir, name=name)
+        # The browser executable (browser.json → VIBATCHIUM_BROWSER_BINARY →
+        # channel Chrome) is re-read here on every path for the same reason as
+        # the scale: a self-heal relaunch must come back on the SAME binary, not
+        # quietly on channel Chrome. Raises on an unusable pin — see
+        # browser_binary.py for why that fails instead of degrading.
+        from ..browser_binary import resolve_browser_binary
+        binary, binary_source = resolve_browser_binary(profile_dir, name=name)
+        bin_kw = ({"executable_path": binary, "executable_source": binary_source}
+                  if binary else {})
 
         async def _do_launch():
             return await _backends.launch(
                 backend, profile_dir, headless=headless, pw=pw, proxy=proxy_cfg,
                 timezone_id=(geo_cfg or {}).get("timezone_id"), gpu=bool(gpu_on),
                 gpu_node=gpu_node,
-                device_scale_factor=(display_cfg or {}).get("scale"))
+                device_scale_factor=(display_cfg or {}).get("scale"), **bin_kw)
 
         try:
             return await _do_launch()
@@ -869,8 +888,10 @@ class SessionRegistry:
             # NOT on the self-heal relaunch path (allow_install=False): that runs
             # under a wait_for(30) that would always cancel the ~minutes install
             # and burn the one-shot flag — and a missing binary mid-life is not a
-            # cold-start onboarding case anyway.
-            if not allow_install or not await _maybe_autoinstall_chrome(exc):
+            # cold-start onboarding case anyway. Nor with a caller-chosen binary:
+            # installing channel Chrome can't fix a launch that doesn't use it.
+            if (not allow_install or binary
+                    or not await _maybe_autoinstall_chrome(exc)):
                 raise
             return await _do_launch()
 

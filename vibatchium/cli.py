@@ -242,8 +242,17 @@ def _cli_resolve_headless(explicit, *, isatty: bool) -> bool:
                    "PINS a viewport (1280x800; resize with `vb viewport`) and "
                    "emulates device metrics — a capture posture, not one to point "
                    "at Cloudflare. `--scale 1` clears it. Patchright backend only.")
+@click.option("--browser-binary", "browser_binary", default=None, metavar="PATH",
+              help="Launch this Chromium executable instead of the system Chrome "
+                   "channel (persisted per session like --gpu/--scale, so a "
+                   "self-heal relaunch reuses it). `--browser-binary \"\"` clears "
+                   "it. VIBATCHIUM_BROWSER_BINARY in the daemon's env sets a "
+                   "daemon-wide default. Operator-only: refused over MCP. "
+                   "Patchright backend only. Branded channel Chrome stays the "
+                   "stealth default — a Chromium/CfT build is a different "
+                   "fingerprint.")
 @click.pass_context
-def start(ctx, profile, headless, backend, ephemeral, gpu, scale):
+def start(ctx, profile, headless, backend, ephemeral, gpu, scale, browser_binary):
     """Start a browser session (cold launch real Chrome + persistent context).
 
     Default headed/headless is inferred from the calling context: a TTY means a
@@ -272,6 +281,11 @@ def start(ctx, profile, headless, backend, ephemeral, gpu, scale):
     # sends nothing and inherits whatever is persisted.
     if scale is not None:
         args["scale"] = scale
+    # Same persist-on-start contract. Absolutized HERE: the daemon's cwd is not
+    # the caller's, so it only accepts absolute paths. "" passes through (clear).
+    if browser_binary is not None:
+        args["browser_binary"] = (os.path.abspath(os.path.expanduser(browser_binary))
+                                  if browser_binary else "")
     _emit(call("start", args), ctx.obj["json"])
 
 

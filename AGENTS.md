@@ -513,6 +513,40 @@ Three things that will otherwise cost you an afternoon:
 `viewport` reports `scale` + `device_width`/`device_height` on a scaled session —
 read it instead of multiplying by hand.
 
+### A different Chromium — `start --browser-binary`
+
+```bash
+$VB --session old start --browser-binary /opt/chromium-128/chrome   # persisted; self-heal relaunches reuse it
+$VB --session old start --browser-binary ""                         # clear → back to channel Chrome
+VIBATCHIUM_BROWSER_BINARY=/usr/bin/chromium vb daemon start         # daemon-wide default (daemon's env)
+```
+
+Swaps the executable and nothing else — profile, proxy, geo, gpu and scale
+apply unchanged. Precedence: the session's pin (`browser.json` in its profile
+dir) → `VIBATCHIUM_BROWSER_BINARY` → channel Chrome. `start` reports
+`browser_binary` (null = channel Chrome) and `browser_version`, which is what
+the browser itself said after launch — read it to confirm which build ran. On a
+running session the pin is persisted and `browser_binary_pending` says so; close
+and start to apply.
+
+- **Operator-only.** Picking the program the daemon runs is code execution, so
+  MCP and a `--caps`-restricted REST shim refuse it (the clear too), and it is
+  not in the MCP `start` schema. A pin in a caller-chosen `--profile` dir is
+  also refused on those surfaces — only pins in vibatchium's own profiles dir
+  are trusted there.
+- **A vanished binary fails the launch**, with the clear command in the error.
+  It never silently falls back to a different browser.
+- **Ubuntu 23.10+:** Chrome for Testing and tarball Chromium builds abort with
+  "No usable sandbox" (AppArmor restricts user namespaces; the Google Chrome
+  package ships a profile for its own binary only). The error says so. Give the
+  binary an AppArmor profile, use a packaged browser, or
+  `VIBATCHIUM_DISABLE_SANDBOX=1` on the daemon (adds `--no-sandbox`: a visible
+  infobar and a fingerprint signal).
+- **Stealth:** branded channel Chrome stays the default for a reason. A
+  Chromium/CfT build is a different fingerprint; don't point one at a wall to
+  "try something". Patchright only: nodriver refuses a session pin and skips the
+  env default (`browser_binary_ignored: true`).
+
 ## Watch or hand off — liveview
 
 Stream a headless session's frames to any normal browser to watch an agent work,
@@ -730,6 +764,8 @@ VIBATCHIUM_DAEMON_IDLE_TIMEOUT=0  # seconds; >0 self-shuts an idle (0-session) d
 VIBATCHIUM_IDLE_FREEZE=1        # lifecycle-freeze parked headless sessions (default on; 0 disables)
 VIBATCHIUM_IDLE_FREEZE_AFTER=90 # idle seconds before a parked session's pages freeze (default 90, min 5)
 VIBATCHIUM_DISK_CACHE_MB=256    # per-session Chrome disk-cache ceiling (0 = let Chrome size it off free disk)
+VIBATCHIUM_BROWSER_BINARY=<abs> # daemon env: default Chromium executable for sessions without a `start --browser-binary` pin
+VIBATCHIUM_DISABLE_SANDBOX=1    # pass --no-sandbox (containers, or a custom binary AppArmor won't let sandbox) — visible infobar + fingerprint signal
 VIBATCHIUM_LOG_FILE=<path>      # full daemon-log path (default: a persistent state dir, see below)
 VIBATCHIUM_LOG_MAX_BYTES=10485760 # rotate the daemon log past this size (0 = never rotate)
 VIBATCHIUM_LOG_BACKUPS=5        # how many rotated daemon-log backups to keep

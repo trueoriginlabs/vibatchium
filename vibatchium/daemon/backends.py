@@ -109,13 +109,15 @@ async def launch_patchright_session(
     gpu_node: str | None = None,
     device_scale_factor: float | None = None,
     viewport: dict | None = None,
+    executable_path: str | None = None,
 ) -> BrowserSession:
     """Canonical Patchright launch (current default)."""
+    kw = {"executable_path": executable_path} if executable_path else {}
     return await launch_session(profile_dir, headless=headless, pw=pw,
                                 proxy=proxy, timezone_id=timezone_id, gpu=gpu,
                                 gpu_node=gpu_node,
                                 device_scale_factor=device_scale_factor,
-                                viewport=viewport)
+                                viewport=viewport, **kw)
 
 
 def _nodriver_cdp_url(browser, requested_port: int) -> str:
@@ -297,20 +299,39 @@ async def launch(
     gpu_node: str | None = None,
     device_scale_factor: float | None = None,
     viewport: dict | None = None,
+    executable_path: str | None = None,
+    executable_source: str | None = None,
 ) -> BrowserSession:
-    """Dispatch to the requested backend's launcher."""
+    """Dispatch to the requested backend's launcher.
+
+    `executable_path` (browser_binary.py) is patchright-only. `executable_source`
+    says where it came from: a per-session pin ("session") on nodriver is
+    REFUSED — the caller asked for that binary on this session and silently
+    running another would change what they are testing — while the daemon-wide
+    env default ("env") is skipped with a warning, so setting it doesn't break
+    every nodriver session. `start` reports `browser_binary_ignored` either way.
+    """
     if backend not in VALID_BACKENDS:
         raise ValueError(
             f"unknown backend {backend!r}; valid: {sorted(VALID_BACKENDS)}"
         )
     if backend in ("patchright", "auto"):
+        kw = {"executable_path": executable_path} if executable_path else {}
         return await launch_patchright_session(profile_dir, headless=headless,
                                                 pw=pw, proxy=proxy,
                                                 timezone_id=timezone_id, gpu=gpu,
                                                 gpu_node=gpu_node,
                                                 device_scale_factor=device_scale_factor,
-                                                viewport=viewport)
+                                                viewport=viewport, **kw)
     if backend == "nodriver":
+        if executable_path and executable_source == "session":
+            raise ValueError(
+                "--browser-binary is patchright-only: the nodriver backend "
+                "spawns Chrome itself. Start with --backend patchright, or "
+                "clear the pin with `start --browser-binary ''`.")
+        if executable_path:
+            log.warning("ignoring VIBATCHIUM_BROWSER_BINARY=%s for a nodriver "
+                        "launch (patchright-only)", executable_path)
         # gpu IS honoured on this path now; only gpu_node (render-node pinning)
         # is not, because it needs an env var and nodriver spawns Chrome itself.
         # device_scale_factor likewise cannot apply: nodriver spawns Chrome and we

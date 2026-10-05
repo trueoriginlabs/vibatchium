@@ -881,6 +881,24 @@ def register_all(daemon) -> None:
         # (close() guards it anyway — this keeps the response honest).
         want_ephemeral = bool(args.get("ephemeral")) and name != DEFAULT_SESSION_NAME
 
+        # `--browser-binary PATH` persists to browser.json, the same pattern as
+        # --gpu/--scale below (first, so a refused binary persists nothing):
+        # before the already-running return, resolved from disk on every launch
+        # and relaunch. `""` clears the pin. check_exec refuses it outright on
+        # agent surfaces (naming the program the daemon spawns is code
+        # execution) — the clear included, so an agent can't flip an operator's
+        # pinned browser back either.
+        binary_persisted = None
+        if "browser_binary" in args:
+            from ..browser_binary import save_session_browser
+            raw_bin = args["browser_binary"]
+            if fspolicy.in_agent_scope() or raw_bin:
+                binary_persisted = fspolicy.check_exec(
+                    raw_bin, verb="start --browser-binary")
+            else:
+                binary_persisted = ""
+            save_session_browser(profile_dir, binary_persisted or None)
+
         # 0.13.0: an explicit `--gpu/--no-gpu` persists to gpu.json. Do it BEFORE the
         # already-running early return AND before create(), so the choice is durable +
         # self-heal-safe on BOTH paths (create/relaunch resolve GPU from disk+env, never
@@ -940,6 +958,15 @@ def register_all(daemon) -> None:
                     f"scale {scale_persisted}x persisted; already running at "
                     f"{out['scale']}x — deviceScaleFactor is a context-creation "
                     f"option, so close + start to apply")
+            out["browser_binary"] = getattr(entry.session, "browser_binary", None)
+            out["browser_version"] = getattr(entry.session, "browser_version", None)
+            if (binary_persisted is not None
+                    and (binary_persisted or None) != out["browser_binary"]):
+                out["browser_binary_pending"] = binary_persisted or None
+                out.setdefault("note",
+                    "browser binary persisted; already running on "
+                    f"{out['browser_binary'] or 'channel Chrome'} — close + "
+                    f"start to apply")
             # Honesty: `--headed` can't upgrade an ALREADY-RUNNING browser. Say so
             # (mirrors gpu_pending) instead of silently dropping it — the guard
             # below only fires on a COLD launch, so without this the most common
@@ -988,7 +1015,11 @@ def register_all(daemon) -> None:
                "profile_name": entry.profile_dir.name,
                "backend": backend, "ephemeral": ephemeral,
                "gpu": bool(getattr(entry.session, "gpu", False)),
-               "scale": float(getattr(entry.session, "device_scale_factor", 1.0))}
+               "scale": float(getattr(entry.session, "device_scale_factor", 1.0)),
+               # None = channel Chrome. The version is what the browser itself
+               # reported after launch, so it proves which binary actually ran.
+               "browser_binary": getattr(entry.session, "browser_binary", None),
+               "browser_version": getattr(entry.session, "browser_version", None)}
         # Honest residual (v1 is WebGL-only): a real renderer still reports
         # screen == viewport in headless — don't let `gpu:true` read as a fully-real
         # device. Mirrors gpu_info.
@@ -1040,6 +1071,16 @@ def register_all(daemon) -> None:
                 _note(f"scale {_want}x configured but not applied: {backend} "
                       f"backend (deviceScaleFactor is a context-creation option; "
                       f"patchright-only)")
+        # A configured binary the launch didn't use can only be the env default
+        # on nodriver (a per-session pin there is refused before launch). Say so
+        # rather than let `browser_binary: null` read as "not configured".
+        if out["browser_binary"] is None:
+            from ..browser_binary import ENV_BROWSER_BINARY
+            _env_bin = (os.environ.get(ENV_BROWSER_BINARY) or "").strip()
+            if _env_bin:
+                out["browser_binary_ignored"] = True
+                _note(f"{ENV_BROWSER_BINARY}={_env_bin} not applied: {backend} "
+                      f"backend spawns its own Chrome (patchright-only)")
         return out
 
     # ─── session management ────────────────────────────────────────────

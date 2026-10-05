@@ -1045,7 +1045,9 @@ def register_extra(daemon) -> None:
                     if not hint_headers:
                         hint_source = "preset"
                 except Exception:  # noqa: BLE001
-                    ua = await coherent_headless_ua(s.pw)
+                    _bin = getattr(s, "browser_binary", None)
+                    ua = (await coherent_headless_ua(s.pw, _bin) if _bin
+                          else await coherent_headless_ua(s.pw))
             # An explicit --proxy overrides the session's own, so a caller can
             # route one request differently without touching the session config.
             proxies = _proxy_arg(args)

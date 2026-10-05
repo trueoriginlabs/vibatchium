@@ -35,6 +35,9 @@ Policy:
   can reach any other file: URL); judged as a read on operator surfaces, and
   every follow-on file: load is judged again by the browser-wide guard
   (``daemon/file_guard.py`` → :func:`check_file_load`).
+* **Executables** (``start --browser-binary``) go through :func:`check_exec`:
+  refused outright on agent surfaces (naming the program the daemon spawns is
+  code execution), existence/regular-file/executable-checked elsewhere.
 * **Symlinks are resolved first** (like playwright-mcp 0.0.81): both the
   lexical path and its realpath must clear the deny list, so neither a tmp
   symlink into ``~/.ssh`` nor a ``~/.ssh`` that is itself a symlink elsewhere
@@ -583,6 +586,53 @@ def check_profile_dir(path, *, managed_root: Path | str) -> str:
     if _under(real, managed) and real != managed:
         return real
     return check_write(path, verb="start --profile")
+
+
+# ─── executables ──────────────────────────────────────────────────────────
+
+def validate_executable(path, *, verb: str = "exec") -> str:
+    """Check that ``path`` names a runnable regular file. Returns the absolute
+    path AS GIVEN (not its realpath, so a symlink such as
+    ``/usr/bin/chromium`` → an alternatives target keeps following updates).
+
+    Absolute paths only: the daemon's cwd is not the caller's, so a relative
+    path would resolve somewhere the caller never meant. The CLI absolutizes
+    before sending. Raises ValueError.
+    """
+    if path is None or (isinstance(path, str) and not path.strip()):
+        raise ValueError(f"{verb}: empty path")
+    raw = os.path.expanduser(os.fspath(path))
+    if not os.path.isabs(raw):
+        raise ValueError(f"{verb}: {path!r} must be an absolute path")
+    absolute = os.path.abspath(raw)
+    real = os.path.realpath(absolute)
+    if not os.path.exists(real):
+        raise ValueError(f"{verb}: {path!r} does not exist")
+    if not os.path.isfile(real):
+        raise ValueError(f"{verb}: {path!r} is not a regular file")
+    if not os.access(real, os.X_OK):
+        raise ValueError(f"{verb}: {path!r} is not executable")
+    return absolute
+
+
+def check_exec(path, *, verb: str) -> str:
+    """Validate a caller-supplied EXECUTABLE the daemon will run (``start
+    --browser-binary``). Unlike a read or a write, there is no safe subset to
+    confine an agent to: naming the program the daemon spawns is code
+    execution. So agent surfaces (calls carrying an ``_fs_scope``) are refused
+    outright — not even ``VIBATCHIUM_FILE_ROOTS=*`` opts back in — and the
+    operator surfaces (CLI/SDK) get the existence/regular-file/executable
+    check. The read/write deny list and roots don't apply: browsers live in
+    ``/opt`` and ``/usr``, outside any sensible root, and the operator is
+    already local code."""
+    if in_agent_scope():
+        raise FileAccessDenied(
+            f"{verb} is operator-only: choosing the executable the daemon runs "
+            f"is code execution, so agent surfaces (MCP / a --caps-restricted "
+            f"REST shim) can't set it — not even with {ENV_ROOTS}={ROOTS_OFF}. "
+            f"Run `vb start --browser-binary PATH` from a shell, or set "
+            f"VIBATCHIUM_BROWSER_BINARY in the daemon's environment.")
+    return validate_executable(path, verb=verb)
 
 
 # ─── navigation URLs ──────────────────────────────────────────────────────
