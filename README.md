@@ -115,7 +115,7 @@ vb --session work fetch https://api.example.com/v1/me
 vb search "site reliability postmortem" -n 20 --urls
 ```
 
-**Status:** alpha, active development. **1,963 tests** green in CI (Linux,
+**Status:** alpha, active development. **2,027 tests** green in CI (Linux,
 Python 3.11–3.14). Coding agents: read [`AGENTS.md`](AGENTS.md) first — the
 one-call recipes and the traps worth skipping.
 

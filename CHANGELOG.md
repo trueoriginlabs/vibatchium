@@ -4,6 +4,107 @@ All notable changes to vibatchium are documented here. Versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Until 1.0,
 minor bumps may include breaking changes; we'll always call them out here.
 
+## [0.20.0] — 2026-10-06
+
+A fleet of logged-in identities on one box is the thing vibatchium is for, and
+a fleet on one box is also the easiest thing to fingerprint: every session
+shares the machine. This release measures that, fixes the parts that can be
+fixed coherently, fills the behavioural silence between actions, and rewrites
+the README to say plainly who this is for — including the rows where other
+tools are better.
+
+### feat: `vb fleet-check` and `vb persona` — same box, different devices
+
+DataDome's 2026-09 write-up on Meta's Muse agent describes catching a fleet
+because sessions on unrelated sites showed "the same sandboxed image".
+`vb fleet-check` (CLI-only) probes 26 surfaces per session — UA + high-entropy
+client hints, screen, window, timezone, locale, Intl, canvas, WebGL
+renderer/params/readPixels, audio, fonts, WebGPU, media devices, voices,
+permissions, plugins, media queries, math, storage quota — plus main-thread vs
+worker and window-inside-screen lie checks, and scores how twinned the sessions
+are. `--spawn N`, `--variant gpu=intel|nvidia|geo=CC|persona`,
+`--before-after`, `--json`. `--sessions` probes running sessions only and puts
+each back on the URL it was on.
+
+Measured on our reference laptop (Chrome 153, Intel UHD 620 + NVIDIA MX150),
+five sessions: twin score 86.2 (74.3 on the surfaces we can vary). Every
+default headless session reported the same 800×600 screen and 780×580 window
+— a same-machine join key and a headless tell. `vb persona set` gives a
+session a stable, engine-level screen and desktop work area
+(`--screen-info`), a window that fits inside it, and — for a GPU-on session
+without `--node` — a render node balanced across the host's GPUs: 79.2 / 61.4,
+no lies. It deliberately does **not** fake hardwareConcurrency, deviceMemory,
+canvas/audio noise, fonts or locale: each of those fakes can be caught, which
+is worse than a shared true value. Opt-in; default sessions launch exactly as
+before. Headed, scaled and nodriver sessions report `persona_ignored`.
+
+### feat: `humanize ambient` — pointer activity between actions
+
+Behavioural scorers now read the silence between actions (Akamai: 63.2% of
+agentic requests carried zero mouse events). `vb --session X humanize ambient
+on` (verb `humanize_ambient`, lean MCP) fills it with low-rate, seeded
+micro-corrections, minimum-jerk drifts, moves onto text and rare reading
+scrolls while a session idles. It never clicks, types, selects or navigates,
+never takes the session lock, yields the instant a verb starts, stays still
+after `hover` / `focus` / `mouse move` so a hover-opened menu stays open, keeps
+the scroll pinned after a screenshot until the next navigation or input, and
+goes quiet 180 s after the last verb (`VIBATCHIUM_AMBIENT_HORIZON`) or when
+idle-freeze parks the session. The target filter is best-effort: it avoids
+anything that looks interactive but can't see script-attached hover handlers.
+`vb oracle ambient`, 4 gaps × 8 s: pointer events per idle gap 0 → 20.5, zero
+clicks/keys/inputs/interactive hovers. Refused on attach, nodriver and headed
+sessions; over MCP `seed` is refused and the horizon is capped. Still
+CDP-synthesised input — `pointerrawupdate` and coalesced samples stay absent.
+
+### feat(start): `--browser-binary PATH`
+
+`vb start --browser-binary /opt/chromium/chrome` launches that executable
+instead of channel Chrome (patchright); `VIBATCHIUM_BROWSER_BINARY` sets a
+daemon-wide default. Persisted per session like `--gpu`/`--scale`, so a
+self-heal relaunch comes back on the same build; `start` reports the
+`browser_version` that actually ran. Choosing the program the daemon runs is
+code execution, so it is operator-only: refused over MCP and a `--caps` REST
+shim, absent from the MCP schema, and a pin for a caller-chosen `--profile` dir
+lives in the operator-only store `~/.config/vibatchium/pins/` — a
+`browser.json`/`persona.json` planted inside such a dir is ignored. On Ubuntu
+23.10+ a Chrome-for-Testing build aborts with "No usable sandbox" (AppArmor);
+the error now says so in one paragraph with the three ways out.
+
+### feat(caps): `--caps min` — 12 tools for clients without tool search
+
+Claude Code defers MCP tools, so `lean` (87 tools) costs it ~2.7k tokens at
+start. A client that loads every schema pays ~18k; `vb mcp --caps min` exposes
+12 tools in ~3.8k: `explore`, `go`, `extract`, `screenshot`, `act`, `map`,
+`click`, `fill`, `press`, `expect`, `session_close`, `status`. Composes like a
+bucket (`--caps min,search`). Tool descriptions no longer name tools a profile
+may not expose.
+
+### fix(security): a session name is never a path
+
+Session names are validated at dispatch: absolute paths, separators, `.`/`..`,
+control characters and >255-byte names are refused on every surface.
+`session="/abs/dir"` used to become the Chrome user-data-dir and skip the
+`start --profile` file-policy check. Every existing name on our box (377,
+including names with spaces) still resolves.
+
+### docs: the README leads with who this is for
+
+It used to open on "clears Cloudflare". It now opens with the wedge — many
+logged-in identities, unattended, at once, with a security model for letting an
+AI near the credentials — a "use something else if…" table, a comparison
+against CloakBrowser, bladebro, agent-browser and playwright-mcp that keeps the
+rows we lose (engine-level stealth, a published stealth score, platforms), and
+the four things only vibatchium ships, each with a runnable snippet.
+
+### Also
+
+- `ci`: a non-blocking `macos-latest` job, to learn whether the suite runs there.
+- A posture (gpu/scale/browser binary/persona) changed on a running session
+  applies at the next self-heal relaunch — now documented.
+- Correction to 0.19.5's test note: the flaky iframe probe wasn't a missing
+  listener but a click that missed a cross-origin (out-of-process) frame while
+  it settled; the probe now confirms a fresh run and re-clicks.
+
 ## [0.19.5] — 2026-10-06
 
 ### fix(secrets): a navigation after a secret fill could kill the driver on Patchright 1.60
