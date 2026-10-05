@@ -37,6 +37,12 @@ import pytest
 # looked like engine regressions and were entirely a broken harness
 # (pytest-asyncio absent). Swapping the version back reproduced the failures
 # exactly, which is what proved 1.61.2 innocent.
+#
+# 2026-10-05: uv.lock moved 1.60.0 → 1.61.2 (it had stayed on 1.60.0 after the
+# vetting above). Re-run against 1.61.2 + Chrome 153: this gate + the wave7
+# posture suite + bench_offline, 28 passed; full suite clean apart from the
+# shared-~/.config profile-leak checks, which a concurrent suite run from
+# another checkout tripped.
 _VETTED_PATCHRIGHT = {(1, 59), (1, 60), (1, 61)}
 
 
