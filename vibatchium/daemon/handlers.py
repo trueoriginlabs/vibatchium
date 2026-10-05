@@ -1081,6 +1081,21 @@ def register_all(daemon) -> None:
                 out["browser_binary_ignored"] = True
                 _note(f"{ENV_BROWSER_BINARY}={_env_bin} not applied: {backend} "
                       f"backend spawns its own Chrome (patchright-only)")
+        # 0.20.0: persona — report what was applied, or why a configured one
+        # wasn't (headed / scaled / nodriver), never a silent drop.
+        _p = getattr(entry.session, "persona", None)
+        if _p:
+            out["persona"] = {"screen": "x".join(map(str, _p["screen"])),
+                              "window": "x".join(map(str, _p["window"]))}
+        else:
+            from ..persona import load_session_persona
+            if load_session_persona(profile_dir):
+                reason = ("nodriver backend (patchright-only)" if backend == "nodriver"
+                          else "headed (the real display owns screen/window)"
+                          if not headless else "scaled capture posture "
+                          "(viewport emulation owns the screen)")
+                out["persona_ignored"] = True
+                _note(f"persona configured but not applied: {reason}")
         return out
 
     # ─── session management ────────────────────────────────────────────
@@ -1597,6 +1612,49 @@ def register_all(daemon) -> None:
                                    "in headless (v1 is WebGL-only)")
             except Exception as exc:  # noqa: BLE001
                 out["renderer_probe_error"] = str(exc)
+        return out
+
+    # ─── 0.20.0: persona (per-identity screen/window/GPU-node de-twin) ──
+
+    def _persona_pdir(d):
+        from .registry import current_session_ctx as _ctx
+        from .paths import session_dir as _sd
+        sname = _ctx.get()
+        entry = d.registry.get(sname)
+        return sname, entry, (entry.profile_dir if entry else _sd(sname))
+
+    @daemon.handler("persona_set")
+    async def _persona_set(d, args):
+        """Turn the persona posture on (creating the profile's persona ONCE) or
+        off. `reroll` draws a fresh persona — a device change for a logged-in
+        account, so only on purpose. Takes effect on the next `start`."""
+        from ..persona import ensure_session_persona, save_session_persona
+        sname, entry, pdir = _persona_pdir(d)
+        on = bool(args.get("on", True))
+        if not on:
+            save_session_persona(pdir, None)
+            return {"set": True, "on": False, "session": sname,
+                    "note": "takes effect on next `start` (close session first if running)"}
+        p = ensure_session_persona(pdir, reroll=bool(args.get("reroll")))
+        out = {"set": True, "on": True, "session": sname,
+               "persona": {"screen": "x".join(map(str, p["screen"])),
+                           "work_area": p["work_area"], "shell": p["shell"],
+                           "window": "x".join(map(str, p["window"])),
+                           "position": p["position"], "gpu_node": p["gpu_node"]},
+               "note": "takes effect on next `start` (close session first if running)"}
+        if p["gpu_node"]:
+            out["gpu_note"] = ("gpu_node applies only when GPU is on (`vb gpu set "
+                               "--on`) and gpu.json pins no node itself")
+        return out
+
+    @daemon.handler("persona_info")
+    async def _persona_info(d, args):
+        from ..persona import load_session_persona
+        sname, entry, pdir = _persona_pdir(d)
+        p = load_session_persona(pdir)
+        out = {"session": sname, "configured": p is not None, "persona": p}
+        if entry is not None:
+            out["launched_persona"] = getattr(entry.session, "persona", None) is not None
         return out
 
     # ─── Wave 6.1c: session checkpoint / restore ───────────────────────

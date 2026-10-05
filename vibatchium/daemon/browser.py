@@ -215,6 +215,9 @@ class BrowserSession:
     # `browser.version` read after launch (e.g. "153.0.8010.36"), or None if the
     # driver didn't expose it. Observability only.
     browser_version: str | None = None
+    # 0.20.0: the persona (screen/window de-twin) this session launched with, or
+    # None. Observability + the warm-claim guard; see persona.py.
+    persona: dict | None = None
     frame_ref: object = None         # patchright.Frame | None
     dialog_policy: dict = field(default_factory=lambda: {"action": "dismiss"})
     downloads: list = field(default_factory=list)
@@ -475,7 +478,8 @@ async def launch_session(profile_dir: Path, headless: bool = False,
                          gpu_node: str | None = None,
                          device_scale_factor: float | None = None,
                          viewport: dict | None = None,
-                         executable_path: str | None = None) -> BrowserSession:
+                         executable_path: str | None = None,
+                         persona: dict | None = None) -> BrowserSession:
     """Cold-launch real Chrome with persistent context (canonical Patchright config).
 
     The Playwright driver (Node.js subprocess) can be shared across multiple
@@ -525,6 +529,13 @@ async def launch_session(profile_dir: Path, headless: bool = False,
     (see browser_binary.py — the registry resolves it per session and validates
     it). None = channel Chrome, unchanged. The headless UA probe runs against the
     same binary so the de-Headless'd UA names the version actually running.
+
+    `persona` (0.20.0): a validated persona.json dict (see persona.py). Headless
+    only, and only on the default no_viewport posture: adds `--screen-info` /
+    `--window-size` / `--window-position` so the engine's own screen and window
+    differ per identity instead of every session reporting headless 800x600. A
+    scaled (capture) launch ignores it — its pinned viewport emulates the screen
+    anyway. None = byte-identical default launch.
     """
     profile_dir.mkdir(parents=True, exist_ok=True)
     scale = float(device_scale_factor or 1.0)
@@ -597,6 +608,15 @@ async def launch_session(profile_dir: Path, headless: bool = False,
         if node_env:
             effective_node = gpu_node
             launch_env = {**os.environ, **node_env}
+    # 0.20.0 persona: the engine-level headless screen + window geometry. Launch
+    # switches, not a JS patch — screen.*, availTop, CSS device-width and the
+    # window clamp all agree. Skipped for a scaled launch (viewport emulation
+    # owns the screen there) and headed (the real display owns it).
+    applied_persona = None
+    if persona and headless and scale <= 1:
+        from ..persona import persona_launch_args
+        extra_args = list(extra_args) + persona_launch_args(persona)
+        applied_persona = persona
     # Wave 7.5c stealth fix: Playwright defaults inject `--no-sandbox`, which
     # (a) triggers Chrome's visible yellow "unsupported command-line flag"
     # infobar — readable in every screenshot and obviously bot-shaped —
@@ -687,7 +707,8 @@ async def launch_session(profile_dir: Path, headless: bool = False,
                           gpu=bool(gpu and headless), gpu_node=effective_node,
                           device_scale_factor=scale,
                           browser_binary=executable_path or None,
-                          browser_version=_browser_version(context))
+                          browser_version=_browser_version(context),
+                          persona=applied_persona)
     _wire_page_tracking(sess)
     await _file_guard.install(sess)
     return sess

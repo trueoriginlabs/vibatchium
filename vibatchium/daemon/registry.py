@@ -710,6 +710,10 @@ class SessionRegistry:
         # only claimable if it launched the binary this request would.
         from ..browser_binary import resolve_browser_binary
         want_binary, _ = resolve_browser_binary(pdir, name=name)
+        # 0.20.0: a persona launch adds screen/window switches the prewarm never
+        # had, so it must never claim one (same rule as scale/gpu).
+        from ..persona import load_session_persona
+        persona_cfg = load_session_persona(pdir)
         # Wave 6.1b: prefer a pre-warmed session if one is available for this
         # name AND the requested config matches (backend, headless, no proxy,
         # no geo, no gpu, no scale). Proxy-/geo-/gpu-/scale-configured sessions
@@ -731,7 +735,8 @@ class SessionRegistry:
                 and proxy_cfg is None and geo_cfg is None
                 and not gpu_on  # prewarm never launches with GPU, so gpu_on=True → cold
                 and display_cfg is None  # ...nor with a device-scale pin
-                and getattr(warm, "browser_binary", None) == want_binary):
+                and getattr(warm, "browser_binary", None) == want_binary
+                and persona_cfg is None):  # ...nor with a persona
             sess = warm
             log.info("session %s claimed pre-warmed Chrome", name)
         else:
@@ -828,9 +833,16 @@ class SessionRegistry:
                     "session %s has a proxy but no geo override — the host "
                     "timezone may not match the proxy's IP (a bot tell). "
                     "Set `vb geo set --country <cc>` to cohere.", name)
-        from ..gpu import resolve_gpu, resolve_gpu_node
+        from ..gpu import load_session_gpu, resolve_gpu, resolve_gpu_node
         gpu_on = resolve_gpu(profile_dir, name=name)
         gpu_node = resolve_gpu_node(profile_dir, name=name) if gpu_on else None
+        # 0.20.0: a persona supplies a balanced render node to a GPU-on session
+        # that pins none itself. An explicit gpu.json node always wins (including
+        # one that degraded to the default because it's unavailable here).
+        if gpu_on and gpu_node is None and not (load_session_gpu(profile_dir)
+                                                or {}).get("node"):
+            from ..persona import resolve_persona_gpu_node
+            gpu_node = resolve_persona_gpu_node(profile_dir, name=name)
         return proxy_cfg, geo_cfg, gpu_on, gpu_node
 
     async def _launch_for(self, name: str, *, profile_dir: Path,
@@ -871,6 +883,13 @@ class SessionRegistry:
         binary, binary_source = resolve_browser_binary(profile_dir, name=name)
         bin_kw = ({"executable_path": binary, "executable_source": binary_source}
                   if binary else {})
+        # 0.20.0: the persona is read here unconditionally, exactly like the
+        # display posture, so a self-heal relaunch keeps the same screen. Passed
+        # only when set: a default launch keeps the pre-0.20 keyword set.
+        from ..persona import resolve_persona
+        persona_cfg = resolve_persona(profile_dir, name=name)
+        extra = {"persona": persona_cfg} if persona_cfg else {}
+        bin_kw.update(extra)
 
         async def _do_launch():
             return await _backends.launch(
@@ -1024,6 +1043,14 @@ class SessionRegistry:
                         "existing Chrome — scale applies only to cold-launch "
                         "(`start`); the attached browser keeps its own "
                         "devicePixelRatio.", name, _disp["scale"])
+        # 0.20.0: a persona is launch switches too; the attached browser has its
+        # own real screen and window (which is the coherent answer there).
+        from ..persona import load_session_persona
+        if load_session_persona(session_dir(name)):
+            log.warning("session %s has a persona configured but is ATTACHing to "
+                        "an existing Chrome — persona applies only to cold-launch "
+                        "(`start`); the attached browser keeps its real screen.",
+                        name)
         entry = SessionEntry(name=name, profile_dir=session_dir(name), session=sess)
         self._entries[name] = entry
         log.info("session attached name=%s cdp_url=%s", name, cdp_url)

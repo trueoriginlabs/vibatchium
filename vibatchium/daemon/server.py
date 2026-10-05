@@ -222,6 +222,8 @@ class Daemon:
         # verb — otherwise the dispatcher pre-holds entry.lock and the internal
         # acquire deadlocks (asyncio.Lock is non-reentrant).
         "gpu_set", "gpu_clear", "gpu_info",
+        # 0.20.0: persona — profile-dir config (persona.json), no session needed.
+        "persona_set", "persona_info",
         # 0.7.0: session leases (registry-class — they mutate the entry's lease
         # field under the contextvar; no per-session page lock needed).
         "session_lease", "session_release", "session_lease_info",
@@ -253,6 +255,8 @@ class Daemon:
         # 0.13.0: gpu_set/gpu_clear mutate persisted per-session config (gpu_info is
         # a read, so it's absent — mirrors geo_info/proxy_info).
         "gpu_set", "gpu_clear",
+        # 0.20.0: persona_set rewrites the identity's persisted screen/window.
+        "persona_set",
     })
 
     def __init__(self) -> None:

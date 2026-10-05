@@ -3419,6 +3419,135 @@ def gpu_info(ctx):
     _emit(call("gpu_info"), ctx.obj["json"])
 
 
+# ─── 0.20.0: persona — per-identity screen / window / GPU-node de-twin ──────
+
+@cli.group()
+def persona():
+    """Opt-in per-session hardware persona: de-twin the surfaces that can vary
+    COHERENTLY between identities on one box.
+
+    Default headless sessions all report the same 800x600 screen and 780x580
+    window — a same-machine join key (and a headless tell). A persona gives this
+    profile a stable screen + desktop work area (engine-level `--screen-info`), a
+    window that fits inside it, and — if the session has GPU on without a pinned
+    `--node` — a render node balanced across this host's GPUs. Generated once,
+    persisted in persona.json, identical on every launch. Takes effect on next
+    `start`. Measure the effect with `vb fleet-check --before-after`.
+
+    It deliberately does NOT fake hardwareConcurrency, deviceMemory, canvas/audio
+    noise, fonts or locale — those can only be faked from JS, and each fake is
+    checkable against what the engine really does.
+
+    \b
+        vb --session work persona set          # create once + enable
+        vb --session work persona info
+        vb --session work persona set --off    # back to the default posture
+    """
+
+
+@persona.command("set")
+@click.option("--on/--off", "on", default=True,
+              help="Enable (default) or remove the persona for the current session.")
+@click.option("--reroll", is_flag=True,
+              help="Draw a NEW persona. A screen change is a device change for a "
+                   "logged-in account — only do this on purpose.")
+@click.pass_context
+def persona_set(ctx, on, reroll):
+    """Create (once) and enable, or remove, this session's persona."""
+    _emit(call("persona_set", {"on": on, "reroll": reroll}), ctx.obj["json"])
+
+
+@persona.command("info")
+@click.pass_context
+def persona_info(ctx):
+    """Show this session's persisted persona and whether the live browser has it."""
+    _emit(call("persona_info"), ctx.obj["json"])
+
+
+@cli.command("fleet-check")
+@click.option("--sessions", default=None,
+              help="Comma-separated EXISTING running sessions to probe as-is. "
+                   "NOTE: each is navigated to a loopback blank page — don't point "
+                   "this at a session mid-task.")
+@click.option("--spawn", "spawn", type=int, default=0,
+              help="Spawn N throwaway ephemeral default sessions.")
+@click.option("--variant", "variants", multiple=True,
+              help="Add one throwaway session per flag: comma-joined tokens "
+                   "gpu | gpu=intel|nvidia | geo=CC | tz=IANA | persona | default. "
+                   "Repeatable.")
+@click.option("--persona", "persona_on", is_flag=True,
+              help="Give every SPAWNED session a persona (the 'after' posture).")
+@click.option("--before-after", is_flag=True,
+              help="Run the spawned set twice — as-is, then with personas — and "
+                   "print both tables plus the delta.")
+@click.option("--url", default=None,
+              help="Probe on this page instead of the built-in loopback blank page.")
+@click.option("-o", "--out", "out_path", default=None, type=click.Path())
+@click.option("--json", "as_json", is_flag=True, help="Emit JSON not markdown.")
+def fleet_check(sessions, spawn, variants, persona_on, before_after, url,
+                out_path, as_json):
+    """Measure cross-session fingerprint TWINNING across a fleet of sessions.
+
+    Collects a fingerprint vector per session (UA + client hints, screen,
+    window, timezone/locale/Intl, canvas, WebGL renderer/params/readPixels,
+    audio, fonts, WebGPU, media devices, voices, permissions, plugins, media
+    queries, math, storage quota, plus a main-vs-worker lie check) and reports
+    per surface whether the sessions are identical / partial / distinct, with a
+    twin score (100 = every session pair identical everywhere).
+
+    \b
+        vb fleet-check --spawn 3
+        vb fleet-check --variant default --variant default \\
+            --variant gpu=intel --variant gpu=nvidia --variant geo=DE
+        vb fleet-check --spawn 4 --before-after
+        vb fleet-check --sessions work,work2      # your live identities, as-is
+
+    Spawned sessions are ephemeral and deleted afterwards. CLI-only.
+    """
+    from . import fleet as _fleet
+
+    specs: list[dict] = []
+    try:
+        specs = [{} for _ in range(max(0, spawn))]
+        specs += [_fleet.parse_variant(v) for v in variants]
+    except ValueError as exc:
+        raise click.UsageError(str(exc)) from exc
+    names = [s.strip() for s in (sessions or "").split(",") if s.strip()]
+    if len(names) + len(specs) < 2:
+        raise click.UsageError("need at least 2 sessions (--sessions / --spawn / "
+                               "--variant) to measure twinning")
+    if before_after and not specs:
+        raise click.UsageError("--before-after needs spawned sessions "
+                               "(--spawn / --variant)")
+
+    runs = []
+    if before_after:
+        runs.append(("before", _fleet.run_fleet_check(
+            call, sessions=names, variants=specs, persona=False, url=url)))
+        runs.append(("after (persona)", _fleet.run_fleet_check(
+            call, sessions=names, variants=specs, persona=True, url=url)))
+    else:
+        runs.append(("fleet-check" + (" (persona)" if persona_on else ""),
+                     _fleet.run_fleet_check(call, sessions=names, variants=specs,
+                                            persona=persona_on, url=url)))
+    if as_json:
+        output = json.dumps({label: res for label, res in runs}, indent=2,
+                            default=str)
+    else:
+        parts = [_fleet.render_markdown(res, title=label) for label, res in runs]
+        if len(runs) == 2:
+            parts.append(_fleet.render_comparison(runs[0][1], runs[1][1]))
+        for label, res in runs:
+            if res.get("errors"):
+                parts.append(f"errors ({label}): {json.dumps(res['errors'])}")
+        output = "\n\n".join(parts)
+    if out_path:
+        Path(out_path).write_text(output, encoding="utf-8")
+        click.echo(f"wrote {out_path}", err=True)
+    else:
+        click.echo(output)
+
+
 # ─── Wave 6.1c: session checkpoint / restore ────────────────────────────
 
 @cli.group()

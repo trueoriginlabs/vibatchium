@@ -110,9 +110,14 @@ async def launch_patchright_session(
     device_scale_factor: float | None = None,
     viewport: dict | None = None,
     executable_path: str | None = None,
+    persona: dict | None = None,
 ) -> BrowserSession:
     """Canonical Patchright launch (current default)."""
     kw = {"executable_path": executable_path} if executable_path else {}
+    # persona is forwarded only when set, so a default launch calls
+    # launch_session with exactly the pre-0.20 keyword set.
+    if persona:
+        kw["persona"] = persona
     return await launch_session(profile_dir, headless=headless, pw=pw,
                                 proxy=proxy, timezone_id=timezone_id, gpu=gpu,
                                 gpu_node=gpu_node,
@@ -301,6 +306,7 @@ async def launch(
     viewport: dict | None = None,
     executable_path: str | None = None,
     executable_source: str | None = None,
+    persona: dict | None = None,
 ) -> BrowserSession:
     """Dispatch to the requested backend's launcher.
 
@@ -317,6 +323,8 @@ async def launch(
         )
     if backend in ("patchright", "auto"):
         kw = {"executable_path": executable_path} if executable_path else {}
+        if persona:
+            kw["persona"] = persona
         return await launch_patchright_session(profile_dir, headless=headless,
                                                 pw=pw, proxy=proxy,
                                                 timezone_id=timezone_id, gpu=gpu,
@@ -337,7 +345,8 @@ async def launch(
         # device_scale_factor likewise cannot apply: nodriver spawns Chrome and we
         # connect_over_cdp to a context we did not create, and deviceScaleFactor is
         # a context-CREATION option. `start` reports scale_ignored so the drop is
-        # visible in the response, not just silent.
+        # visible in the response, not just silent. A persona is likewise not
+        # applied (nodriver builds its own argv); `start` reports persona_ignored.
         return await launch_nodriver_session(profile_dir, headless=headless,
                                               pw=pw, proxy=proxy,
                                               timezone_id=timezone_id, gpu=gpu)
