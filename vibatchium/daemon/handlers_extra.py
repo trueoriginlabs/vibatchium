@@ -407,7 +407,8 @@ def register_extra(daemon) -> None:
                          scroll=args.get("scroll", True) is not False)
         res["note"] = ("ambient scroll moves the viewport between verbs: re-read "
                        "positions before a coordinate click (scroll is paused after "
-                       "screenshot/candidates/mouse until the next verb), or pass "
+                       "screenshot/candidates/mouse until the next verb that "
+                       "navigates or acts — reads keep it paused), or pass "
                        "scroll=false")
         return res
 

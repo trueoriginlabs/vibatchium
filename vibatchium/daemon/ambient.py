@@ -71,8 +71,10 @@ SAFETY CONTRACT (each enforced in code below, and tested):
     gets a real mouseover. If the column under the cursor isn't clean, the hand
     first moves onto a text block, then scrolls; otherwise no scroll.
   * Scroll is suppressed after a viewport-pinning verb (screenshot, candidates,
-    vision_find, mouse …) until the next other verb, so an agent that read
-    coordinates off a screenshot never clicks into a page ambient scrolled.
+    vision_find, mouse …) until the next verb that navigates or acts — reads in
+    between (text, extract, eval, url, waits, `humanize_ambient status`) keep the
+    pin — so an agent that read coordinates off a screenshot never clicks into a
+    page ambient scrolled.
   * No teleports: every burst starts from where the DOCUMENT last saw the
     pointer — an isolated-world listener (invisible to page JS) records the
     last pointer position from any source, including a plain Playwright click
@@ -117,6 +119,29 @@ EDGE_MARGIN_PX = 8
 VIEWPORT_PINNING_VERBS = frozenset({
     "screenshot", "screenshot_annotate", "candidates", "vision_find",
     "mouse", "highlight", "map", "map_compact", "diff_map",
+})
+
+# Verbs that only READ (the page, or daemon/session state). They leave
+# ambient's suppression state exactly as they found it: the usual agent loop is
+# screenshot → extract/text/eval → coordinate click, and a read in the middle
+# must not hand the viewport back to ambient scroll between the screenshot and
+# the click. Everything else — navigation, input, page/frame switches, plugin
+# verbs — clears the scroll pin.
+READ_ONLY_VERBS = frozenset({
+    # page content / DOM reads
+    "text", "html", "extract", "extract_fields", "eval", "attr", "value",
+    "count", "find", "is_state", "url", "title", "frames", "pages",
+    "detect_forms", "observe", "pdf", "expect", "fingerprint",
+    # the pinning reads (they set the pin; they must not clear a park either)
+    "screenshot", "screenshot_annotate", "candidates", "vision_find",
+    "highlight", "map", "map_compact", "diff_map",
+    # waits
+    "wait_selector", "wait_ref", "wait_url", "wait_load", "wait_fn",
+    "wait_response",
+    # session-state reads
+    "console_dump", "network_dump", "route_list", "handle_list",
+    "download_list", "cookies", "storage_export", "humanize_status",
+    "humanize_ambient", "vision_stats", "vision_budget",
 })
 
 
@@ -669,14 +694,17 @@ class AmbientManager:
             st.stats["yields"] += 1
         st.wake.set()
 
-    def verb_end(self, name: str, cmd: str) -> None:
+    def verb_end(self, name: str, cmd: str, args: dict | None = None) -> None:
         st = self._st.get(name)
         if st is None:
             return
         st.busy = max(0, st.busy - 1)
         st.last_verb_end = time.monotonic()
         st.bursts_since_verb = 0
-        st.scroll_pinned = cmd in VIEWPORT_PINNING_VERBS
+        if cmd in VIEWPORT_PINNING_VERBS:
+            st.scroll_pinned = True
+        elif cmd not in READ_ONLY_VERBS:
+            st.scroll_pinned = False      # navigation / input: positions are stale anyway
         st.wake.set()
         if st.busy == 0 and (st.arm is None or st.arm.done()):
             # Arm the in-page pointer tracker right after the verb (a `go` just

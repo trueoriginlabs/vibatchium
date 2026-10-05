@@ -517,18 +517,31 @@ class Daemon:
                 lock_class = "session"
 
         # Ambient yields to every verb that drives this session's page: the
-        # session-scoped verbs (incl. plugin verbs) and the unlocked page waits.
-        # verb_begin cancels an in-flight burst before the verb runs; verb_end
-        # restarts the idle clock. A dict lookup when ambient is off.
-        ambient_hook = (lock_class == "session" or cmd in self.PAGE_WAIT_VERBS
-                        or cmd == "wait_response")
+        # session-scoped verbs (incl. session-locked plugin verbs) and the
+        # unlocked page waits. verb_begin cancels an in-flight burst before the
+        # verb runs; verb_end restarts the idle clock and updates the scroll
+        # pin. Both run only once the verb is actually going to run — after the
+        # goal-caps and lease gates — so a refused call changes nothing. A
+        # `humanize_ambient status` poll is not activity at all: it neither
+        # resets the idle clock nor touches the pin. A dict lookup when ambient
+        # is off.
+        ambient_hook = ((lock_class == "session" or cmd in self.PAGE_WAIT_VERBS
+                         or cmd == "wait_response")
+                        and not (cmd == "humanize_ambient"
+                                 and str(args.get("mode") or "status").lower()
+                                 == "status"))
+        hooked = False
+
+        def _ambient_begin() -> None:
+            nonlocal hooked
+            if ambient_hook and not hooked:
+                self._ambient.verb_begin(session_name, cmd)   # paired in finally
+                hooked = True
 
         # Push the selected session into the contextvar so handlers (via the
         # session-routed properties above) operate on the right SessionEntry.
         tok = current_session_ctx.set(session_name)
         fs_tok = _fspolicy.push_scope(fs_scope) if fs_scope is not None else None
-        if ambient_hook:
-            self._ambient.verb_begin(session_name, cmd)   # paired in finally
         try:
             if lock_class == "registry":
                 # 0.7.0 lease gate: refuse the DISRUPTIVE registry verbs (those
@@ -559,6 +572,7 @@ class Daemon:
                 # (_run_session_verb_with_recovery), so a wait against a parked
                 # session — or one that crosses the idle threshold mid-wait —
                 # would stall on a SIGSTOPped renderer (0.18.6 fix).
+                _ambient_begin()
                 if cmd in self.PAGE_WAIT_VERBS:
                     # get() also stamps activity, so the wait's own start
                     # resets the idle clock (a bare wait used to inherit the
@@ -595,11 +609,13 @@ class Daemon:
                     # handler can fire; the registry lookup will succeed
                     # on a follow-up dispatcher call once `start` returns.
                     if cmd in self.SESSION_AUTOSTART_VERBS:
+                        _ambient_begin()
                         result = await self._handlers[cmd](self, args)
                     elif cmd in self.SESSIONLESS_FALLBACK_VERBS:
                         # No session, no lock — run the handler and let it decide
                         # whether it can proceed sessionless (e.g. an anonymous
                         # fetch) or must raise its own precondition error.
+                        _ambient_begin()
                         result = await self._handlers[cmd](self, args)
                     else:
                         return {
@@ -640,6 +656,8 @@ class Daemon:
                             log.info("lease-denied session=%s cmd=%s owner=%s",
                                      session_name, cmd, active["owner"])
                             return {"id": req_id, "ok": False, "error": reason}
+                    # Both gates passed: the verb WILL run — now ambient yields.
+                    _ambient_begin()
                     # 0.7.0 self-heal: run the verb under the per-session lock
                     # with transparent Chrome renderer-crash recovery.
                     result = await self._run_session_verb_with_recovery(
@@ -676,8 +694,8 @@ class Daemon:
                 return {"id": req_id, "ok": False, "error": str(exc)}
             return {"id": req_id, "ok": False, "error": f"{type(exc).__name__}: {exc}"}
         finally:
-            if ambient_hook:
-                self._ambient.verb_end(session_name, cmd)
+            if hooked:
+                self._ambient.verb_end(session_name, cmd, args)
             elif lock_class == "registry":
                 # a close/delete/stop may have removed an ambient session
                 self._ambient.reap()

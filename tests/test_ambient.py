@@ -464,7 +464,7 @@ class _Recorder:
     def verb_begin(self, name, cmd):
         self.events.append(("begin", cmd))
 
-    def verb_end(self, name, cmd):
+    def verb_end(self, name, cmd, args=None):
         self.events.append(("end", cmd))
 
     def reap(self):
@@ -505,6 +505,74 @@ async def test_dispatcher_pairs_end_even_when_the_verb_fails(monkeypatch):
     out = await d.dispatch({"cmd": "probe", "args": {"_session": "t"}, "id": "1"})
     assert out["ok"] is False
     assert rec.events == [("begin", "probe"), ("end", "probe")]
+
+
+async def test_refused_calls_never_reach_the_ambient_hooks(monkeypatch):
+    # The lease and goal-caps gates run first: a call they refuse must not
+    # cancel a burst, reset the idle clock or clear the scroll pin.
+    d, e, _ = _daemon(monkeypatch)
+    rec = _Recorder()
+    d._ambient = rec
+
+    async def ok(daemon, args):
+        return {}
+
+    d._handlers["click"] = ok
+    e.lease_grant("other-bot", 60)
+    out = await d.dispatch({"cmd": "click", "args": {"_session": "t"}, "id": "1"})
+    assert out["ok"] is False
+    e.lease_clear()
+    e.flags["goal_caps"] = "nav"
+    out = await d.dispatch({"cmd": "click", "args": {"_session": "t"}, "id": "2"})
+    assert out["ok"] is False and "goal caps" in out["error"]
+    assert rec.events == []
+
+
+async def test_status_poll_is_not_activity(monkeypatch):
+    d, e, page = _daemon(monkeypatch)
+    st = await _enable(d, e)
+    st.scroll_pinned = True
+    st.last_verb_end -= 50
+    before = st.last_verb_end
+    out = await d.dispatch({"cmd": "humanize_ambient", "id": "1",
+                            "args": {"_session": "t", "mode": "status"}})
+    assert out["ok"] and out["result"]["idle_s"] >= 50
+    assert st.last_verb_end == before and st.scroll_pinned and st.busy == 0
+    d._ambient.disable("t")
+
+
+async def test_scroll_pin_survives_reads_until_a_verb_acts(monkeypatch):
+    # screenshot → extract → (idle) → coordinate click: the reads in between
+    # must not let ambient scroll the page under the coordinates.
+    d, e, page = _daemon(monkeypatch)
+    page.ptr = [400.0, 200.0]
+    st = await _enable(d, e)
+    _fast(st, scroll_p=1.0)
+
+    async def ok(daemon, args):
+        return {}
+
+    for verb in ("screenshot", "extract", "text", "eval", "url", "mouse", "click"):
+        d._handlers[verb] = ok
+
+    async def run(verb, **a):
+        out = await d.dispatch({"cmd": verb, "id": verb,
+                                "args": {"_session": "t", **a}})
+        assert out["ok"], out
+
+    await run("screenshot")
+    for verb in ("extract", "text", "eval", "url"):
+        await run(verb)
+        assert st.scroll_pinned, f"{verb} unpinned the viewport"
+    await run("humanize_ambient", mode="status")
+    assert st.scroll_pinned
+    await asyncio.sleep(0.5)
+    assert not [c for c in page.calls if c[0] == "wheel"], "scrolled under a pin"
+    await run("mouse", action="click", x=10, y=10)
+    assert st.scroll_pinned                       # a coordinate verb re-pins
+    await run("click", target="#x")
+    assert not st.scroll_pinned                   # acting releases it
+    d._ambient.disable("t")
 
 
 async def test_freezer_skips_one_poll_mid_burst(monkeypatch):
