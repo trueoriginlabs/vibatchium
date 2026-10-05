@@ -503,9 +503,13 @@ threat model is "a credential must never reach the model, a screenshot, or a log
   frame that owns the field (so an iframe can't borrow the top page's origin) —
   or into the entry's explicit `origins` list. Anywhere else it refuses *before*
   the secret is resolved, so a prompt-injected agent can't type your password
-  into a lookalike page and read it back. If the field is swapped or focus is
-  redirected mid-fill, it's cleared and the call fails. The escape hatch
-  (`--allow-cross-origin`) is shell-only; the MCP surface refuses it.
+  into a lookalike page. Framed login pages, about:blank frames and pages the
+  agent already ran `eval` in are refused too; while the secret sits in a field,
+  `value` / `eval` are refused so it can't be read back; and the write uses the
+  field's own value setter, never focus + keyboard, so page script can't
+  redirect it. If the field is swapped mid-fill, it's cleared and the call
+  fails. The escape hatches (`--allow-cross-origin`, two daemon env vars) are
+  shell-only; MCP refuses them, along with vault edits and `secret totp`.
 - **Live-view is authenticated.** The WebSocket requires a per-server token and
   rejects foreign-`Origin` connections (the CSWSH class), and *driving* the page is
   a separate token from watch-only — a read-only link can be shared without handing

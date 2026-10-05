@@ -23,26 +23,75 @@ The value is now written only into a document whose origin belongs to the site:
 https, and the site's host or a subdomain of it — `github.com` allows
 `gist.github.com`, never `github.com.evil.com` or `evilgithub.com`. Origin means
 the frame that **owns the field**, read from the browser's own frame URL, so an
-iframe can't borrow the top page's origin and page script can't spoof it. A site
-whose login lives elsewhere declares it once:
+iframe can't borrow the top page's origin and page script can't spoof it. Every
+frame **above** the field must be an allowed origin too: a real login page framed
+by `evil.com` is refused ("embedded by …"), because the framing page is the one
+that plays focus, overlay and navigation games. about:blank and about:srcdoc
+frames are refused outright — their origin comes from whoever created or last
+navigated them, not from their parent, and the frame tree can't tell you who that
+was. A site whose login lives elsewhere declares it once:
 `vb secret set github.com origins "https://github.com,https://gist.github.com"`.
-Loopback may be plain http, for dev and tests. `site:totp` is bound the same way,
-and the check runs **before** anything is resolved — a refused fill never computes
-the code.
+Loopback may be plain http, for dev and tests. Host names go through UTS #46, the
+way browsers resolve them: `straße.de` is `xn--strae-oqa.de`, not the
+`strasse.de` Python's built-in IDNA2003 codec would have matched. `site:totp` is
+bound the same way, and every check runs **before** anything is resolved — a
+refused fill never computes the code.
+
+Binding where the value goes is only half of it: the agent that triggered the
+fill must not be able to read it back, nor to have prepared the page to read it
+for it.
+
+- **Read-back refusal.** While a field filled from the vault still holds a value
+  — in any frame or tab of the session — `value`, `eval`, `wait_fn`,
+  `eval_handle`, `handle_eval`, `detect_forms values=true` and
+  `go javascript:…` are refused. Scrubbing their output wouldn't do: caller JS
+  can re-encode the value however it likes. Submit, navigate away, or
+  `fill <target> ""` and they work again; `title`, `text`, `map` and the rest
+  never stopped.
+- **Caller-JS taint.** A document the caller already ran JS in — `eval`,
+  `wait_fn`, `eval_handle`, `handle_eval`, `content`, `go javascript:…`,
+  `fingerprint extract=…`, or a `route_add --mode fulfill` response, which is
+  caller bytes the browser attributes to the real origin — refuses a secret fill
+  until it is reloaded. So does any session with a fulfill rule installed. The
+  mark is the main frame's loader id: `reload` or a fresh `go` clears it, an
+  in-page `pushState` doesn't.
+- **No keyboard.** The old fill was Playwright's: focus the field, then insert
+  text into *whatever was focused* — so a page that moved focus into a foreign
+  iframe in that gap got the value. The write now runs in the isolated world,
+  straight into the pinned node through the native `value` setter, then fires
+  `input` and `change`. Page script has nothing to redirect, and because the
+  setter bypasses a framework's value tracker, React-style controlled inputs see
+  a real change and keep the value. Only text-like `<input>` and `<textarea>`
+  are accepted; a `<select>`, a checkbox or a contenteditable is refused before
+  anything is resolved.
+- **No clipboard.** `copy`, `cut` and `dragstart` on a vault-filled field write
+  nothing, so `press Control+A`, `Control+C` and a paste elsewhere get nothing.
 
 The write goes through a handle pinned to the node that was checked. Afterwards
 that node must still be the one the target resolves to, still attached, in a
-same-origin document, with focus not moved into a foreign iframe. Otherwise the
-field is cleared and the call fails. That replaces 0.18.6's "re-mask whatever the
-locator resolves to now": a node swapped mid-fill is now a refusal, not something
-to cover up.
+same-origin document. Otherwise the field is cleared and the call fails. That
+replaces 0.18.6's "re-mask whatever the locator resolves to now": a node swapped
+mid-fill is now a refusal, not something to cover up.
 
-The escape hatch is operator-only: `vb fill … --allow-cross-origin`, or
-`VIBATCHIUM_SECRET_ALLOW_CROSS_ORIGIN=1` on the daemon. It is **not** in the MCP
-schema, and leaving it out isn't enough on its own — `call_tool` forwards the
-arguments dict verbatim — so MCP (and a `--caps`-restricted REST shim) refuses
-`allow_cross_origin` outright. It also refuses `secret_set … origins`, which
-would otherwise let the same agent add its own host to the list.
+The escape hatches are operator-only: `vb fill … --allow-cross-origin`, or
+`VIBATCHIUM_SECRET_ALLOW_CROSS_ORIGIN=1` on the daemon, skips the origin rules
+(not the swap guard, the taint check or the opaque-frame refusal);
+`VIBATCHIUM_SECRET_ALLOW_READBACK=1` on the daemon turns off the read-back
+refusal and the taint check. Neither env var can be set by a verb. The flag
+isn't in the MCP schema, and leaving it out isn't enough on its own —
+`call_tool` forwards the arguments dict verbatim — so MCP (and a
+`--caps`-restricted REST shim) refuses `allow_cross_origin` outright. Those
+surfaces also refuse every vault mutation (`secret_init`, `secret_set` with any
+key — `origins` would add the agent's own host, `email-poll` would repoint the
+IMAP poller — and `secret_delete`), plus `secret_totp` and `wait_email_code`,
+which hand back a code with no origin check at all. An agent that needs a TOTP
+fills it: `fill <target> --use-secret site:totp`. `secret_list` stays; it's
+masked.
+
+What this doesn't cover, by design: an unrestricted `vb serve` REST shim, or any
+agent with a shell, is the operator and can use the escape hatches. And the
+network capture verbs (`network_*`, `har`, outside the lean caps) record request
+bodies, so they see the credential once the form is submitted.
 
 Also: the session-default safety mode was read from two env vars. New sessions
 used `VIBATCHIUM_DEFAULT_SAFETY`; the fallback read `VIBATCHIUM_SAFETY_MODE`,

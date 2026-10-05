@@ -1945,8 +1945,11 @@ def fill(ctx, target, text_arg, timeout_ms, index, use_secret, allow_cross_origi
     With --use-secret site:key, value comes from the encrypted vault — never
     appears in command line, response, or logs. It is ORIGIN-BOUND: written
     only into a document on that site (https, the site's host or a subdomain
-    of it, or one of the entry's `origins`; loopback may be http). Anything
-    else is refused before the secret is even resolved.
+    of it, or one of the entry's `origins`; loopback may be http), with every
+    enclosing frame allowed too, and never into about:blank frames or a page
+    you already ran `eval` in (reload first). Anything else is refused before
+    the secret is even resolved. While the value is in the field, `value` /
+    `eval` are refused; submit, navigate, or `fill TARGET ""` to clear it.
     """
     args = {"target": target, "timeout_ms": timeout_ms}
     if index is not None:

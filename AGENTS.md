@@ -329,7 +329,7 @@ The field is masked from the first paint (mask applied *before* the write, fails
 **closed**) and the live value is stripped from `map`/`diff_map` snapshots and
 screenshots — so `--use-secret` never round-trips a credential back through a
 tool response. `vb secret list` shows entries masked; `vb secret totp <site>`
-prints the current code.
+prints the current code (from a shell — over MCP it's operator-only, see below).
 
 **Secrets are origin-bound (0.19.4).** `--use-secret site:key` (and
 `site:totp`) only writes into a document whose origin belongs to the site,
@@ -338,7 +338,9 @@ not the top page's:
 
 - default: `https://` and the site's host or any subdomain — `github.com`
   allows `github.com` and `gist.github.com`, never `github.com.evil.com` or
-  `evilgithub.com`. A leading `www.` on the site name is dropped first.
+  `evilgithub.com`. A leading `www.` on the site name is dropped first. Host
+  names are compared after UTS #46 (what browsers do): `straße.de` is
+  `xn--strae-oqa.de`, not `strasse.de`.
 - explicit: an `origins` key on the entry **replaces** the default. Entries are
   exact origins (`https://host[:port]`), wildcards (`https://*.host`, subdomains
   only) or bare hosts:
@@ -349,17 +351,66 @@ not the top page's:
 - loopback (`localhost`, `*.localhost`, `127.0.0.0/8`, `::1`) may be plain
   `http://`; nothing else may.
 
-A mismatch is refused **before** the secret is resolved, with an error naming
-the page's origin and the fix. The success response carries `origin` and
-`origin_check` (`site` | `origins` | `bypassed`). After the write, the field must
-still be the same connected node in a same-origin document and focus must not
-have moved into a foreign iframe — otherwise it's cleared and the call fails.
+**Set explicit `origins` for big providers.** The default subdomain breadth is
+wide: `google.com` also allows `sites.google.com`, which serves user-made pages,
+and the same goes for any provider that hosts customer content on a subdomain.
+For those, list the real login origins
+(`origins "https://accounts.google.com"`).
 
-Escape hatch, operator-only: `vb fill … --use-secret … --allow-cross-origin`, or
-`VIBATCHIUM_SECRET_ALLOW_CROSS_ORIGIN=1` in the daemon's env. Neither is
-reachable from an agent-only surface: MCP (and a `--caps`-restricted REST shim)
-refuses `allow_cross_origin` and refuses `secret_set … origins`, because an
-injected agent would simply pass them. Set `origins` from a shell.
+Also refused, before anything is resolved:
+
+- **a framed login page** — every frame *above* the field must be an allowed
+  origin too. The real `github.com` login inside an `evil.com` page fails with
+  "embedded by https://evil.com". If the embedding is legitimate, list the
+  embedder in `origins`.
+- **opaque frames** — a field in an `about:blank` / `about:srcdoc` frame ("no
+  verifiable origin"). Their origin comes from whoever created or navigated them,
+  not their parent. Open the login page itself.
+- **a page you already ran JS in** — after `eval`, `wait_fn`, `eval_handle`,
+  `handle_eval`, `content`, `go javascript:…` or `fingerprint extract=…` in a
+  document, or a `route_add --mode fulfill` response landed in it, a secret fill
+  into that document is refused ("caller-supplied JavaScript … ran in this
+  page"), and so is any fill while a fulfill rule is installed. **Recover:**
+  `reload` (or `go` to the login page again; `route_clear` first if needed) and
+  fill *before* any eval. An in-page `pushState` does not clear it.
+- **non-text targets** — only text-like `<input>` and `<textarea>`; a
+  `<select>`, checkbox or contenteditable is refused.
+
+**While the secret is in a field, read-back verbs are refused.** As long as a
+field you filled from the vault still holds a value (any frame, any tab of the
+session), `value`, `eval`, `wait_fn`, `eval_handle`, `handle_eval`,
+`detect_forms values=true` and `go javascript:…` fail with "a vault secret is
+live". **Recover:** submit the form, navigate away, or `fill <target> ""` to
+clear it. Everything else (`title`, `text`, `map`, `click`, `screenshot`, …)
+keeps working. Copy/cut/drag out of the field yields nothing either.
+
+The write itself never uses focus or the keyboard: the value goes straight into
+the checked node through the native `value` setter, then `input`/`change` fire,
+so React-style controlled inputs keep it and page script can't redirect it by
+moving focus. The success response carries `origin` and `origin_check`
+(`site` | `origins` | `bypassed`). After the write, the field must still be the
+same connected node in a same-origin document — otherwise it's cleared and the
+call fails.
+
+**Operator-only over MCP.** MCP (and a `--caps`-restricted REST shim) refuses
+`allow_cross_origin`, every vault mutation (`secret init`, `secret set` with
+any key, `secret delete`), `secret totp` and `wait-email-code` — those return
+codes with no origin check. An agent that needs a TOTP fills it
+(`fill <target> --use-secret site:totp`). `secret list` stays (masked). Run the
+rest from a shell.
+
+**Escape hatches, operator-only:** `vb fill … --use-secret … --allow-cross-origin`
+or `VIBATCHIUM_SECRET_ALLOW_CROSS_ORIGIN=1` (skips the origin rules, not the swap
+guard, the taint check or the opaque-frame refusal), and
+`VIBATCHIUM_SECRET_ALLOW_READBACK=1` (turns off the read-back refusal and the
+taint check). The env vars are read from the **daemon's** environment only.
+
+**Design limits.** These guards stop an agent that only has agent surfaces. An
+**unrestricted `vb serve`** REST shim, or any agent with **shell access**, is the
+operator: it can set the env vars, pass `--allow-cross-origin`, or edit the
+vault. And the network capture verbs (`network_*`, `har`, outside the lean caps)
+record request bodies, so they see the credential once the form is submitted —
+they are outside this guard.
 
 ## Untrusted content — prompt-injection safety
 
@@ -605,6 +656,7 @@ VIBATCHIUM_LEASE=<token>        # client-side lease token presented on every cal
 VIBATCHIUM_LOG_VERBS=1          # per-verb DEBUG audit trail
 VIBATCHIUM_DEFAULT_SAFETY=wrap  # session-default injection safety mode (alias: VIBATCHIUM_SAFETY_MODE)
 VIBATCHIUM_SECRET_ALLOW_CROSS_ORIGIN=1  # daemon-wide: let `fill --use-secret` write off-site (dangerous; prefer `origins`)
+VIBATCHIUM_SECRET_ALLOW_READBACK=1      # daemon-wide: allow value/eval/… while a vault secret is live, and secret fills into eval'd pages (dangerous)
 VIBATCHIUM_SECRETS_KEY=<b64-32> # vault key for headless/CI (else the OS keyring)
 VIBATCHIUM_SKILLS=1             # surface per-host skill notes on go/explore (opt-in)
 VIBATCHIUM_PLUGINS=0            # disable plugin discovery at daemon startup
