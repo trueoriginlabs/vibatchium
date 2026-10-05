@@ -38,62 +38,72 @@ crash recovery, credentials — for you to build. vibatchium is that fleet layer
 
 ## How it compares
 
-As of 2026-10-06, from each project's own README and release notes. Rows where
-we lose are included on purpose.
+As of 2026-10-06, from each project's own README, source and release notes
+(the MCP-cost row is our own measurement¹). Rows where we lose are included on
+purpose.
 
 | | **vibatchium** | CloakBrowser | bladebro | agent-browser | playwright-mcp |
 |---|---|---|---|---|---|
-| N persistent logged-in sessions at once, on one daemon | **yes, free** | 1 free · more on Pro | one Chrome per agent session | yes | one per profile dir |
-| Unattended ops: crash self-heal, leases, budgets, idle freeze, goals | **yes** | — | — | partial (idle timeout, restore) | idle timeout |
-| Agent can *use* a secret but not *read* it (origin-bound, read-back refused, TOTP + IMAP 2FA) | **yes** | — | — | vault, origin check | `--secrets` redaction |
-| Prompt-injection scanning of page content | **yes** | — | — | — | — |
+| N persistent logged-in sessions at once | **yes, free, one daemon** | 1 free (latest build) · more on Pro | one Chrome per agent session | yes, one daemon per session | one per profile dir |
+| Unattended ops: crash self-heal, leases, budgets, idle freeze, goals | **all of them** | — | partial (crash relaunch, idle timeout) | partial (idle timeout, restore) | idle timeout |
+| Agent can *use* a secret but not *read* it (origin-bound fill, read-back refused, TOTP) | **yes** | — | — | vault, origin check | `--secrets` redaction |
+| Prompt-injection scanning of page content | **yes** | — | — | boundary markers (opt-in), no scanning | — |
 | Browserless HTTP on the session's own cookies, Chrome TLS fingerprint · keyless web search | **yes** | — | — | — | — |
-| Real stock Chrome | yes | own Chromium build | yes | Chrome for Testing | yes |
-| Stealth layer | CDP-level (Patchright) | **engine-level (87 C++ patches)** | CDP-level, no `Runtime.enable` | none in core | none |
-| Public stealth-benchmark score | not yet | 30/30 detector suite | **68/80 Stealth Bench V1** | — | — |
-| MCP startup cost in Claude Code | ~2.7k tokens (86 tools, 5 always loaded) | n/a | ~3.4k tokens (5 tools) | not measured | not measured |
-| Platforms | Linux (macOS untested) | Linux · macOS · Windows | Linux · macOS · Windows | all | all |
+| Browser | stock Chrome | own Chromium build | stock Chromium | Chrome for Testing default | stock Chrome |
+| Stealth layer | CDP-level (Patchright) | **engine-level (87 C++ patches)** | CDP-level ("6-layer"), no `Runtime.enable` | none in core; via cloud providers | none |
+| Published stealth score | not yet | 30/30 on its own detector list | **68/80 Stealth Bench V1 (self-run)** | — | — |
+| MCP startup cost in Claude Code¹ | ~2.7k tokens (87 tools, 5 always loaded) | n/a | ~3.4k tokens (5 tools) | not measured | not measured |
+| Platforms | Linux (macOS: CI probe, unsupported) | Linux · macOS · Windows | Linux · macOS · Windows | all | all |
+
+<sub>¹ bytes/4 of `tools/list` plus server instructions, measured over stdio. Clients without tool search load every tool: `vb mcp --caps min` is 12 tools, ~3.8k tokens. bladebro's own README says ~1.9k.</sub>
 
 **Where the others are genuinely better:** CloakBrowser's engine-level patches
 go deeper than any CDP-level layer can — and `vb start --browser-binary` will
-drive a Chromium build you bring. bladebro has a public benchmark number and we
+drive a Chromium build you bring. bladebro has a stealth benchmark number and we
 don't; until we do, read our stealth claims as measured on scoreboards, below,
 not on production walls. Both run on more operating systems.
 
 ## What only vibatchium does
 
 **1. A fleet of logged-in identities on one box.** Each session is its own
-Chrome, profile, proxy, timezone and GPU, and they run in parallel on one
-daemon that keeps them alive: a crashed renderer is relaunched on the same
-profile, parked sessions are frozen to zero CPU and thawed on the next call,
-leases stop two agents clobbering one session, and goals give a task a
-step/spend/time budget that survives a daemon restart.
+Chrome and profile, with its own proxy, timezone and GPU node, and — opt-in
+with `vb persona set` — its own screen and window, because by default every
+headless session on one machine reports the same 800×600 screen. `vb
+fleet-check` measures how alike your sessions still look. They run in parallel
+on one daemon that keeps them alive: a crashed renderer is relaunched on the
+same profile, parked sessions have their renderers stopped and thawed on the
+next call, leases stop two agents clobbering one session, and goals give a task
+a step/spend/time budget that survives a daemon restart.
 
 ```
 vb --session alice start && vb --session alice go https://x.com      # log in once, stays logged in
 vb --session bob   start && vb --session bob   go https://x.com
 vb --session alice act "open notifications" & vb --session bob extract & wait
+vb fleet-check --sessions alice,bob                                  # how twinned are they?
 ```
 
 **2. Credentials an agent can use but never see.** The vault fills a password
-or a live TOTP code into the page without the value touching the command line,
-the model's context, a screenshot or a log — and only into the site it belongs
-to. A prompt-injected agent can't type your GitHub password into a lookalike
+or a live TOTP code into the page without the value reaching the model's
+context, a screenshot or a log — and only into the site it belongs to. Over
+MCP, a prompt-injected agent can't type your GitHub password into a lookalike
 page, can't read it back with `value` or `eval` while it sits in the field, and
-can't edit the vault or pull a TOTP code over MCP.
+can't edit the vault or pull a code. An agent with a *shell* is the operator —
+the CLI has deliberate escape hatches — so give agents MCP, not Bash, if that
+boundary matters to you.
 
 ```
-vb secret set github.com password 'hunter2'
-vb secret set github.com totp-seed JBSWY3DPEHPK3PXP
+printf %s "$GH_PASSWORD" | vb secret set github.com password --stdin
+printf %s "$GH_TOTP_SEED" | vb secret set github.com totp-seed --stdin
 vb --session work fill @e7 --use-secret github.com:password
 vb --session work fill @e9 --use-secret github.com:totp
-vb wait-email-code github.com              # one-time codes from your inbox, over IMAP
+vb wait-email-code github.com      # operator CLI: polls IMAP and prints the code; refused over MCP
 ```
 
 **3. Page text is treated as untrusted.** Every session scans the page text it
-returns for instructions aimed at the agent and flags them by default; `wrap` fences
-them off and `redact` removes them. Caller-supplied file paths are confined too,
-so an injected agent can't upload `~/.ssh` or write into `.git/hooks`.
+returns for instructions aimed at the agent and flags them by default; `wrap`
+fences them off and `redact` removes them. Caller-supplied file paths are
+confined too, so an injected agent can't upload `~/.ssh` or write into
+`.git/hooks`.
 
 **4. A browserless lane on the same identity.** `vb fetch` reuses a session's
 cookies and proxy with Chrome's TLS fingerprint and client hints — JSON
@@ -105,7 +115,7 @@ vb --session work fetch https://api.example.com/v1/me
 vb search "site reliability postmortem" -n 20 --urls
 ```
 
-**Status:** alpha, active development. **1,807 tests** green in CI (Linux,
+**Status:** alpha, active development. **1,963 tests** green in CI (Linux,
 Python 3.11–3.14). Coding agents: read [`AGENTS.md`](AGENTS.md) first — the
 one-call recipes and the traps worth skipping.
 
@@ -207,8 +217,11 @@ Active-session resolution: `--session FLAG` → `$VIBATCHIUM_SESSION` env → `~
 
 ### Multi-agent: shared sessions vs a private daemon
 
-On **one** shared daemon, sessions give real fingerprint isolation (separate
-Chromes, no cookie bleed) but share the host: the session count budget, the
+On **one** shared daemon, sessions are isolated in state (separate Chromes and
+profiles, no cookie bleed) but not automatically in fingerprint — on one box
+they report the same screen and, without `--gpu --node`, the same software GPU
+unless you set a `vb persona`; `vb fleet-check` measures it. They also share the
+host: the session count budget, the
 memory, and the blast radius of an OOM or a daemon bounce. Two models, pick per
 trust level:
 
@@ -262,7 +275,7 @@ human-driven session, and attach-mode is the honest answer.
 | Tier | How | Clears | Doesn't clear |
 |---|---|---|---|
 | **Standard** (default) | headless cold launch, real `channel=chrome`, de-Headless'd UA | Cloudflare IUAM / managed challenge, `bot.sannysoft` 31/31, JS-runtime fingerprinting | aggressive Turnstile, DataDome/Kasada, anything behind a login |
-| **Hardened** | retry `--headed`; `vb humanize on`; `--backend nodriver` (`pip install vibatchium[nodriver]`, AGPL) for the hardest Cloudflare gates | aggressive Cloudflare/Turnstile, GPU/screen tells that headless leaves | behavioral biometrics, DataDome/Kasada sensor-fusion |
+| **Hardened** | retry `--headed`; `vb humanize on` + `humanize ambient on` (pointer activity between actions); `vb persona set` (a per-identity screen); `--backend nodriver` (`pip install vibatchium[nodriver]`, AGPL) for the hardest Cloudflare gates | aggressive Cloudflare/Turnstile, GPU/screen tells that headless leaves | behavioral biometrics, DataDome/Kasada sensor-fusion |
 | **Attach** | `vb attach` to a Chrome **you** launched and logged into | DataDome / Kasada / HUMAN behavioral walls, and any authenticated session — your real fingerprint + cookies | nothing here is automated cold; it needs the human login first |
 
 ### Measured scores
@@ -598,7 +611,7 @@ Restart the agent session afterwards: the MCP tool list is read once, at start.
 
 | Mode | Surface | Auth |
 |---|---|---|
-| `vb mcp` | stdio JSON-RPC; defaults to the **lean** 86-verb profile (`--caps=full`/`all` for the full surface; `--caps=...` for a custom bucket set) | n/a (stdio) |
+| `vb mcp` | stdio JSON-RPC; defaults to the **lean** 87-verb profile (`--caps min` = 12 tools for clients without tool search; `--caps=full`/`all` = 163; `--caps=...` for a custom bucket set) | n/a (stdio) |
 | `vb serve` | FastAPI on `127.0.0.1:8000`; every verb at `POST /v1/<verb>`; WebSocket live-view at `/v1/stream/<session>` | bearer token (`~/.cache/vibatchium/rest-token`, mode 0600) |
 
 **REST capability gating**: `vb serve --caps=core,nav,input,vision` restricts the HTTP surface the same way `mcp --caps` does. Without it, REST grants local-code-equivalent access (eval + secret_* + file-writing verbs all exposed) — safe for localhost dev, **not** for hosted/multi-tenant.

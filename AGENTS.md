@@ -470,11 +470,13 @@ $VB --session work humanize ambient on   # opt-in: idle pointer drifts + rare re
 $VB --session work gpu set --on  # real GPU WebGL via a DRM render node instead of SwiftShader; --node intel|nvidia de-twins accounts (headless-only, applies on next start)
 $VB oracle run                   # grade the BEHAVIOURAL axis (trajectory/dwell/cadence/scroll) humanize off-vs-on
 $VB oracle ambient               # pointer events per page view / per idle gap, ambient off-vs-on, + a no-click/no-hover safety audit
+$VB --session work persona set   # stable per-identity screen/window (+ balanced GPU node) — default headless sessions all report 800x600; applies next start
+$VB fleet-check --spawn 4 --before-after   # twin score across sessions on this box, before vs after personas
 $VB evals run --min-score 80     # fingerprint scoreboard matrix per backend — CI regression gate
 $VB bench run --live --targets-file t.json   # cold pass-rate against real Cloudflare/DataDome/PerimeterX walls
 ```
 
-`oracle`/`evals`/`bench`/`gpu` are **CLI-only** (measurement + host tuning), like
+`oracle`/`evals`/`bench`/`gpu`/`persona`/`fleet-check` are **CLI-only** (measurement + host tuning), like
 `research`. `oracle` grades against *our model* of human (literature bands until
 you record an operator baseline via `vb oracle record` + `vb oracle ingest`) — it
 measures the axis vendors now score, it doesn't claim to beat a named one. The raw
@@ -762,8 +764,8 @@ error.
 ```bash
 VIBATCHIUM_DEFAULT_HEADLESS=1   # force headless even at an interactive TTY
 VIBATCHIUM_DEFAULT_HEADED=1     # opt a whole daemon back into headed windows
-VIBATCHIUM_MAX_SESSIONS=8       # raise 4-session persistent default for big fan-outs
-VIBATCHIUM_MAX_EPHEMERAL=2      # off-budget one-shot lane cap (0 disables explore's lane)
+VIBATCHIUM_MAX_SESSIONS=16      # persistent-session cap (default 8)
+VIBATCHIUM_MAX_EPHEMERAL=4      # off-budget one-shot lane cap (default 4; 0 disables explore's lane)
 VIBATCHIUM_SELF_HEAL=0          # disable Chrome crash auto-recovery (fail loudly)
 VIBATCHIUM_LEASE=<token>        # client-side lease token presented on every call
 VIBATCHIUM_LOG_VERBS=1          # per-verb DEBUG audit trail
@@ -819,8 +821,8 @@ VIBATCHIUM_FILE_ROOTS=<a>:<b>   # daemon env: every caller path must resolve ins
 
 **`--caps min` — for clients without tool search.** Claude Code defers MCP tools
 behind tool search, so `lean` costs it little. A client that loads every schema
-on every turn pays for all 86 — about 71 KB, ~17.7k tokens of `tools/list`
-(`full`: 162 tools, ~130 KB, ~32.6k). `vb mcp --caps min` (or `vb setup --caps
+on every turn pays for all 87 — about 73 KB, ~18.2k tokens of `tools/list`
+(`full`: 163 tools, ~133 KB, ~33.2k). `vb mcp --caps min` (or `vb setup --caps
 min`) exposes 12 tools in ~15 KB, ~3.8k tokens: `explore`, `go`, `extract`,
 `screenshot`, `act`, `map`, `click`, `fill`, `press`, `expect`, `session_close`
 and the always-on `status`. That covers reading a walled page and a short
