@@ -653,3 +653,159 @@ async def test_route_add_cannot_swallow_the_nav_allowlist():
             pass
         srv.shutdown()
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+# ─── nav guard lifecycle: removed when the goal lets go ────────────────────
+class _RouteRecordingCtx:
+    """A context stand-in that records route/unroute like Playwright does."""
+
+    def __init__(self):
+        self.pages = []
+        self.routes: list[tuple[str, object]] = []
+        self.unrouted: list[tuple[str, object]] = []
+
+    async def route(self, pattern, handler):
+        self.routes.append((pattern, handler))
+
+    async def unroute(self, pattern, handler=None):
+        self.unrouted.append((pattern, handler))
+        self.routes = [(p, h) for p, h in self.routes
+                       if not (p == pattern and (handler is None or h is handler))]
+
+
+@pytest.mark.parametrize("finish", ["goal_done", "goal_fail", "goal_cancel",
+                                    "goal_pause"])
+async def test_goal_release_removes_the_nav_guard_route(tmp_path, monkeypatch,
+                                                        finish):
+    """The goal's `context.route("**/*")` nav guard used to outlive the goal —
+    inert, but still disabling Chrome's HTTP cache and round-tripping every
+    request through the driver for the rest of the session's life (and, under
+    patchright#245, leaking a listener per request). Every release path must
+    unroute it, and only it."""
+    monkeypatch.setattr(gstore, "GOALS_DB", tmp_path / "goals.db")
+    monkeypatch.setenv("VIBATCHIUM_NO_AUTO_START", "1")
+    from pathlib import Path
+
+    from vibatchium.daemon.browser import BrowserSession
+    from vibatchium.daemon.registry import SessionEntry
+    from vibatchium.daemon.server import Daemon
+
+    ctx = _RouteRecordingCtx()
+
+    async def user_rule(route):  # a pre-existing user `route_add` rule
+        pass
+    ctx.routes.append(("**/*", user_rule))
+
+    sess = BrowserSession(pw=None, context=ctx, page=_StubPage(),
+                          mode="launch", headless=True)
+    d = Daemon()
+    d.registry._entries["S"] = SessionEntry(
+        name="S", profile_dir=Path(tmp_path / "S"), session=sess)
+
+    async def call(cmd, args=None):
+        r = await d.dispatch({"id": "1", "cmd": cmd, "args": args or {}})
+        assert r["ok"], (cmd, r.get("error"))
+        return r["result"]
+
+    g = await call("goal_new", {"description": "x", "session": "S",
+                                "allow_domains": "example.com"})
+    await call("goal_next")
+    assert sess._nav_guard_installed is True
+    guard = sess._nav_guard_handler
+    assert ("**/*", guard) in ctx.routes
+
+    await call(finish, {"goal_id": g["id"]})
+    assert sess.nav_allowlist is None
+    assert sess._nav_guard_installed is False
+    assert sess._nav_guard_handler is None
+    assert ctx.unrouted == [("**/*", guard)], "must unroute exactly the guard"
+    assert ctx.routes == [("**/*", user_rule)], "the user's rule must survive"
+
+    # A later goal on the same session re-installs a fresh guard.
+    if finish == "goal_pause":
+        await call("goal_resume", {"goal_id": g["id"]})
+    else:
+        g2 = await call("goal_new", {"description": "y", "session": "S",
+                                     "allow_domains": "example.com"})
+        await call("goal_next")
+        assert g2["id"]
+    assert sess._nav_guard_installed is True
+    assert len([h for p, h in ctx.routes if h is not user_rule]) == 1
+
+
+async def test_remove_nav_guard_is_safe_without_a_guard_or_context():
+    from vibatchium.daemon.browser import BrowserSession, remove_nav_guard
+
+    class _DeadCtx:
+        async def unroute(self, *a, **k):
+            raise RuntimeError("Target page, context or browser has been closed")
+
+    sess = BrowserSession(pw=None, context=_DeadCtx(), page=None,
+                          mode="launch", headless=True)
+    assert await remove_nav_guard(sess) is False          # nothing installed
+    sess._nav_guard_installed = True
+    sess._nav_guard_handler = object()
+    assert await remove_nav_guard(sess) is True           # dead ctx: no raise
+    assert sess._nav_guard_installed is False             # re-installable
+    assert await remove_nav_guard(_StubSession()) is False  # duck-typed stub
+
+
+async def test_remove_nav_guard_unroutes_in_real_chrome():
+    """Against real patchright: after removal the guard no longer gates
+    navigation, a user route rule registered alongside it still fires, and the
+    context's route table holds only the user's rule."""
+    import shutil
+    import tempfile
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    from pathlib import Path
+
+    from vibatchium.daemon.browser import (
+        close_session, ensure_nav_guard, launch_session, remove_nav_guard,
+    )
+
+    class _H(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Length", "2")
+            self.end_headers()
+            self.wfile.write(b"ok")
+
+        def log_message(self, *a):
+            pass
+
+    srv = HTTPServer(("127.0.0.1", 0), _H)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{port}/"
+    tmp = Path(tempfile.mkdtemp(prefix="navguardrm_"))
+    sess = await launch_session(tmp, headless=True)
+    hits: list[str] = []
+
+    async def user_rule(route):
+        hits.append(route.request.url)
+        await route.continue_()
+
+    try:
+        await sess.context.route("**/*", user_rule)
+        sess.nav_allowlist = {"allowed.test"}       # 127.0.0.1 is OFF-list
+        await ensure_nav_guard(sess)
+        assert len(sess.context._impl_obj._routes) == 2
+
+        sess.nav_allowlist = None                   # what release does first
+        assert await remove_nav_guard(sess) is True
+        assert len(sess.context._impl_obj._routes) == 1, "only the user's rule remains"
+
+        # Re-pin an allowlist that EXCLUDES this host: with the guard gone it
+        # must have no effect, proving the route — not just the set — is gone.
+        sess.nav_allowlist = {"allowed.test"}
+        resp = await sess.page.goto(url, timeout=10_000)
+        assert resp is not None and resp.ok
+        assert hits, "the user's rule must still see requests"
+    finally:
+        try:
+            await close_session(sess)
+        except Exception:  # noqa: BLE001
+            pass
+        srv.shutdown()
+        shutil.rmtree(tmp, ignore_errors=True)

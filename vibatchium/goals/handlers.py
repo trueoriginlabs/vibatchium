@@ -107,8 +107,13 @@ def _make_domains_cb(daemon):
                 log.warning("nav-guard install failed for session %s",
                             session, exc_info=True)
         else:
+            from ..daemon.browser import remove_nav_guard
             entry.flags.pop("goal_domains", None)
             sess.nav_allowlist = None
+            # Drop the context route too, not just the allowlist it reads: an
+            # inert "**/*" route still costs the HTTP cache and a driver
+            # round-trip per request for the rest of the session's life.
+            await remove_nav_guard(sess)
     return domains_cb
 
 

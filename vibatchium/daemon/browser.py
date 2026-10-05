@@ -216,6 +216,9 @@ class BrowserSession:
     # navigation are blocked, not just the explicit `go` verb.
     nav_allowlist: set | None = None
     _nav_guard_installed: bool = False
+    # The installed guard callable, kept so remove_nav_guard can unroute
+    # exactly it (and not a user `route_add` rule on the same "**/*" glob).
+    _nav_guard_handler: object = None
     # 0.7.0 self-heal: guards the fire-and-forget last-page-death reviver in
     # _wire_page_tracking so concurrent close events don't spawn N new pages.
     # _revive_task holds the in-flight reviver so the dispatch-level recovery
@@ -245,8 +248,9 @@ async def ensure_nav_guard(session: BrowserSession) -> None:
     Installed LAZILY (only once a goal pins an allowlist) because
     `context.route("**/*")` disables Chrome's HTTP cache for the session — we
     must not impose that on every non-goal session. The guard reads
-    ``session.nav_allowlist`` live, so it goes inert (pure fallback) the moment
-    the goal releases the session and clears it.
+    ``session.nav_allowlist`` live, and the goal's release path removes it
+    outright via ``remove_nav_guard`` (it used to linger, inert, for the
+    session's life).
 
     Composes with the user-facing `route_add` interception in BOTH registration
     orders: each side hands a request it does not terminate down the chain with
@@ -294,7 +298,35 @@ async def ensure_nav_guard(session: BrowserSession) -> None:
             pass
 
     await session.context.route("**/*", _guard)
+    session._nav_guard_handler = _guard
     session._nav_guard_installed = True
+
+
+async def remove_nav_guard(session: BrowserSession) -> bool:
+    """Uninstall the goal navigation guard, if this session has one.
+
+    The guard used to stay registered for the session's life, inert, once the
+    goal released it. That was wrong twice over: a `context.route("**/*")`
+    keeps Chrome's HTTP cache disabled for a session that no longer needs any
+    interception, and every request still round-trips through the driver to
+    reach the handler — under patchright's per-request route-listener leak
+    (Kaliiiiiiiiii-Vinyzu/patchright#245, fixed upstream in #247 but in no
+    release yet) that is unbounded growth on a long-lived session.
+
+    Unroutes only OUR handler, so user `route_add` rules survive. Returns True
+    if a guard was removed. Never raises: a dead context has nothing left to
+    leak, and the flags are cleared either way so a later goal re-installs.
+    """
+    handler = getattr(session, "_nav_guard_handler", None)
+    if not getattr(session, "_nav_guard_installed", False) or handler is None:
+        return False
+    session._nav_guard_installed = False
+    session._nav_guard_handler = None
+    try:
+        await session.context.unroute("**/*", handler)
+    except Exception:  # noqa: BLE001 — context closed/crashed: nothing to unroute
+        log.debug("nav-guard unroute failed (context gone?)", exc_info=True)
+    return True
 
 
 def _wire_page_tracking(session: BrowserSession) -> None:
