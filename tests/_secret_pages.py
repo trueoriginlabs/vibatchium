@@ -44,20 +44,42 @@ def go_frame_host(local_server: str, host: str = "127.0.0.1", **params) -> str:
     return url
 
 
+def _probe_out(prefix: str) -> str:
+    if prefix:
+        return call("text", {"target": f"{prefix}#out"})["text"]
+    return call("title", {})["title"]
+
+
 def probe(prefix: str = "") -> dict:
     """Click the page's probe button (optionally inside a frame) and return its
     snapshot: {vals, inputs, sec, ts, maskedAtWrite, react, active}.
 
-    Waits for the page's ready marker first: in a frame, the button can exist
-    before the script that listens on it has run, and that click is lost."""
+    Waits for the page's ready marker, then confirms the click actually ran the
+    handler (the output changed) and re-clicks if not. A click into a
+    cross-origin (out-of-process) iframe can miss when it lands while the frame
+    is still settling after being scrolled into view — the handler never runs
+    and #out stays empty or stale. The snapshot carries a run counter, so a
+    changed output is proof of a fresh run."""
+    import time
     call("wait_selector", {"selector": f"{prefix}html[data-ready]", "state": "attached",
                            "timeout_ms": 10_000})
-    call("click", {"target": f"{prefix}#probe"})
+    before = _probe_out(prefix)
+    out = before
+    for _attempt in range(4):
+        call("click", {"target": f"{prefix}#probe"})
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            out = _probe_out(prefix)
+            if out != before and (out.startswith("p:") or (prefix and out.strip())):
+                break
+            time.sleep(0.05)
+        else:
+            continue
+        break
     if prefix:
-        return json.loads(call("text", {"target": f"{prefix}#out"})["text"])
-    title = call("title", {})["title"]
-    assert title.startswith("p:"), title
-    return json.loads(title[2:])
+        return json.loads(out)
+    assert out.startswith("p:"), out
+    return json.loads(out[2:])
 
 
 @pytest.fixture
