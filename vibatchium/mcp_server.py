@@ -755,11 +755,10 @@ TOOLS: list[tuple[str, str, dict, str, Any]] = [
      {"type": "object", "properties": {
          "mode": {"type": "string", "enum": ["on", "off", "status"],
                   "description": "on | off | status (default status)."},
-         "seed": _int("Fix the per-session rhythm seed (default: derived from "
-                      "session name + profile + machine id).", None),
          "horizon_s": {"type": "number",
                        "description": "Idle seconds after the last verb before "
-                                      "ambient goes quiet (5-1800, default 180)."},
+                                      "ambient goes quiet (5 up to the operator's "
+                                      "default, 180 unless configured)."},
          "scroll": _bool("Allow idle reading scrolls (default true).", True),
      }},
      "humanize_ambient", None),

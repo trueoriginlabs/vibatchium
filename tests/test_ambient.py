@@ -703,6 +703,43 @@ async def test_humanize_ambient_handler_on_status_off(monkeypatch):
     assert bad["ok"] is False
 
 
+async def test_agent_surface_gets_no_seed_and_a_capped_horizon(monkeypatch):
+    from vibatchium import fspolicy
+    monkeypatch.delenv("VIBATCHIUM_AMBIENT_HORIZON", raising=False)
+    d, e, page = _daemon(monkeypatch)
+    scope = {fspolicy.SCOPE_ARG: {"roots": None, "cwd": "/tmp"}}
+
+    async def on(**a):
+        return await d.dispatch({"cmd": "humanize_ambient", "id": "1",
+                                 "args": {"_session": "t", "mode": "on", **a}})
+
+    out = await on(seed=7, **scope)
+    assert out["ok"] is False and "operator-only" in out["error"], out
+    assert not d._ambient.is_on("t")
+    out = await on(horizon_s=1800, **scope)
+    assert out["ok"], out
+    assert out["result"]["horizon_s"] == ambient.DEFAULT_HORIZON_S
+    assert out["result"]["horizon_clamped"] is True
+    assert out["result"]["seed_source"] == "derived"
+    out = await on(horizon_s=30, **scope)                 # shorter is fine
+    assert out["result"]["horizon_s"] == 30 and "horizon_clamped" not in out["result"]
+    # the operator's configured horizon is the agent ceiling
+    monkeypatch.setenv("VIBATCHIUM_AMBIENT_HORIZON", "600")
+    out = await on(horizon_s=1800, **scope)
+    assert out["result"]["horizon_s"] == 600
+    # the CLI / SDK keep both knobs
+    out = await on(seed=7, horizon_s=1800)
+    assert out["ok"] and out["result"]["seed"] == 7 and out["result"]["horizon_s"] == 1800
+    d._ambient.disable("t")
+
+
+def test_mcp_schema_offers_no_seed():
+    from vibatchium.mcp_server import TOOLS
+    schema = next(t[2] for t in TOOLS if t[0] == "humanize_ambient")
+    assert "seed" not in schema["properties"]
+    assert "horizon_s" in schema["properties"]
+
+
 def test_default_off_and_in_the_humanize_bucket():
     from vibatchium.caps import CAP_BUCKETS
     from vibatchium.mcp_server import TOOLS

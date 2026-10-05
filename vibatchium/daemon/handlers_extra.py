@@ -402,9 +402,28 @@ def register_extra(daemon) -> None:
         entry = d.registry.get(name)
         if entry is None:
             raise RuntimeError("ambient requires a running session — start one first")
-        res = mgr.enable(name, entry, seed=args.get("seed"),
-                         horizon_s=args.get("horizon_s"),
+        from .ambient import ambient_horizon
+        seed, horizon = args.get("seed"), args.get("horizon_s")
+        clamped = False
+        if fspolicy.in_agent_scope():
+            # Agent surfaces (MCP, a --caps REST shim) get the behaviour, not
+            # the knobs: a fixed seed re-twins sessions that the per-session
+            # derived seed keeps apart (and could copy another bot's rhythm),
+            # and a long horizon keeps synthetic input flowing on a session
+            # long after its agent went away. The operator's configured
+            # horizon (VIBATCHIUM_AMBIENT_HORIZON, else 180 s) is the ceiling.
+            if seed is not None:
+                raise PermissionError(
+                    "humanize_ambient: `seed` is operator-only — agent surfaces "
+                    "get the per-session derived seed (set it from the CLI: "
+                    "`vb --session NAME humanize ambient on --seed N`)")
+            cap = ambient_horizon(None)
+            if horizon is not None and ambient_horizon(horizon) > cap:
+                horizon, clamped = cap, True
+        res = mgr.enable(name, entry, seed=seed, horizon_s=horizon,
                          scroll=args.get("scroll", True) is not False)
+        if clamped:
+            res["horizon_clamped"] = True
         res["note"] = ("ambient scroll moves the viewport between verbs: re-read "
                        "positions before a coordinate click (scroll is paused after "
                        "screenshot/candidates/mouse until the next verb that "
