@@ -595,8 +595,9 @@ SDK all get it) after `~` expansion and **symlink resolution**. So is every
 navigation URL (`go`, `explore`, `storage restore` origins, `checkpoint load`
 tabs, `fingerprint --url`): a `file:` URL is a read of that path (a directory
 URL is a listing of it, so the dir itself is checked), and `view-source:`,
-`chrome:`, `devtools:`, `filesystem:`, `javascript:` and other non-web schemes
-are refused. `http(s)`, `data:`, `blob:` and `about:blank` pass.
+`chrome:`, `devtools:`, `filesystem:` and other non-web schemes are refused.
+`http(s)`, `data:`, `blob:` and `about:blank` pass; `javascript:` runs in the
+current page like `eval` and is governed by the secret guard, not this policy.
 
 - **Always refused, on every surface (not overridable):**
   - *read or write* — `~/.ssh`, `~/.gnupg`, `~/.aws`, `~/.config/gcloud`,

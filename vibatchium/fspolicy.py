@@ -521,7 +521,8 @@ def check_nav_url(url, *, verb: str = "go") -> None:
     ``file:`` URLs are mapped to a path and judged by :func:`check_read` (a
     directory URL — which lists the dir — checks the dir itself). Everything
     else that names a scheme (``view-source:``, ``chrome:``, ``devtools:``,
-    ``filesystem:``, ``javascript:``, ``chrome-extension:`` …) is refused.
+    ``filesystem:``, ``chrome-extension:`` …) is refused. ``javascript:`` is
+    left to the secret guard, which handles it as ``eval``.
     A string with no scheme is left to the browser, which rejects it."""
     if not isinstance(url, str):
         return
@@ -539,6 +540,12 @@ def check_nav_url(url, *, verb: str = "go") -> None:
         return
     if scheme == "file":
         check_read(file_url_path(norm), verb=f"{verb} file:")
+        return
+    if scheme == "javascript":
+        # Runs in the CURRENT page's origin — it can't reach the disk or
+        # browser internals, only what `eval` already could. The secret guard
+        # (daemon/secret_guard.py) treats it exactly like `eval`: refused while
+        # a vault secret is live, and it taints the document otherwise.
         return
     raise FileAccessDenied(
         f"navigation refused: {verb} to a {scheme!r} URL. vibatchium navigates "

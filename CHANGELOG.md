@@ -140,10 +140,11 @@ filesystem.
 - **Navigation is a file read too.** `go`, `explore`, `storage restore`
   origins, `checkpoint load` tabs and `fingerprint --url` map a `file:` URL to
   its path and judge it like `upload` would (a directory URL — a listing —
-  checks the dir). `view-source:`, `chrome:`, `devtools:`, `filesystem:`,
-  `javascript:` and other non-web schemes are refused; `http(s)`, `data:`,
-  `blob:` and `about:blank` pass (plus `chrome://crash`/`kill`, which only
-  kill the session's own renderer).
+  checks the dir). `view-source:`, `chrome:`, `devtools:`, `filesystem:` and
+  other non-web schemes are refused; `http(s)`, `data:`, `blob:` and
+  `about:blank` pass (plus `chrome://crash`/`kill`, which only kill the
+  session's own renderer). `javascript:` runs in the current page's origin, so
+  it is `eval` by another name and the secret guard handles it as one.
 - **Agent surfaces get roots by default.** `vb mcp` (and a `--caps`-restricted
   `vb rest`) confine caller paths to the server's cwd — the agent's project dir,
   skipped if it is `/` or all of `$HOME` — plus `/tmp`, `$TMPDIR`,

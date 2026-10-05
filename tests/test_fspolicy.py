@@ -377,7 +377,7 @@ def clean_xdg(monkeypatch):
     "view-source:file://{home}/.ssh/id_ed25519",
     "view-source:https://example.com",
     "chrome://settings/passwords", "chrome://version", "devtools://devtools/x",
-    "filesystem:https://example.com/temporary/x", "javascript:alert(1)",
+    "filesystem:https://example.com/temporary/x",
     "chrome-extension://abc/x.html", "about:config",
 ])
 def test_nav_url_refused(home, url):
@@ -389,6 +389,7 @@ def test_nav_url_refused(home, url):
     "https://example.com/a?b#c", "http://127.0.0.1:8080/", "HTTPS://EXAMPLE.COM",
     "data:text/html,<b>x</b>", "blob:https://example.com/uuid", "about:blank",
     "about:blank#x", "about:srcdoc", "chrome://crash", "example.com", "",
+    "javascript:void(0)",   # page-origin only; the secret guard treats it as eval
 ])
 def test_nav_url_allowed(home, url):
     assert fspolicy.check_nav_url(url) is None
