@@ -8,46 +8,123 @@
 
 <!-- mcp-name: io.github.trueoriginlabs/vibatchium -->
 
-**Agent-piloted browser automation that clears Cloudflare.**
-Patched Playwright + multi-session daemon + credential vault + vision clicking + prompt-injection safety. One MCP server, N parallel Chromes, persistent per-session profiles.
-Plus two renderer-free lanes on a Chrome TLS fingerprint: **`vb search`** to find
-URLs without a search API, **`vb fetch`** to read them — both with per-request
-`--proxy`, because engines and walls both rate-limit per IP.
+**The browser layer for an always-on box.** Many logged-in identities, running
+unattended, all at once — on real Chrome, with stealth on by default, and with a
+security model for letting an AI near the credentials.
 
-> **Where this fits.** Both Anthropic and Google now ship an agent that drives
-> *your own* signed-in Chrome — Claude in Chrome and Chrome Auto Browse. If that
-> is what you want, use them: they are free, first-party, and better integrated.
-> They are also **supervised** — visible window, real time, and they hand control
-> back to you at a login wall or a CAPTCHA. vibatchium is for the other half:
-> **unattended, headless, N-at-a-time**, on a box with no human in front of it,
-> against sites that fight automation. That is the whole of the wedge, and it is
-> worth being precise about which side of it you are on.
->
-> **2026-09-15 sharpened the split.** For new domains and free-plan zones,
-> Cloudflare now blocks *Training* and *Agent* crawlers by default on
-> ad-monetized pages, leaving *Search* allowed; existing paid zones keep the
-> settings they had. That default targets crawlers which **declare themselves** — by user-agent, or
-> by a Web Bot Auth signature — and it catches multi-purpose crawlers along with
-> the dedicated ones. It does not change what a real Chrome session looks like,
-> so the lane this tool works in is untouched by the rule itself. Be precise
-> about the limit, though: it is a change to *policy defaults*, not to
-> detection. The fingerprint and behavioural scoring under
-> [Honest limits](#honest-limits) is a separate axis and moves independently of
-> anything Cloudflare publishes in a blog post.
+One daemon, N persistent Chrome sessions, a `vb` CLI and an MCP server.
+Self-hosted, free, Apache-2.0.
+
+```
+pipx install 'vibatchium[all]'
+patchright install chrome
+vb setup                     # register the MCP server + agent skill (Claude Code, Codex, Cursor)
+vb explore https://example.com
+```
+
+## Is this for you?
+
+| You want… | Use |
+|---|---|
+| An agent driving **your** signed-in browser while you watch | Claude in Chrome, Chrome Auto Browse — first-party, free, better integrated |
+| The **stealthiest single browser** you can buy | [CloakBrowser](https://github.com/CloakHQ/CloakBrowser) — fingerprints patched in Chromium's C++ (paid for concurrency) |
+| The **leanest driver** for one agent | [bladebro](https://github.com/dondai44423/bladebro) — five tools, one Rust binary |
+| Browser automation without anti-bot pressure | [playwright-mcp](https://github.com/microsoft/playwright-mcp), [agent-browser](https://github.com/vercel-labs/agent-browser) — bigger, older, better tested |
+| **Many accounts on one box, running unattended, against sites that fight automation** | **vibatchium** |
+
+That last row is the whole wedge. Supervised agents hand control back to you at
+every login wall and CAPTCHA; a library leaves the fleet — sessions, budgets,
+crash recovery, credentials — for you to build. vibatchium is that fleet layer.
+
+## How it compares
+
+As of 2026-10-06, from each project's own README and release notes. Rows where
+we lose are included on purpose.
+
+| | **vibatchium** | CloakBrowser | bladebro | agent-browser | playwright-mcp |
+|---|---|---|---|---|---|
+| N persistent logged-in sessions at once, on one daemon | **yes, free** | 1 free · more on Pro | one Chrome per agent session | yes | one per profile dir |
+| Unattended ops: crash self-heal, leases, budgets, idle freeze, goals | **yes** | — | — | partial (idle timeout, restore) | idle timeout |
+| Agent can *use* a secret but not *read* it (origin-bound, read-back refused, TOTP + IMAP 2FA) | **yes** | — | — | vault, origin check | `--secrets` redaction |
+| Prompt-injection scanning of page content | **yes** | — | — | — | — |
+| Browserless HTTP on the session's own cookies, Chrome TLS fingerprint · keyless web search | **yes** | — | — | — | — |
+| Real stock Chrome | yes | own Chromium build | yes | Chrome for Testing | yes |
+| Stealth layer | CDP-level (Patchright) | **engine-level (87 C++ patches)** | CDP-level, no `Runtime.enable` | none in core | none |
+| Public stealth-benchmark score | not yet | 30/30 detector suite | **68/80 Stealth Bench V1** | — | — |
+| MCP startup cost in Claude Code | ~2.7k tokens (86 tools, 5 always loaded) | n/a | ~3.4k tokens (5 tools) | not measured | not measured |
+| Platforms | Linux (macOS untested) | Linux · macOS · Windows | Linux · macOS · Windows | all | all |
+
+**Where the others are genuinely better:** CloakBrowser's engine-level patches
+go deeper than any CDP-level layer can — and `vb start --browser-binary` will
+drive a Chromium build you bring. bladebro has a public benchmark number and we
+don't; until we do, read our stealth claims as measured on scoreboards, below,
+not on production walls. Both run on more operating systems.
+
+## What only vibatchium does
+
+**1. A fleet of logged-in identities on one box.** Each session is its own
+Chrome, profile, proxy, timezone and GPU, and they run in parallel on one
+daemon that keeps them alive: a crashed renderer is relaunched on the same
+profile, parked sessions are frozen to zero CPU and thawed on the next call,
+leases stop two agents clobbering one session, and goals give a task a
+step/spend/time budget that survives a daemon restart.
+
+```
+vb --session alice start && vb --session alice go https://x.com      # log in once, stays logged in
+vb --session bob   start && vb --session bob   go https://x.com
+vb --session alice act "open notifications" & vb --session bob extract & wait
+```
+
+**2. Credentials an agent can use but never see.** The vault fills a password
+or a live TOTP code into the page without the value touching the command line,
+the model's context, a screenshot or a log — and only into the site it belongs
+to. A prompt-injected agent can't type your GitHub password into a lookalike
+page, can't read it back with `value` or `eval` while it sits in the field, and
+can't edit the vault or pull a TOTP code over MCP.
+
+```
+vb secret set github.com password 'hunter2'
+vb secret set github.com totp-seed JBSWY3DPEHPK3PXP
+vb --session work fill @e7 --use-secret github.com:password
+vb --session work fill @e9 --use-secret github.com:totp
+vb wait-email-code github.com              # one-time codes from your inbox, over IMAP
+```
+
+**3. Page text is treated as untrusted.** Every session scans the page text it
+returns for instructions aimed at the agent and flags them by default; `wrap` fences
+them off and `redact` removes them. Caller-supplied file paths are confined too,
+so an injected agent can't upload `~/.ssh` or write into `.git/hooks`.
+
+**4. A browserless lane on the same identity.** `vb fetch` reuses a session's
+cookies and proxy with Chrome's TLS fingerprint and client hints — JSON
+endpoints behind your login at curl speed, and it tells you when it can't match
+the browser. `vb search` finds URLs with no API key and no per-session budget.
+
+```
+vb --session work fetch https://api.example.com/v1/me
+vb search "site reliability postmortem" -n 20 --urls
+```
+
+**Status:** alpha, active development. **1,807 tests** green in CI (Linux,
+Python 3.11–3.14). Coding agents: read [`AGENTS.md`](AGENTS.md) first — the
+one-call recipes and the traps worth skipping.
+
+<sub>Detector scores quoted below (bot.sannysoft, CreepJS, Cloudflare cold-launch) are **manual observations, not CI-asserted** — no test in the suite gates on them, and they are only as current as the last hand-run. The generated block under [Measured scores](#measured-scores) is the one to trust.</sub>
+
+## Install
 
 ```
 pipx install vibatchium             # core: browse / extract / screenshot / N parallel sessions
-# want the stealth HTTP lanes (vb fetch, vb search), the credential vault, VLM read, or the REST shim?
-pipx install 'vibatchium[all]'      # everything; or pick extras: vibatchium[fetch], [secrets], [llm], [rest]
+pipx install 'vibatchium[all]'      # + fetch/search lanes, credential vault, VLM read, REST shim
+                                    #   (or pick extras: [fetch], [secrets], [llm], [rest])
 patchright install chrome
-vb setup                    # register MCP + an auto-discoverable skill so agents reach for vb (idempotent)
+vb setup                            # register MCP + an auto-discoverable skill (idempotent)
+vb install                          # report which optional lanes are available
 ```
 
-Core install covers all browsing. `vb fetch` and `vb search` (the curl_cffi
-TLS-fingerprint lane) are the `[fetch]` extra; `vb install` reports which optional lanes are available. On a **uv** venv
-(no pip), add an extra with `uv pip install --python <venv>/bin/python curl_cffi`.
-
-> Bleeding edge from `master`: `pipx install 'git+https://github.com/trueoriginlabs/vibatchium#egg=vibatchium[all]'`
+On a **uv** venv (no pip), add an extra with
+`uv pip install --python <venv>/bin/python curl_cffi`. Bleeding edge from
+`master`: `pipx install 'git+https://github.com/trueoriginlabs/vibatchium#egg=vibatchium[all]'`.
 
 ## Install as a skill / plugin
 
@@ -69,96 +146,13 @@ the plugin **or** `vb setup`, not both, or you register the server twice. The
 skill file is generated from `vibatchium/setup_cmd.py`; edit there and run
 `python scripts/sync_skill.py`.
 
-> **Coding agents (Codex / Cursor / Claude Code):** read [`AGENTS.md`](AGENTS.md) first — it has the one-call recipes (`explore`, `research`) and the env-discovery traps to skip.
+## Quick start
 
 ```
-vb explore https://example.com                      # one-call: text-first (screenshot only as a fallback)
+vb explore https://example.com                      # one call: text-first, auto-closes
 vb research --target https://example.com \          # parallel fan-out, N intents
   --intent "pricing model" --intent "customers" --intent "tech stack"
 ```
-
-**Status:** active development, alpha. **1,807 tests** green in CI (Linux, Python 3.11–3.14). Apache-2.0 (AGPL only via the opt-in `nodriver` extra).
-
-<sub>Detector scores quoted below (bot.sannysoft, CreepJS, Cloudflare cold-launch) are **manual observations, not CI-asserted** — no test in the suite gates on them, and they are only as current as the last hand-run. The generated block under [Measured scores](#measured-scores) is the one to trust; it is empty until someone runs it.</sub>
-
-## Updating
-
-```bash
-vb update                  # upgrade + bounce the daemon + refresh the agent skill
-vb update --version 0.19.0   # or pin a specific version
-```
-
-`vb update` detects how vibatchium was installed (pipx, `uv tool install`,
-a pip-less uv venv, or pip with a PEP-668 `--break-system-packages` fallback),
-**stops the running daemon** so the next command loads the new code, and
-**rewrites the agent skill / docs blocks** so a coding agent is actually told
-about the verbs the new version ships (`--no-restart` / `--no-setup` opt out).
-Manual equivalent:
-
-```bash
-pipx upgrade vibatchium    # or: uv tool upgrade vibatchium / pip install -U vibatchium
-vb shutdown                # bounce the daemon — it serves old code until you do
-vb setup                   # refresh the agent skill + docs
-vb --version               # confirm
-```
-
-> The daemon-restart step is the one people miss: the long-running daemon keeps
-> serving the **old** version until it's bounced. `vb update` does it for you;
-> if you upgrade by hand, run `vb shutdown` (the next `vb` call auto-respawns the
-> new version). Optional features upgrade via `pipx install 'vibatchium[all]' --force`.
-
-### Running from a git checkout
-
-`git pull` updates the **source**; whether it updates what `vb` actually runs
-depends on the install, and two of the three ways it can fail are silent:
-
-```bash
-vb --version && git describe --tags   # do they agree? if not, the install COPIED
-                                      # the source — reinstall editable:
-                                      #   uv pip install -e '.[all]'
-vb status                             # warns when the daemon predates the source
-                                      # ("stale_code") — bounce with `vb shutdown`
-```
-
-A version-string compare cannot catch a checkout: `git pull` changes the code
-without changing `__version__`. `vb status` compares the daemon's boot time
-against the newest source file instead, and `vb update` bounces the daemon only
-when it is provably behind — so it never drops live sessions for nothing.
-
-### New cap buckets need a re-register
-
-The MCP server's `--caps` list is frozen into your agent's config at first
-registration, so a bucket added by a later release (0.19.0 added `search`) stays
-invisible no matter how many times you upgrade. Re-running `vb setup` reports
-the drift but deliberately won't overwrite a `--caps` you set by hand:
-
-```bash
-vb setup                              # reports any cap drift, changes nothing
-vb setup --force --caps lean,search   # apply it — exposes `vb search` as a tool
-```
-
-Restart the agent session afterwards: the MCP tool list is read once, at start.
-
-## Why vibatchium
-
-Persistent logged-in profiles, credential vaults, CDP-attach, N named sessions —
-[agent-browser][ab] and [playwright-mcp][pmcp] all ship those now, at download
-volumes we won't match. A comparison table winning rows nobody contests was
-noise; it's gone.
-
-What's still ours: **stealth patches in core** (agent-browser's stealth issue has
-been open since Jan 2026 and the PR attempting it was closed), **prompt-injection
-scanning on by default** for page content (nobody else in this lane ships it —
-though it does not yet cover the `fetch`/`search` lanes), **TOTP + IMAP 2FA**
-so an unattended run survives a login challenge, and the combination that only
-matters together — real stock Chrome + CDP stealth + headless + *unattended* + N
-persistent logins, on your own machine.
-
-If you don't need the stealth half, use one of the above. They're bigger, older
-and better tested than we are.
-
-[ab]: https://github.com/vercel-labs/agent-browser
-[pmcp]: https://github.com/microsoft/playwright-mcp
 
 ## Real Chrome vs fake Chrome
 
@@ -252,19 +246,6 @@ cold launch. A frozen session keeps its resident memory and resumes on the next
 verb with its tabs, page state and login intact — which is the behaviour a
 long-lived authenticated session mid-flow needs. Memory is bounded by the other two levers above,
 the RAM floor and the cgroup, rather than by teardown.
-
-## Documentation
-
-- [`AGENTS.md`](AGENTS.md) — coding-agent contract (Codex / Cursor / Claude Code)
-
-## Server modes
-
-| Mode | Surface | Auth |
-|---|---|---|
-| `vb mcp` | stdio JSON-RPC; defaults to the **lean** 86-verb profile (`--caps=full`/`all` for the full surface; `--caps=...` for a custom bucket set) | n/a (stdio) |
-| `vb serve` | FastAPI on `127.0.0.1:8000`; every verb at `POST /v1/<verb>`; WebSocket live-view at `/v1/stream/<session>` | bearer token (`~/.cache/vibatchium/rest-token`, mode 0600) |
-
-**REST capability gating**: `vb serve --caps=core,nav,input,vision` restricts the HTTP surface the same way `mcp --caps` does. Without it, REST grants local-code-equivalent access (eval + secret_* + file-writing verbs all exposed) — safe for localhost dev, **not** for hosted/multi-tenant.
 
 ## Stealth tiers — what clears what
 
@@ -547,6 +528,84 @@ threat model is "a credential must never reach the model, a screenshot, or a log
   scanner covers page-content verbs (`text`, `html`, `extract`, `map`, …). SERP
   titles and fetched bodies are third-party text going straight into an agent's
   context and are *not* scanned today. Treat them as untrusted input.
+- **Cloudflare's 2026-09-15 default is policy, not detection.** For new domains
+  and free-plan zones, Cloudflare now blocks *Training* and *Agent* crawlers by
+  default on ad-monetized pages. It targets crawlers that **declare themselves**
+  (user-agent or Web Bot Auth signature), so it doesn't change what a real
+  Chrome session looks like — but the fingerprint and behavioural scoring above
+  is a separate axis that moves independently of anything announced in a blog
+  post.
+
+## Updating
+
+```bash
+vb update                  # upgrade + bounce the daemon + refresh the agent skill
+vb update --version 0.19.0   # or pin a specific version
+```
+
+`vb update` detects how vibatchium was installed (pipx, `uv tool install`,
+a pip-less uv venv, or pip with a PEP-668 `--break-system-packages` fallback),
+**stops the running daemon** so the next command loads the new code, and
+**rewrites the agent skill / docs blocks** so a coding agent is actually told
+about the verbs the new version ships (`--no-restart` / `--no-setup` opt out).
+Manual equivalent:
+
+```bash
+pipx upgrade vibatchium    # or: uv tool upgrade vibatchium / pip install -U vibatchium
+vb shutdown                # bounce the daemon — it serves old code until you do
+vb setup                   # refresh the agent skill + docs
+vb --version               # confirm
+```
+
+> The daemon-restart step is the one people miss: the long-running daemon keeps
+> serving the **old** version until it's bounced. `vb update` does it for you;
+> if you upgrade by hand, run `vb shutdown` (the next `vb` call auto-respawns the
+> new version). Optional features upgrade via `pipx install 'vibatchium[all]' --force`.
+
+### Running from a git checkout
+
+`git pull` updates the **source**; whether it updates what `vb` actually runs
+depends on the install, and two of the three ways it can fail are silent:
+
+```bash
+vb --version && git describe --tags   # do they agree? if not, the install COPIED
+                                      # the source — reinstall editable:
+                                      #   uv pip install -e '.[all]'
+vb status                             # warns when the daemon predates the source
+                                      # ("stale_code") — bounce with `vb shutdown`
+```
+
+A version-string compare cannot catch a checkout: `git pull` changes the code
+without changing `__version__`. `vb status` compares the daemon's boot time
+against the newest source file instead, and `vb update` bounces the daemon only
+when it is provably behind — so it never drops live sessions for nothing.
+
+### New cap buckets need a re-register
+
+The MCP server's `--caps` list is frozen into your agent's config at first
+registration, so a bucket added by a later release (0.19.0 added `search`) stays
+invisible no matter how many times you upgrade. Re-running `vb setup` reports
+the drift but deliberately won't overwrite a `--caps` you set by hand:
+
+```bash
+vb setup                              # reports any cap drift, changes nothing
+vb setup --force --caps lean,search   # apply it — exposes `vb search` as a tool
+```
+
+Restart the agent session afterwards: the MCP tool list is read once, at start.
+
+## Server modes
+
+| Mode | Surface | Auth |
+|---|---|---|
+| `vb mcp` | stdio JSON-RPC; defaults to the **lean** 86-verb profile (`--caps=full`/`all` for the full surface; `--caps=...` for a custom bucket set) | n/a (stdio) |
+| `vb serve` | FastAPI on `127.0.0.1:8000`; every verb at `POST /v1/<verb>`; WebSocket live-view at `/v1/stream/<session>` | bearer token (`~/.cache/vibatchium/rest-token`, mode 0600) |
+
+**REST capability gating**: `vb serve --caps=core,nav,input,vision` restricts the HTTP surface the same way `mcp --caps` does. Without it, REST grants local-code-equivalent access (eval + secret_* + file-writing verbs all exposed) — safe for localhost dev, **not** for hosted/multi-tenant.
+
+## Documentation
+
+- [`AGENTS.md`](AGENTS.md) — coding-agent contract (Codex / Cursor / Claude Code)
 
 ## Authorized use
 
