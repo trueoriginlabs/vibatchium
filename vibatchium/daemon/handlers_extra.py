@@ -291,30 +291,48 @@ def register_extra(daemon) -> None:
         y = float(args.get("y", 0))
         button = args.get("button", "left")
         m = s.page.mouse
+        # Humanized branches record where they left the pointer (per page — see
+        # ambient.get_cursor). With ambient on, the plain branches record it too,
+        # so the next burst starts from the real position instead of teleporting
+        # (gated so default-off sessions behave exactly as before).
+        from .ambient import get_cursor, set_cursor
+        amb_on = d._ambient.is_on(_ctx.get())
+        track = humanize or amb_on
         if action == "click":
             if humanize:
                 from ..humanize import humanized_click
-                cursor = entry.flags.get("_cursor")
+                cursor = get_cursor(entry, s.page)
                 new_cursor = await humanized_click(
                     s.page, x, y, button=button, cursor_pos=cursor,
                 )
-                entry.flags["_cursor"] = new_cursor
+                set_cursor(entry, new_cursor, s.page)
             else:
                 await m.click(x, y, button=button)
+                if track:
+                    set_cursor(entry, (x, y), s.page)
         elif action == "dblclick":
             await m.dblclick(x, y, button=button)
+            if amb_on:
+                set_cursor(entry, (x, y), s.page)
         elif action == "move":
             if humanize:
                 from ..humanize import humanized_move
-                cursor = entry.flags.get("_cursor") if entry else None
+                cursor = get_cursor(entry, s.page) if entry else None
                 await humanized_move(s.page, x, y, start=cursor)
-                if entry: entry.flags["_cursor"] = (x, y)
             else:
                 await m.move(x, y, steps=int(args.get("steps", 1)))
+            if track:
+                set_cursor(entry, (x, y), s.page)
         elif action == "down":
             await m.down(button=button)
+            # A held button turns any pointer move into a drag/selection —
+            # ambient refuses to move while this is set.
+            if entry is not None:
+                entry.flags["_buttons_down"] = True
         elif action == "up":
             await m.up(button=button)
+            if entry is not None:
+                entry.flags.pop("_buttons_down", None)
         elif action == "wheel":
             dx = float(args.get("dx", 0))
             dy = float(args.get("dy", 0))
@@ -347,7 +365,8 @@ def register_extra(daemon) -> None:
         if entry is None:
             return {"humanize": False, "note": "no running session"}
         entry.flags["humanize"] = False
-        entry.flags.pop("_cursor", None)
+        from .ambient import clear_cursor
+        clear_cursor(entry)
         return {"humanize": False, "session": entry.name}
 
     @daemon.handler("humanize_status")
@@ -358,6 +377,39 @@ def register_extra(daemon) -> None:
             return {"humanize": False, "note": "no running session"}
         return {"humanize": bool(entry.flags.get("humanize")),
                 "session": entry.name}
+
+    @daemon.handler("humanize_ambient")
+    async def _humanize_ambient(d, args):
+        """Opt-in ambient pointer activity BETWEEN verbs (daemon/ambient.py).
+
+        mode=on|off|status. `on` starts a per-session task that, while the
+        session is idle, emits low-rate pointer drifts / micro-corrections /
+        reading scrolls over non-interactive content — never clicks, types,
+        selects or navigates, never runs during a verb, never on a frozen
+        session, and goes quiet `horizon_s` after the last verb. Independent of
+        `humanize on` (which shapes input DURING verbs); they share one cursor.
+        """
+        from .registry import current_session_ctx as _ctx
+        name = _ctx.get()
+        mode = str(args.get("mode") or "status").lower()
+        mgr = d._ambient
+        if mode in ("off", "disable", "false", "0"):
+            return mgr.disable(name)
+        if mode == "status":
+            return mgr.status(name)
+        if mode not in ("on", "enable", "true", "1"):
+            raise ValueError(f"humanize_ambient mode must be on|off|status, got {mode!r}")
+        entry = d.registry.get(name)
+        if entry is None:
+            raise RuntimeError("ambient requires a running session — start one first")
+        res = mgr.enable(name, entry, seed=args.get("seed"),
+                         horizon_s=args.get("horizon_s"),
+                         scroll=args.get("scroll", True) is not False)
+        res["note"] = ("ambient scroll moves the viewport between verbs: re-read "
+                       "positions before a coordinate click (scroll is paused after "
+                       "screenshot/candidates/mouse until the next verb), or pass "
+                       "scroll=false")
+        return res
 
     # ─── upload ───────────────────────────────────────────────────────────
 
@@ -2016,14 +2068,17 @@ def register_extra(daemon) -> None:
         # that bypassed the humanization layer entirely.
         entry = d.registry.get(_ctx.get())
         humanize = bool(entry.flags.get("humanize")) if entry else False
+        from .ambient import get_cursor, set_cursor
         if humanize:
             from ..humanize import humanized_click
-            entry.flags["_cursor"] = await humanized_click(
+            set_cursor(entry, await humanized_click(
                 s.page, cx, cy, button=button,
-                cursor_pos=entry.flags.get("_cursor"),
-            )
+                cursor_pos=get_cursor(entry, s.page),
+            ), s.page)
         else:
             await s.page.mouse.click(cx, cy, button=button)
+            if d._ambient.is_on(_ctx.get()):
+                set_cursor(entry, (cx, cy), s.page)
         return {
             "clicked": True, "x": cx, "y": cy, "humanized": humanize,
             "confidence": result["confidence"],

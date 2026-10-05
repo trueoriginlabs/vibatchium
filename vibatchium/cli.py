@@ -3151,6 +3151,36 @@ def oracle_run(headless, baseline_path, out_path, as_json):
         click.echo(output)
 
 
+@oracle.command("ambient")
+@click.option("--headless/--headed", default=True,
+              help="standard=headless (default).")
+@click.option("--idle", "idle_s", default=8.0, type=float, show_default=True,
+              help="Seconds of no-verb idle after each agent action.")
+@click.option("--gaps", default=4, type=int, show_default=True,
+              help="Agent actions (each followed by one idle gap) per pass.")
+@click.option("--seed", default=1234, type=int, show_default=True,
+              help="Ambient rhythm seed for the ON pass (fixed = reproducible).")
+@click.option("-o", "--out", "out_path", default=None, type=click.Path())
+@click.option("--json", "as_json", is_flag=True, help="Emit JSON not markdown.")
+def oracle_ambient(headless, idle_s, gaps, seed, out_path, as_json):
+    """Measure the BETWEEN-actions axis: pointer events per page view and per idle
+    gap, `humanize ambient` OFF vs ON, plus a safety audit (no click / key / input
+    / focus / selection / interactive hover / inner scroll during the gaps)."""
+    import time as _time
+    from . import oracle as _oracle
+
+    rows = _oracle.run_ambient_oracle(call, headless=headless, idle_s=idle_s,
+                                      gaps=gaps, seed=seed)
+    output = (json.dumps({"rows": rows, "generated_at": _time.time()}, indent=2)
+              if as_json else _oracle.render_ambient_markdown(rows))
+    if out_path:
+        from pathlib import Path as _P
+        _P(out_path).write_text(output, encoding="utf-8")
+        click.echo(f"wrote {out_path}", err=True)
+    else:
+        click.echo(output)
+
+
 @oracle.command("record")
 @click.option("--out", "out_path", default="oracle-record.html", type=click.Path(),
               help="Where to write the recorder page (open it in your real browser).")
@@ -3241,6 +3271,44 @@ def humanize_off(ctx):
 @click.pass_context
 def humanize_status(ctx):
     _emit(call("humanize_status"), ctx.obj["json"])
+
+
+@humanize.command("ambient")
+@click.argument("state", type=click.Choice(["on", "off", "status"]),
+                default="status")
+@click.option("--seed", type=int, default=None,
+              help="Fix the rhythm seed (default: derived per session + machine).")
+@click.option("--horizon", "horizon_s", type=float, default=None,
+              help="Idle seconds after the last verb before ambient goes quiet "
+                   "(5-1800; default 180 or $VIBATCHIUM_AMBIENT_HORIZON).")
+@click.option("--scroll/--no-scroll", default=True,
+              help="Allow idle reading scrolls (default on).")
+@click.pass_context
+def humanize_ambient(ctx, state, seed, horizon_s, scroll):
+    """Ambient pointer activity BETWEEN verbs (opt-in, default off).
+
+    While the session idles, emit low-rate human-plausible pointer drifts,
+    resting-hand micro-corrections and rare reading scrolls over non-interactive
+    content — so a page that scores pointer activity over the session's lifetime
+    doesn't see a dead-still cursor between actions. Never clicks, types,
+    selects or navigates; yields the instant a verb starts; stops at the idle
+    horizon or when idle-freeze parks the session.
+
+    \b
+        vb --session work humanize ambient on
+        vb --session work humanize ambient status
+        vb --session work humanize ambient off
+
+    CDP-synthesised input: no pointerrawupdate / coalesced samples (unchanged gap).
+    """
+    args: dict = {"mode": state}
+    if state == "on":
+        args["scroll"] = scroll
+        if seed is not None:
+            args["seed"] = seed
+        if horizon_s is not None:
+            args["horizon_s"] = horizon_s
+    _emit(call("humanize_ambient", args), ctx.obj["json"])
 
 
 # ─── Wave 6.2a: per-session proxy ────────────────────────────────────────

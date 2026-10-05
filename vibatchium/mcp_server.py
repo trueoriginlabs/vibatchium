@@ -746,6 +746,23 @@ TOOLS: list[tuple[str, str, dict, str, Any]] = [
      {"type": "object", "properties": {}}, "humanize_off", None),
     ("humanize_status", "Report whether humanize is on for current session.",
      {"type": "object", "properties": {}}, "humanize_status", None),
+    ("humanize_ambient",
+     "Opt-in AMBIENT activity between verbs (default off): while the session idles, "
+     "emit low-rate human-plausible pointer drifts + rare reading scrolls over "
+     "non-interactive content (never clicks/types/selects/navigates, yields to every "
+     "verb, stops horizon_s after the last verb or at idle-freeze). Fills the "
+     "zero-mouse-events silence behavioural scorers flag. mode=on|off|status.",
+     {"type": "object", "properties": {
+         "mode": {"type": "string", "enum": ["on", "off", "status"],
+                  "description": "on | off | status (default status)."},
+         "seed": _int("Fix the per-session rhythm seed (default: derived from "
+                      "session name + profile + machine id).", None),
+         "horizon_s": {"type": "number",
+                       "description": "Idle seconds after the last verb before "
+                                      "ambient goes quiet (5-1800, default 180)."},
+         "scroll": _bool("Allow idle reading scrolls (default true).", True),
+     }},
+     "humanize_ambient", None),
     # ─── Wave 6.3a: credential vault + TOTP ──────────────────────────
     ("secret_init",
      "Provision the vault key in the OS keyring (or print for env-var setups).",

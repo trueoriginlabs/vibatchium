@@ -313,6 +313,11 @@ class SessionEntry:
     # so it can't SIGSTOP the renderer out from under an active wait. Plain int
     # — safe under single-threaded asyncio (inc/dec never straddle an await).
     inflight: int = 0
+    # Ambient behaviour (daemon/ambient.py): True only while an ambient burst is
+    # dispatching pointer input. The idle-freezer skips that one poll rather
+    # than SIGSTOP a renderer mid-burst; ambient never stamps last_used_at, so
+    # it can delay a freeze by at most one poll, never prevent it.
+    ambient_busy: bool = False
 
     def touch(self) -> None:
         self.last_used_at = time.time()

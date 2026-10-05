@@ -41,6 +41,7 @@ from .paths import (
     CACHE_DIR, DEFAULT_SESSION_NAME, LOCK_PATH, LOG_PATH, PID_PATH, SOCK_PATH,
     get_active_session_name,
 )
+from . import ambient as _ambient
 from . import freeze as _freeze
 from .registry import SessionEntry, SessionRegistry, current_session_ctx
 
@@ -261,6 +262,9 @@ class Daemon:
 
     def __init__(self) -> None:
         self.registry = SessionRegistry()
+        # Opt-in per-session ambient pointer activity between verbs (default
+        # off — no session has it until `humanize_ambient on`).
+        self._ambient = _ambient.AmbientManager(self)
         self._handlers: dict[str, Callable[[Daemon, dict], Awaitable[Any]]] = {}
         self._stopping = asyncio.Event()
         # 0.9.1 singleton + idle reaper: the held flock fd (None until acquired)
@@ -501,10 +505,19 @@ class Daemon:
             else:
                 lock_class = "session"
 
+        # Ambient yields to every verb that drives this session's page: the
+        # session-scoped verbs (incl. plugin verbs) and the unlocked page waits.
+        # verb_begin cancels an in-flight burst before the verb runs; verb_end
+        # restarts the idle clock. A dict lookup when ambient is off.
+        ambient_hook = (lock_class == "session" or cmd in self.PAGE_WAIT_VERBS
+                        or cmd == "wait_response")
+
         # Push the selected session into the contextvar so handlers (via the
         # session-routed properties above) operate on the right SessionEntry.
         tok = current_session_ctx.set(session_name)
         fs_tok = _fspolicy.push_scope(fs_scope) if fs_scope is not None else None
+        if ambient_hook:
+            self._ambient.verb_begin(session_name, cmd)   # paired in finally
         try:
             if lock_class == "registry":
                 # 0.7.0 lease gate: refuse the DISRUPTIVE registry verbs (those
@@ -652,6 +665,11 @@ class Daemon:
                 return {"id": req_id, "ok": False, "error": str(exc)}
             return {"id": req_id, "ok": False, "error": f"{type(exc).__name__}: {exc}"}
         finally:
+            if ambient_hook:
+                self._ambient.verb_end(session_name, cmd)
+            elif lock_class == "registry":
+                # a close/delete/stop may have removed an ambient session
+                self._ambient.reap()
             if fs_tok is not None:
                 _fspolicy.pop_scope(fs_tok)
             current_session_ctx.reset(tok)
@@ -854,6 +872,8 @@ class Daemon:
             return 0  # locked verb in flight — not idle
         if entry.inflight > 0:
             return 0  # unlocked page-wait in flight (0.18.6) — not idle
+        if entry.ambient_busy:
+            return 0  # ambient burst mid-dispatch — freeze on the next poll
         async with entry.lock:
             # Re-check under the lock: a verb may have just finished (fresh
             # activity) or be the reason the lock was held.
@@ -951,6 +971,9 @@ class Daemon:
             with contextlib.suppress(Exception):
                 await lv.stop()
             self._liveview_server = None
+        # Stop ambient tasks before their sessions' pages go away.
+        with contextlib.suppress(Exception):
+            await self._ambient.shutdown()
         with contextlib.suppress(Exception):
             await self.registry.close_all()
         with contextlib.suppress(Exception):

@@ -848,3 +848,356 @@ def write_record_page(path: str | Path, **counts: int) -> Path:
     p = Path(path)
     p.write_text(record_page_html(**counts), encoding="utf-8")  # page carries non-ASCII
     return p
+
+
+# ─── ambient: the BETWEEN-actions axis ───────────────────────────────────────
+#
+# Everything above grades input DURING a verb. Akamai's 2026 telemetry study found
+# the louder tell is the silence between: "63.2% of agentic autopost requests
+# contained 0 mouse events" (35.8% more fell below their minimum event count), and
+# agents don't "move the cursor idly while reading" or "scroll to explore". This
+# lane measures exactly that — pointer events per page view and per idle gap
+# between two agent actions — with `humanize ambient` OFF vs ON, and it audits the
+# ambient layer's safety contract on a page full of traps (links, a hover menu with
+# an onmouseover handler, form controls, an inner scroller): during the idle gaps
+# there must be ZERO clicks / keydowns / inputs / focus changes / selections /
+# interactive hovers / inner scrolls.
+
+# A reading page with traps. Plain (non-humanized) `click #vbo-act` is the agent's
+# action between gaps — Playwright parks the pointer on the button centre, which is
+# also the continuity test: ambient's first idle move must start THERE, not teleport.
+_AMBIENT_PAGE_JS = r"""(() => {
+  document.title = 'vb-oracle-ambient';
+  document.body.style.margin = '0';
+  const para = (t) => '<p style="margin:0 0 18px">' + t + '</p>';
+  const lorem = [
+    'Behavioural scoring watches the whole session, not one request. A reader ' +
+    'rarely holds the pointer perfectly still: the hand rests on the mouse, ' +
+    'drifts along a line, corrects, and now and then rolls the wheel a notch.',
+    'This page is an instrumented fixture for the vibatchium ambient oracle. It ' +
+    'counts pointer samples between two agent actions and audits that nothing ' +
+    'interactive was touched while the agent was thinking.',
+    'Long paragraphs give the pointer somewhere harmless to rest. Links like ' +
+    '<a id="vbo-link" href="#trap">this one</a> are traps: hovering them is a ' +
+    'state change the ambient layer must never cause.',
+    'Reading rhythm is slow and bursty. Most of the time nothing moves at all; ' +
+    'then a short drift, a <span id="vbo-tip" onmouseenter="this.dataset.seen=1">' +
+    'hover tip</span>, maybe a scroll, and stillness again while the ' +
+    'eyes work through the next few lines of text.',
+  ];
+  let body = '';
+  for (let i = 0; i < 6; i++) body += para(lorem[i % lorem.length]);
+  document.body.innerHTML =
+    '<nav id="vbo-nav" style="position:sticky;top:0;background:#eee;padding:10px 24px">' +
+      '<span id="vbo-menu" onmouseover="this.dataset.open=1" style="padding:4px 10px">Menu</span>' +
+      ' <a href="#home">Home</a> <a href="#about">About</a></nav>' +
+    '<main style="max-width:760px;margin:0 auto;padding:24px;font:17px/1.6 sans-serif">' +
+      '<h1>Ambient oracle fixture</h1>' + para(lorem[0]) + para(lorem[1]) +
+      '<button id="vbo-act" style="padding:10px 18px;margin:6px 0 18px">Next</button>' +
+      para(lorem[2]) + para(lorem[3]) +
+      '<div id="vbo-card" style="cursor:pointer;margin:0 0 18px;padding:12px;' +
+        'border:1px solid #ddd">A whole card that a script made clickable.</div>' +
+      '<form style="margin:0 0 18px"><input id="vbo-input" placeholder="search" ' +
+        'style="width:320px;padding:6px"> <select id="vbo-select">' +
+        '<option>one</option><option>two</option></select></form>' +
+      '<div id="vbo-inner" style="height:120px;overflow:auto;border:1px solid #ccc;' +
+        'margin:0 0 18px;padding:8px">' + para(lorem[0]) + para(lorem[1]) + para(lorem[2]) +
+      '</div>' + body +
+    '</main>';
+  return {ok: true};
+})()"""
+
+# Extra capture listeners on top of _INSTRUMENT_JS (which owns window.__vbo).
+_AMBIENT_INSTRUMENT_JS = r"""(() => {
+  const B = window.__vbo;
+  if (!B) return {installed: false};
+  const now = () => performance.now();
+  const push = (o) => { if (B.length < 8000) B.push(o); };
+  const opt = {capture: true, passive: true};
+  const INTER = 'a,button,input,select,textarea,label,summary,nav,[onmouseover],' +
+                '[onmouseenter],[role=button],[role=link],[role=menuitem],[tabindex],' +
+                '#vbo-card';
+  addEventListener('click', e => push({type: 'click', t: now()}), opt);
+  addEventListener('input', e => push({type: 'input', t: now()}), opt);
+  addEventListener('change', e => push({type: 'input', t: now()}), opt);
+  addEventListener('focusin', e => push({type: 'focus', t: now()}), opt);
+  addEventListener('mouseover', e => {
+    const tg = e.target;
+    if (tg && tg.closest && tg.closest(INTER)) push({type: 'iover', t: now()});
+  }, opt);
+  document.addEventListener('selectionchange', () => {
+    const s = document.getSelection();
+    if (s && String(s).length) push({type: 'sel', t: now()});
+  });
+  addEventListener('scroll', e => {
+    const tg = e.target;
+    if (tg && tg.nodeType === 1 && tg !== document.scrollingElement
+        && tg !== document.documentElement && tg !== document.body)
+      push({type: 'iscroll', t: now()});
+    else push({type: 'wscroll', t: now(), y: scrollY});
+  }, opt);
+  return {installed: true};
+})()"""
+
+_AMBIENT_DRAIN_JS = r"""(() => {
+  const B = window.__vbo || [];
+  const out = B.slice();
+  if (window.__vbo) window.__vbo.length = 0;
+  return {events: out, origin: performance.timeOrigin};
+})()"""
+
+
+def _in_windows(epoch_ms: float, windows: list) -> int | None:
+    for i, (a, b) in enumerate(windows):
+        if a <= epoch_ms <= b:
+            return i
+    return None
+
+
+def _segments(moves: list[dict], split_ms: float = 120.0) -> list[list[dict]]:
+    """Split a pointer stream into separate movements at pauses > split_ms."""
+    segs: list[list[dict]] = []
+    cur: list[dict] = []
+    for m in moves:
+        if cur and m["t"] - cur[-1]["t"] > split_ms:
+            segs.append(cur)
+            cur = []
+        cur.append(m)
+    if cur:
+        segs.append(cur)
+    return segs
+
+
+def extract_ambient_features(drain: dict, windows: list) -> dict:
+    """Ambient features from one drained page view. `windows` are the idle gaps
+    between agent actions as (start, end) epoch-ms pairs (client wall clock;
+    events are mapped to epoch via performance.timeOrigin). Pure + total."""
+    events = drain.get("events", []) if isinstance(drain, dict) else []
+    origin = drain.get("origin") if isinstance(drain, dict) else None
+    if not isinstance(origin, (int, float)) or isinstance(origin, bool):
+        origin = 0.0
+    events = [e for e in events
+              if isinstance(e, dict) and isinstance(e.get("t"), (int, float))
+              and not isinstance(e.get("t"), bool)]
+    events.sort(key=lambda e: e["t"])
+    n = len(windows)
+    per_gap = [0] * n
+    idle: list[dict] = []
+    for e in events:
+        w = _in_windows(origin + e["t"], windows)
+        if w is not None:
+            e = dict(e, gap=w)
+            idle.append(e)
+            if e.get("type") == "pmove":
+                per_gap[w] += 1
+    moves_all = [e for e in events if e.get("type") == "pmove"]
+    idle_moves = [e for e in idle if e.get("type") == "pmove"]
+
+    # Continuity: distance from the last pointer sample BEFORE each gap's first
+    # idle sample. A teleport (ambient starting from a stale or invented
+    # position) shows up as a large jump.
+    jumps = []
+    for w in range(n):
+        first = next((m for m in idle_moves if m["gap"] == w), None)
+        if first is None:
+            continue
+        prev = [m for m in moves_all if m["t"] < first["t"]]
+        if prev:
+            jumps.append(_euclid(prev[-1], first))
+
+    straight: list[float] = []
+    seg_samples: list[int] = []
+    for w in range(n):
+        for seg in _segments([m for m in idle_moves if m["gap"] == w]):
+            seg_samples.append(len(seg))
+            if len(seg) >= 4:
+                arc = sum(_euclid(seg[i], seg[i + 1]) for i in range(len(seg) - 1))
+                if arc >= 10:
+                    straight.append(_euclid(seg[0], seg[-1]) / arc)
+
+    def count(*types: str) -> int:
+        return sum(1 for e in idle if e.get("type") in types)
+
+    def _is_int(v: Any) -> bool:
+        return isinstance(v, (int, float)) and float(v).is_integer()
+
+    ints = [m for m in idle_moves if _is_int(m.get("x")) and _is_int(m.get("y"))]
+    return {
+        "n_gaps": n,
+        "pageview_pointer_events": len(moves_all),
+        "idle_pointer_per_gap": round(statistics.fmean(per_gap), 2) if per_gap else None,
+        "zero_mouse_gap_frac": (round(sum(1 for c in per_gap if c == 0) / n, 3)
+                                if n else None),
+        "entry_jump_px": round(max(jumps), 1) if jumps else None,
+        "idle_straightness_median": (round(statistics.median(straight), 4)
+                                     if straight else None),
+        "idle_samples_per_segment": (statistics.median(seg_samples)
+                                     if seg_samples else None),
+        "idle_wheel_events": count("wheel"),
+        "idle_integer_coord_frac": (round(len(ints) / len(idle_moves), 3)
+                                    if idle_moves else None),
+        "idle_raw_pointer_events": count("praw"),
+        # safety audit — every one of these must be 0
+        "idle_clicks": count("click", "pdown", "mdown"),
+        "idle_keys": count("key"),
+        "idle_inputs": count("input"),
+        "idle_focus_changes": count("focus"),
+        "idle_selections": count("sel"),
+        "idle_interactive_hovers": count("iover"),
+        "idle_inner_scrolls": count("iscroll"),
+    }
+
+
+# Bands. Honest provenance: the RATE bands are ours, anchored on Akamai's published
+# agentic tell (zero / below-threshold mouse events); the SHAPE band reuses the
+# oracle's literature `straightness` band; the continuity band is one 60 Hz sample
+# at a brisk hand speed (≈3.5 px/ms × 16.7 ms). Safety rows are a hard zero. None of
+# this is a published human distribution for idle pointer activity — none exists.
+AMBIENT_BASELINE: dict[str, dict] = {
+    "pageview_pointer_events": {
+        "kind": "score", "lo": 8, "hi": None,
+        "human": "a page view carries pointer samples (Akamai: 63.2% of agentic "
+                 "requests had 0, 35.8% fell below the minimum)",
+        "source": "Akamai 2026 agentic telemetry; ≥8 = oracle n_moves floor"},
+    "idle_pointer_per_gap": {
+        "kind": "score", "lo": 1, "hi": None,
+        "human": "humans 'move the cursor idly while reading'; agents don't",
+        "source": "Akamai 2026 (qualitative); threshold ours"},
+    "zero_mouse_gap_frac": {
+        "kind": "score", "lo": 0, "hi": 0.5,
+        "human": "most think-gaps between actions carry some pointer activity",
+        "source": "threshold ours (agentic baseline: 63.2% zero-mouse requests)"},
+    "entry_jump_px": {
+        "kind": "score", "lo": 0, "hi": 60,
+        "human": "the first idle sample continues from where the pointer was",
+        "source": "one 60 Hz sample at ~3.5 px/ms"},
+    "idle_straightness_median": {
+        "kind": "score", "lo": 0.55, "hi": 0.999,
+        "human": "idle drifts curve like any hand movement (Fitts-law arc)",
+        "source": "oracle literature `straightness` band"},
+    "idle_samples_per_segment": {
+        "kind": "report", "lo": None, "hi": None,
+        "human": "micro-corrections are short; drifts span ~6-20 samples at 60 Hz",
+        "source": "-"},
+    "idle_wheel_events": {
+        "kind": "report", "lo": None, "hi": None,
+        "human": "occasional reading scroll ('scroll to explore')",
+        "source": "Akamai 2026 (qualitative)"},
+    "idle_integer_coord_frac": {
+        "kind": "report", "lo": None, "hi": None,
+        "human": "a DPR-1 mouse reports whole CSS pixels (1.0)",
+        "source": "coordinate diagnostic"},
+    "idle_raw_pointer_events": {
+        "kind": "gap", "lo": 1, "hi": None,
+        "human": "real hardware fires pointerrawupdate; CDP input fires none",
+        "source": "unchanged by ambient — synthetic input by construction"},
+}
+for _f in ("idle_clicks", "idle_keys", "idle_inputs", "idle_focus_changes",
+           "idle_selections", "idle_interactive_hovers", "idle_inner_scrolls"):
+    AMBIENT_BASELINE[_f] = {
+        "kind": "safety", "lo": 0, "hi": 0,
+        "human": "ambient must never cause this between verbs",
+        "source": "ambient safety contract"}
+
+
+def score_ambient(features: dict) -> dict:
+    """score_features against AMBIENT_BASELINE, plus the safety verdict."""
+    s = score_features(features, AMBIENT_BASELINE)
+    s["safety_violations"] = [f for f, e in s["per_feature"].items()
+                              if e["kind"] == "safety" and e["value"] not in (0, None)]
+    return s
+
+
+def run_ambient_oracle(client_call: Callable[..., Any], *, headless: bool = True,
+                       idle_s: float = 8.0, gaps: int = 4, seed: int | None = 1234,
+                       session: str | None = None,
+                       sleep: Callable[[float], None] = time.sleep) -> list[dict]:
+    """Ambient OFF then ON on the instrumented reading page. Each pass: `gaps` ×
+    (plain `click #vbo-act`, then `idle_s` seconds with NO verb), then one drain.
+    Uses a throwaway ephemeral session unless `session` is given. Two records."""
+    own = session is None
+    sname = session or f"vibatchium_oracle_amb_{uuid.uuid4().hex[:8]}"
+    rows: list[dict] = []
+    try:
+        if own:
+            client_call("start", {"ephemeral": True, "headless": headless},
+                        session=sname)
+        for ambient in (False, True):
+            client_call("humanize_ambient", {"mode": "off"}, session=sname)
+            client_call("go", {"url": "about:blank"}, session=sname)
+            client_call("eval", {"expr": _AMBIENT_PAGE_JS}, session=sname)
+            client_call("eval", {"expr": _INSTRUMENT_JS}, session=sname)
+            client_call("eval", {"expr": _AMBIENT_INSTRUMENT_JS}, session=sname)
+            if ambient:
+                args: dict = {"mode": "on", "horizon_s": max(60.0, idle_s * 4)}
+                if seed is not None:
+                    args["seed"] = seed
+                client_call("humanize_ambient", args, session=sname)
+            windows: list[tuple[float, float]] = []
+            t0 = time.time()
+            for _ in range(gaps):
+                client_call("click", {"target": "#vbo-act"}, session=sname)
+                a = time.time() * 1000.0
+                sleep(idle_s)
+                windows.append((a, time.time() * 1000.0))
+            status = (client_call("humanize_ambient", {"mode": "status"}, session=sname)
+                      if ambient else None)
+            drain = client_call("eval", {"expr": _AMBIENT_DRAIN_JS}, session=sname)["value"]
+            feats = extract_ambient_features(drain, windows)
+            rows.append({"ambient": ambient, "features": feats,
+                         "score": score_ambient(feats), "idle_s": idle_s,
+                         "elapsed_ms": int((time.time() - t0) * 1000),
+                         "ambient_status": status})
+        client_call("humanize_ambient", {"mode": "off"}, session=sname)
+    finally:
+        if own:
+            for verb in ("session_close", "session_delete"):
+                try:
+                    client_call(verb, {"name": sname})
+                except Exception:  # noqa: BLE001
+                    pass
+    return rows
+
+
+def render_ambient_markdown(rows: list[dict]) -> str:
+    """OFF vs ON table for the ambient lane, with the safety audit."""
+    if not rows:
+        return "_no ambient runs_\n"
+    by = {r["ambient"]: r for r in rows}
+    off, on = by.get(False), by.get(True)
+
+    def cell(rec: dict | None, feat: str) -> str:
+        if not rec:
+            return "-"
+        e = rec["score"]["per_feature"].get(feat, {})
+        val = _fmt(e.get("value"))
+        kind = e.get("kind")
+        if kind in ("score", "safety") and e.get("value") is not None:
+            val += " ✅" if e.get("human") else " ❌"
+        elif kind == "gap":
+            val += " ⛔" if not e.get("human") else " ✅"
+        return val
+
+    lines = ["| Feature | Band | ambient OFF | ambient ON | Kind |",
+             "|---|---|---|---|---|"]
+    for feat, spec in AMBIENT_BASELINE.items():
+        band = ("-" if spec["kind"] == "report"
+                else _band_str([spec.get("lo"), spec.get("hi")]))
+        lines.append(f"| `{feat}` | {band} | {cell(off, feat)} | {cell(on, feat)} "
+                     f"| {spec['kind']} |")
+    lines.append("")
+    for rec, label in ((off, "OFF"), (on, "ON")):
+        if rec:
+            s = rec["score"]
+            viol = s["safety_violations"]
+            lines.append(f"- **ambient {label}**: {s['n_human']}/{s['n_scored']} scored "
+                         f"features human-plausible · safety violations: "
+                         f"{', '.join(viol) if viol else 'none'} · "
+                         f"{rec['features']['n_gaps']} gaps × {rec['idle_s']:g}s")
+    lines.append("")
+    lines.append("_Bands: the rate rows are ours, anchored on Akamai's published "
+                 "agentic tell (63.2% of agentic requests carried zero mouse events); "
+                 "the shape row reuses the oracle's literature straightness band. "
+                 "Ambient is CDP-synthesised input — `idle_raw_pointer_events` stays 0 "
+                 "by construction (no pointerrawupdate / coalesced samples)._")
+    return "\n".join(lines) + "\n"

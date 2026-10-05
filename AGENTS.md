@@ -466,8 +466,10 @@ work:
 
 ```bash
 $VB --session work humanize on   # human-like mouse paths + dwell + scroll — only vs behaviour-scoring walls (DataDome/PerimeterX); Bezier paths are themselves entropy
+$VB --session work humanize ambient on   # opt-in: idle pointer drifts + rare reading scrolls BETWEEN verbs (never clicks/types; yields to every verb; quiet after 180s or at idle-freeze)
 $VB --session work gpu set --on  # real GPU WebGL via a DRM render node instead of SwiftShader; --node intel|nvidia de-twins accounts (headless-only, applies on next start)
 $VB oracle run                   # grade the BEHAVIOURAL axis (trajectory/dwell/cadence/scroll) humanize off-vs-on
+$VB oracle ambient               # pointer events per page view / per idle gap, ambient off-vs-on, + a no-click/no-hover safety audit
 $VB evals run --min-score 80     # fingerprint scoreboard matrix per backend — CI regression gate
 $VB bench run --live --targets-file t.json   # cold pass-rate against real Cloudflare/DataDome/PerimeterX walls
 ```
@@ -479,6 +481,18 @@ measures the axis vendors now score, it doesn't claim to beat a named one. The r
 pointer-event stream (`pointerrawupdate`, coalesced samples) is unreachable via
 synthetic CDP input by construction; only attach-mode against a real headful
 Chrome closes it.
+
+**Ambient** fills the silence *between* verbs — the tell Akamai measured (63.2%
+of agentic requests carried zero mouse events). While a session idles it moves
+the pointer over plain text only (every path point is hit-tested in an isolated
+world: no links, buttons, form controls, nav, `[onmouseover]`, `cursor:pointer`,
+or the top 40px), continues from where the page last saw the pointer, and
+scrolls only when nothing interactive will slide under the cursor. It never
+holds the session lock and stops the instant a verb starts. Two things to know:
+ambient scroll moves the viewport between verbs, so re-read positions before a
+coordinate click (`mouse click x y`) — scroll is paused after
+`screenshot`/`candidates`/`mouse` until your next verb, or pass `--no-scroll`;
+and it is refused on `attach` sessions (that browser is yours).
 
 ### Retina / 2× captures — `start --scale` (and what it costs)
 
@@ -763,6 +777,7 @@ VIBATCHIUM_AUTO_INSTALL=0       # disable one-time Chrome auto-install on first 
 VIBATCHIUM_DAEMON_IDLE_TIMEOUT=0  # seconds; >0 self-shuts an idle (0-session) daemon; 0/unset = disabled (default)
 VIBATCHIUM_IDLE_FREEZE=1        # lifecycle-freeze parked headless sessions (default on; 0 disables)
 VIBATCHIUM_IDLE_FREEZE_AFTER=90 # idle seconds before a parked session's pages freeze (default 90, min 5)
+VIBATCHIUM_AMBIENT_HORIZON=180  # `humanize ambient`: idle seconds after the last verb before ambient goes quiet (5-1800)
 VIBATCHIUM_DISK_CACHE_MB=256    # per-session Chrome disk-cache ceiling (0 = let Chrome size it off free disk)
 VIBATCHIUM_BROWSER_BINARY=<abs> # daemon env: default Chromium executable for sessions without a `start --browser-binary` pin
 VIBATCHIUM_DISABLE_SANDBOX=1    # pass --no-sandbox (containers, or a custom binary AppArmor won't let sandbox) — visible infobar + fingerprint signal
@@ -800,7 +815,7 @@ VIBATCHIUM_FILE_ROOTS=<a>:<b>   # daemon env: every caller path must resolve ins
 > Enable `VIBATCHIUM_DAEMON_IDLE_TIMEOUT` on dogfood/isolated daemons so a stray
 > one-shot daemon self-reaps; leave it off (default) for long-lived bot daemons.
 
-**MCP tool surface (0.8.0).** `vb mcp` exposes the **lean** profile (86 verbs — the 80%-case: browse, extract, interact, screenshot, tabs, multi-session, the agent loop incl. `explore`/`expect`) by default, not all 162. Pass `vb mcp --caps=full` (or `all`) for everything, or a custom bucket CSV. The long tail (network, devtools incl. `console_*`, secrets, safety, liveview, goals, storage, **and plugin `x.*` verbs**) is one re-registration away — note the lean default also hides dotted plugin verbs, so pass `--caps=full` or `--caps=lean,plugins` if an agent needs them over MCP.
+**MCP tool surface (0.8.0).** `vb mcp` exposes the **lean** profile (87 verbs — the 80%-case: browse, extract, interact, screenshot, tabs, multi-session, the agent loop incl. `explore`/`expect`) by default, not all 163. Pass `vb mcp --caps=full` (or `all`) for everything, or a custom bucket CSV. The long tail (network, devtools incl. `console_*`, secrets, safety, liveview, goals, storage, **and plugin `x.*` verbs**) is one re-registration away — note the lean default also hides dotted plugin verbs, so pass `--caps=full` or `--caps=lean,plugins` if an agent needs them over MCP.
 
 **`--caps min` — for clients without tool search.** Claude Code defers MCP tools
 behind tool search, so `lean` costs it little. A client that loads every schema

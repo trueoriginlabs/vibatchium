@@ -3063,10 +3063,12 @@ def register_all(daemon) -> None:
             # so we can never click the wrong element.
             if humanize:
                 from ..humanize import humanized_locator_approach, sample_dwell_ms
+                from .ambient import get_cursor, set_cursor
                 pos = await humanized_locator_approach(
-                    entry.session.page, loc, cursor=entry.flags.get("_cursor"))
+                    entry.session.page, loc,
+                    cursor=get_cursor(entry, entry.session.page))
                 if pos is not None:
-                    entry.flags["_cursor"] = pos
+                    set_cursor(entry, pos, entry.session.page)
                 await loc.click(timeout=timeout, delay=sample_dwell_ms())
             else:
                 await loc.click(timeout=timeout)
