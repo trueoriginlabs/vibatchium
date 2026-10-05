@@ -3288,9 +3288,11 @@ def humanize_ambient(ctx, state, seed, horizon_s, scroll):
     """Ambient pointer activity BETWEEN verbs (opt-in, default off).
 
     While the session idles, emit low-rate human-plausible pointer drifts,
-    resting-hand micro-corrections and rare reading scrolls over non-interactive
-    content — so a page that scores pointer activity over the session's lifetime
-    doesn't see a dead-still cursor between actions. Never clicks, types,
+    resting-hand micro-corrections and rare reading scrolls — so a page that
+    scores pointer activity over the session's lifetime doesn't see a dead-still
+    cursor between actions. Targets are best-effort: it avoids elements that
+    look interactive, but can't see hover handlers a page attaches from script
+    (addEventListener, React/Vue root listeners). Never clicks, types,
     selects or navigates; yields the instant a verb starts; stops at the idle
     horizon or when idle-freeze parks the session.
 

@@ -486,14 +486,20 @@ Chrome closes it.
 
 **Ambient** fills the silence *between* verbs — the tell Akamai measured (63.2%
 of agentic requests carried zero mouse events). While a session idles it moves
-the pointer over plain text only (every path point is hit-tested in an isolated
-world: no links, buttons, form controls, nav, `[onmouseover]`, `cursor:pointer`,
-or the top 40px), continues from where the page last saw the pointer, and
-scrolls only when nothing interactive will slide under the cursor. It never
-holds the session lock and stops the instant a verb starts. Two things to know:
+the pointer and scrolls, steering clear of anything that *looks* interactive
+(every path point is hit-tested in an isolated world: links, buttons, form
+controls, nav, inline `onmouseover`-style handlers, `cursor:pointer`, the top
+40px). That filter is **best-effort**: it reads markup and computed style, so
+hover handlers a page attaches from script — `addEventListener`, React/Vue
+root listeners — are invisible to it, and such a page can still see a
+mouseover. It continues from where the page last saw the pointer, never holds
+the session lock, and stops the instant a verb starts. After `hover`, `focus`
+or `mouse move` it stays completely still until your next verb that acts, so a
+hover-opened menu stays open. Two things to know:
 ambient scroll moves the viewport between verbs, so re-read positions before a
 coordinate click (`mouse click x y`) — scroll is paused after
-`screenshot`/`candidates`/`mouse` until your next verb, or pass `--no-scroll`;
+`screenshot`/`candidates`/`mouse` until your next verb that navigates or acts
+(reads like `text`/`extract` keep it paused), or pass `--no-scroll`;
 and it is refused on `attach` sessions (that browser is yours) and on headed
 ones (a human may be at that window — `vb show`, a captcha hand-off).
 

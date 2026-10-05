@@ -384,7 +384,9 @@ def register_extra(daemon) -> None:
 
         mode=on|off|status. `on` starts a per-session task that, while the
         session is idle, emits low-rate pointer drifts / micro-corrections /
-        reading scrolls over non-interactive content — never clicks, types,
+        reading scrolls, steering clear of elements that look interactive
+        (best-effort: script-attached hover handlers are invisible to the
+        filter) — never clicks, types,
         selects or navigates, never runs during a verb, never on a frozen
         session, and goes quiet `horizon_s` after the last verb. Independent of
         `humanize on` (which shapes input DURING verbs); they share one cursor.

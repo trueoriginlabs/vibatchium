@@ -748,9 +748,11 @@ TOOLS: list[tuple[str, str, dict, str, Any]] = [
      {"type": "object", "properties": {}}, "humanize_status", None),
     ("humanize_ambient",
      "Opt-in AMBIENT activity between verbs (default off): while the session idles, "
-     "emit low-rate human-plausible pointer drifts + rare reading scrolls over "
-     "non-interactive content (never clicks/types/selects/navigates, yields to every "
-     "verb, stops horizon_s after the last verb or at idle-freeze). Fills the "
+     "emit low-rate human-plausible pointer drifts + rare reading scrolls "
+     "(never clicks/types/selects/navigates, yields to every verb, stops horizon_s "
+     "after the last verb or at idle-freeze). Targets are best-effort: it avoids "
+     "elements that look interactive but can't see script-attached hover "
+     "handlers, so a page may still observe a mouseover. Fills the "
      "zero-mouse-events silence behavioural scorers flag. mode=on|off|status.",
      {"type": "object", "properties": {
          "mode": {"type": "string", "enum": ["on", "off", "status"],

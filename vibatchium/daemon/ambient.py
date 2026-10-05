@@ -56,7 +56,7 @@ SAFETY CONTRACT (each enforced in code below, and tested):
     VIBATCHIUM_IDLE_FREEZE_AFTER; a frozen session is a hard stop. Independently
     ambient stops after an idle HORIZON (default 180 s since the last verb,
     `VIBATCHIUM_AMBIENT_HORIZON`) — the bound when idle-freeze is off/ineligible.
-  * Safe targets only: every path point is hit-tested in the page (isolated
+  * Best-effort safe targets: every path point is hit-tested in the page (isolated
     world — invisible to page JS) with elementFromPoint, piercing open shadow
     roots, and rejected if it or any ancestor is interactive (links, buttons,
     form controls, labels, summary/details, nav, iframes, media, canvas, svg),
@@ -72,6 +72,12 @@ SAFETY CONTRACT (each enforced in code below, and tested):
     Chrome re-runs hover after a scroll, so content arriving under the cursor
     gets a real mouseover. If the column under the cursor isn't clean, the hand
     first moves onto a text block, then scrolls; otherwise no scroll.
+    LIMIT: the filter sees markup and computed style only. Handlers attached
+    from script — `addEventListener('mouseover', …)`, or a framework's
+    delegated root listener (React, Vue) — leave no trace in the DOM, so an
+    element that only LOOKS inert can still receive (and act on) a mouseover.
+    It avoids what looks interactive; it can't promise a page's script won't
+    see a hover.
   * No motion at all after a pointer-parking verb (`hover`, `focus`, `mouse
     move`) until the next verb that navigates or acts: the agent left the
     pointer there on purpose — on a hover-opened menu or card — and any drift
