@@ -1,7 +1,7 @@
 {
   "name": "vibatchium",
   "displayName": "vibatchium",
-  "version": "0.19.4",
+  "version": "0.19.5",
   "description": "Stealth Chrome for agents: browse, scrape, log into and click through sites behind Cloudflare/DataDome/PerimeterX, JavaScript SPAs and login walls. Bundles the vibatchium skill and the `vb mcp` server. Requires the vb CLI (pipx install 'vibatchium[all]').",
   "author": {
     "name": "monodev-eth",

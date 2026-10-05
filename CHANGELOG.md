@@ -4,6 +4,36 @@ All notable changes to vibatchium are documented here. Versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Until 1.0,
 minor bumps may include breaking changes; we'll always call them out here.
 
+## [0.19.5] — 2026-10-06
+
+### fix(secrets): a navigation after a secret fill could kill the driver on Patchright 1.60
+
+0.19.4's read-back guard kept a handle to every field it filled from the vault
+and evaluated it whenever a read verb ran. After a navigation that handle's
+execution context is gone. On Patchright 1.61+ evaluating it is an ordinary
+error the guard already handled; on **1.60 it kills the shared Playwright
+driver**, and every session on the daemon goes with it ("Connection closed
+while reading from the driver"). 0.19.4's pin still admitted 1.60, and
+`pipx upgrade` / `pip install -U` keep a dependency that already satisfies the
+pin — so an upgrade from an older vibatchium could land exactly there.
+
+Two fixes, either sufficient:
+
+- Each fill stamps a token into its frame's document (isolated world) and a
+  tracked handle is evaluated only while the frame still holds that token. A
+  navigated or detached entry is dropped without being touched — disposing it
+  is the same call. Measured on 1.60: the secret-guard suite went from 19
+  driver crashes to 33/33 with this change alone.
+- `patchright>=1.61.2,<1.62` — the vetted version, so an upgrade now pulls it.
+  Sessions that never fill a secret were never affected.
+
+### test: a fixture race that failed CI once on 3.14
+
+`secret_form.html` parsed its probe button before the script that listens on
+it; inside an iframe the test's click could land first and be lost. The page
+now marks itself ready once its handlers are attached and the probe waits for
+it.
+
 ## [0.19.4] — 2026-10-05
 
 Two months of ecosystem drift, read against our own code. Two security gaps
