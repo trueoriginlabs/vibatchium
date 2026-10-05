@@ -102,10 +102,17 @@ presets stamp their **own** client hints even when the User-Agent is
 overridden, so a fetch from a Linux Chrome 153 session went out as
 `User-Agent: …Linux…Chrome/153` alongside `sec-ch-ua: …v="150"` and
 `sec-ch-ua-platform: "macOS"`. Same cookies, platform flipping between the
-browser's requests and fetch's. With a live session, fetch now sends the page's
-own `Sec-CH-UA` / `-Mobile` / `-Platform`, read from `navigator.userAgentData`
-in the same evaluate as the UA. curl replaces the preset's headers in place, so
-Chrome's header order holds.
+browser's requests and fetch's. With a live session, fetch now sends the
+browser's own `Sec-CH-UA` / `-Mobile` / `-Platform`, read from
+`navigator.userAgentData` in the same evaluate as the UA. That object only
+exists in secure contexts, and a session fresh from `start` sits on
+`about:blank`, so when the page can't answer fetch reuses the last secure read
+for that UA, and failing that rebuilds the values the way Chromium does — the
+brand GREASE is a pure function of the major version, the platform is in the
+UA — verified byte-for-byte against the live browser. A caller's own
+`Sec-CH-UA*` header replaces ours case-insensitively, and a non-Chrome
+`--impersonate` (Safari, Firefox) sends none, as those browsers don't. curl
+replaces the preset's headers in place, so Chrome's header order holds.
 
 What no free preset can fix gets reported instead. Chrome 152 added a TLS
 `trust_anchors` extension; curl_cffi 0.16.3 ships no chrome152 preset.

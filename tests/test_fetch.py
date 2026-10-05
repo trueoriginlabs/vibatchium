@@ -133,6 +133,35 @@ def test_client_hint_headers_escapes_and_mobile():
     assert "sec-ch-ua-platform" not in h
 
 
+def test_derive_uad_reproduces_chrome_grease():
+    # Values captured from real Chrome: 153 on Linux (this box) and 120 on Windows.
+    linux = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+             "(KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36")
+    h = fetch.client_hint_headers(fetch.derive_uad(linux))
+    assert h == {
+        "sec-ch-ua": '"Google Chrome";v="153", "Not_A Brand";v="8", "Chromium";v="153"',
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": '"Linux"',
+    }
+    win = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+           "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+    h = fetch.client_hint_headers(fetch.derive_uad(win))
+    assert h["sec-ch-ua"] == '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"'
+    assert h["sec-ch-ua-platform"] == '"Windows"'
+
+
+def test_derive_uad_edge_android_and_non_chrome():
+    edge = fetch.derive_uad("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                            "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0")
+    assert {"brand": "Microsoft Edge", "version": "131"} in edge["brands"]
+    assert not any(b["brand"] == "Google Chrome" for b in edge["brands"])
+    android = fetch.derive_uad("Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 "
+                               "(KHTML, like Gecko) Chrome/153.0.0.0 Mobile Safari/537.36")
+    assert android["platform"] == "Android" and android["mobile"] is True
+    assert fetch.derive_uad("Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140.0") is None
+    assert fetch.derive_uad(None) is None
+
+
 def test_client_hint_headers_missing_or_malformed_is_empty():
     assert fetch.client_hint_headers(None) == {}
     assert fetch.client_hint_headers({}) == {}
@@ -319,6 +348,8 @@ def test_fetch_verb_sends_session_client_hints(local_server):
         {"brands": ident["brands"], "mobile": False, "platform": ident["platform"]})
     assert seen["sec-ch-ua"] == expected["sec-ch-ua"]
     assert seen["sec-ch-ua-platform"] == expected["sec-ch-ua-platform"]
+    # The GREASE derivation must agree with the real browser byte-for-byte.
+    assert fetch.client_hint_headers(fetch.derive_uad(ident["ua"]))["sec-ch-ua"] == expected["sec-ch-ua"]
 
     want = fetch.tls_coherence(ident["ua"], r["impersonate"])
     if want is None:
@@ -328,3 +359,55 @@ def test_fetch_verb_sends_session_client_hints(local_server):
         assert tc["ua_major"] == want["ua_major"]
         assert tc["gap"] == want["gap"]
         assert tc["client_hints"] == "session"
+
+
+# ─── LIVE: no secure context, caller overrides, non-Chrome impersonation ───
+def test_fetch_client_hints_without_secure_context_and_overrides(local_server):
+    """A page without userAgentData (about:blank, http://) must not fall back
+    to the preset's hints; a caller header beats ours case-insensitively; and a
+    non-Chrome ClientHello carries no Sec-CH-UA at all."""
+    import http.server
+    import socketserver
+    import threading
+
+    import pytest
+    pytest.importorskip("curl_cffi")
+    from vibatchium.client import call
+
+    seen: list = []
+
+    class Echo(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            seen.append([(k.lower(), v) for k, v in self.headers.items()])
+            self.send_response(200)
+            self.send_header("Content-Length", "2")
+            self.end_headers()
+            self.wfile.write(b"ok")
+
+        def log_message(self, *a):
+            pass
+
+    srv = socketserver.TCPServer(("127.0.0.1", 0), Echo)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{srv.server_address[1]}/"
+    try:
+        call("go", {"url": "about:blank"})
+        ua = call("eval", {"expr": "navigator.userAgent"})["value"]
+        r1 = call("fetch", {"url": url, "allow_internal": True})
+        r2 = call("fetch", {"url": url, "allow_internal": True,
+                            "headers": {"Sec-CH-UA-Platform": '"Windows"'}})
+        r3 = call("fetch", {"url": url, "allow_internal": True, "impersonate": "safari184"})
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+    assert r1["status"] == r2["status"] == r3["status"] == 200
+    want = fetch.client_hint_headers(fetch.derive_uad(ua))
+    h1 = dict(seen[0])
+    assert h1["sec-ch-ua"] == want["sec-ch-ua"]
+    assert h1["sec-ch-ua-platform"] == want["sec-ch-ua-platform"]
+    if "tls_coherence" in r1:
+        assert r1["tls_coherence"]["client_hints"] in ("cached", "derived")
+    platforms = [v for k, v in seen[1] if k == "sec-ch-ua-platform"]
+    assert platforms == ['"Windows"']
+    assert not any(k.startswith("sec-ch-ua") for k, _ in seen[2])

@@ -179,6 +179,58 @@ def client_hint_headers(uad: dict | None) -> dict:
     return out
 
 
+# Chromium's brand GREASE (components/embedder_support/user_agent_utils.cc):
+# deterministic in the major version, so the header a page would expose can be
+# rebuilt without one.
+_GREASE_CHARS = (" ", "(", ":", "-", ".", "/", ")", ";", "=", "?", "_")
+_GREASE_VERSIONS = ("8", "99", "24")
+_GREASE_ORDERS = ((0, 1, 2), (0, 2, 1), (1, 0, 2), (1, 2, 0), (2, 0, 1), (2, 1, 0))
+
+
+def derive_uad(ua: str | None) -> dict | None:
+    """``navigator.userAgentData``'s low-entropy fields, rebuilt from a
+    Chrome/Edge User-Agent string.
+
+    ``userAgentData`` only exists in secure contexts, so a freshly started
+    session (``about:blank``) or an ``http://`` page can't hand fetch its
+    hints, and the preset's — another major, and macOS — would go out instead.
+    Chrome's brand list is a pure function of the major version (the GREASE
+    brand, its version, and the order are all seeded by it), and the platform
+    and mobile bit are in the UA itself, so the browser's own values can be
+    reproduced exactly. Returns None for anything that isn't Chrome or Edge.
+    """
+    if not ua:
+        return None
+    m = re.search(r"Chrome/(\d+)", ua)
+    if not m or "OPR/" in ua or "SamsungBrowser" in ua:
+        return None
+    major = int(m.group(1))
+    edge = re.search(r"Edg(?:A|iOS)?/(\d+)", ua)
+    brand = ("Microsoft Edge", edge.group(1)) if edge else ("Google Chrome", str(major))
+    grease = ("Not" + _GREASE_CHARS[major % 11] + "A"
+              + _GREASE_CHARS[(major + 1) % 11] + "Brand",
+              _GREASE_VERSIONS[major % 3])
+    slots: list = [None, None, None]
+    order = _GREASE_ORDERS[major % 6]
+    slots[order[0]] = grease
+    slots[order[1]] = ("Chromium", str(major))
+    slots[order[2]] = brand
+    if "Android" in ua:
+        platform = "Android"
+    elif "CrOS" in ua:
+        platform = "Chrome OS"
+    elif "Windows" in ua:
+        platform = "Windows"
+    elif "Macintosh" in ua or "Mac OS X" in ua:
+        platform = "macOS"
+    elif "Linux" in ua or "X11" in ua:
+        platform = "Linux"
+    else:
+        platform = ""
+    return {"brands": [{"brand": b, "version": v} for b, v in slots],
+            "mobile": "Mobile" in ua, "platform": platform}
+
+
 def proxy_cfg_to_curl(cfg: dict | None) -> dict | None:
     """Translate a Playwright proxy dict (``{server, username?, password?}``,
     as returned by ``vibatchium.proxy.parse``) into a curl_cffi ``proxies``

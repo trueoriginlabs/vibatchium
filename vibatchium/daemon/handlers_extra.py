@@ -963,6 +963,7 @@ def register_extra(daemon) -> None:
 
         ua_override = args.get("user_agent")
         hint_headers: dict = {}
+        hint_source = "preset"
         if s is None:
             # SESSIONLESS LANE (0.12.0): no live session to reuse identity from
             # (the cookie-wanting case already raised above). An anonymous,
@@ -998,7 +999,25 @@ def register_extra(daemon) -> None:
                     # Only paired with the page's own UA: an explicit
                     # --user-agent describes some other browser, and the live
                     # page's hints would contradict it just as the preset's do.
-                    hint_headers = _f.client_hint_headers(ident.get("uad"))
+                    # userAgentData is secure-context only, so a fresh session
+                    # (about:blank) or an http:// page has none. Fall back to
+                    # the last secure read for this UA, then to the values
+                    # Chrome derives from its own major + platform — never to
+                    # the preset's, which name another major and macOS.
+                    uad = ident.get("uad")
+                    if uad:
+                        s._fetch_uad = (ua, uad)
+                        hint_source = "session"
+                    else:
+                        cached = getattr(s, "_fetch_uad", None)
+                        if cached and cached[0] == ua:
+                            uad, hint_source = cached[1], "cached"
+                        else:
+                            uad = _f.derive_uad(ua)
+                            hint_source = "derived" if uad else "preset"
+                    hint_headers = _f.client_hint_headers(uad)
+                    if not hint_headers:
+                        hint_source = "preset"
                 except Exception:  # noqa: BLE001
                     ua = await coherent_headless_ua(s.pw)
             # An explicit --proxy overrides the session's own, so a caller can
@@ -1017,9 +1036,18 @@ def register_extra(daemon) -> None:
             headers["User-Agent"] = ua
         # The live page's Sec-CH-UA values replace the preset's (which name the
         # preset's own Chrome major and macOS); caller headers still win.
-        headers.update(hint_headers)
-        if isinstance(args.get("headers"), dict):
-            headers.update(args["headers"])
+        # Chrome hints only ride a Chrome/Edge ClientHello: Safari and Firefox
+        # never send Sec-CH-UA, so stamping them onto a `--impersonate safari…`
+        # request would be its own tell.
+        if not str(impersonate or "").startswith(("chrome", "edge")):
+            hint_headers, hint_source = {}, "preset"
+        caller_headers = args.get("headers") if isinstance(args.get("headers"), dict) else {}
+        # Header names are case-insensitive; a caller's `Sec-CH-UA-Platform`
+        # must replace ours, not ride alongside it as a second header.
+        caller_keys = {str(k).lower() for k in caller_headers}
+        headers.update({k: v for k, v in hint_headers.items()
+                        if k.lower() not in caller_keys})
+        headers.update(caller_headers)
         method = str(args.get("method", "GET")).upper()
         timeout_ms = int(args.get("timeout_ms", 30_000))
         max_body = int(args.get("max_body", 5_000_000))
@@ -1091,7 +1119,7 @@ def register_extra(daemon) -> None:
             _latest = None
         coherence = _f.tls_coherence(ua, impersonate, _latest)
         if coherence:
-            coherence["client_hints"] = "session" if hint_headers else "preset"
+            coherence["client_hints"] = hint_source
             out["tls_coherence"] = coherence
         return out
 
