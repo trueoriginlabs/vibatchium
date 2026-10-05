@@ -4,7 +4,7 @@ All notable changes to vibatchium are documented here. Versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Until 1.0,
 minor bumps may include breaking changes; we'll always call them out here.
 
-## [0.20.0] — 2026-09-02
+## [0.19.3] — 2026-10-05
 
 ### feat(capture): `vb start --scale N` — real 2× screenshots, including of interactive states
 
@@ -85,6 +85,16 @@ catalogue; the working panel values are recorded in `Dockerfile.glama`'s header.
 
 The PyPI summary in `pyproject.toml` carried the same `Vibium-style` phrasing as
 `server.json` and is fixed too.
+
+### chore: this was drafted as 0.20.0
+
+It ships as a patch because that is what it is by this project's own precedent:
+minor bumps have meant a new verb or subsystem (`vb oracle`, `vb search`), and
+this adds neither — one option on `start`, one property on its schema. CI had
+also been red since the draft: `test_wave6_warmup`'s fake `backends.launch`
+pinned the keyword list that `--scale` extended. The fake now takes the new
+keywords. `AGENTS.md` stops calling injection scanning "off by default" (every
+session has started in `flag-only` since 0.18.9) and counts 162 tools, not 161.
 
 ## [0.19.2] — 2026-08-26
 

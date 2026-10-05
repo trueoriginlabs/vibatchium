@@ -21,7 +21,7 @@
 #
 # This image installs no Chrome: `initialize` and `tools/list` answer from
 # static metadata — verified with PLAYWRIGHT_BROWSERS_PATH pointed at an empty
-# dir and a throwaway HOME (vibatchium 0.20.0, protocol 2025-06-18, 1,985-char
+# dir and a throwaway HOME (vibatchium 0.19.3, protocol 2025-06-18, 1,985-char
 # instructions, 86 tools). Verbs that drive a browser need the full image; an
 # introspection pass calls none of them.
 

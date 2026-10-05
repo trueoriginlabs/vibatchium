@@ -267,7 +267,7 @@ def start(ctx, profile, headless, backend, ephemeral, gpu, scale):
     # durable + self-heal-safe; a bare `vb start` sends nothing (inherits env/persisted).
     if gpu is not None:
         args["gpu"] = gpu
-    # 0.20.0: same persist-on-start contract as --gpu — the daemon writes
+    # 0.19.3: same persist-on-start contract as --gpu — the daemon writes
     # display.json so the posture survives a self-heal relaunch. A bare `vb start`
     # sends nothing and inherits whatever is persisted.
     if scale is not None:

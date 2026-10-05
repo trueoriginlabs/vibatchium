@@ -3,7 +3,7 @@
   "name": "io.github.trueoriginlabs/vibatchium",
   "title": "vibatchium",
   "description": "Stealth browser automation for AI agents — real Chrome, N parallel persistent logged-in sessions.",
-  "version": "0.20.0",
+  "version": "0.19.3",
   "repository": {
     "url": "https://github.com/trueoriginlabs/vibatchium",
     "source": "github",
@@ -22,7 +22,7 @@
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "vibatchium",
-      "version": "0.20.0",
+      "version": "0.19.3",
       "runtimeHint": "uvx",
       "transport": { "type": "stdio" },
       "packageArguments": [

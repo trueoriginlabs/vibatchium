@@ -333,8 +333,9 @@ prints the current code.
 
 ## Untrusted content — prompt-injection safety
 
-Scraped page text can carry instructions aimed at *you*. Per-session scanning is
-off by default (zero overhead); turn it on when reading a page you don't trust:
+Scraped page text can carry instructions aimed at *you*. Every session starts in
+`flag-only` (risk metadata attached, content untouched); escalate to `wrap` or
+`redact` when reading a page you don't trust, or `off` for zero overhead:
 
 ```bash
 $VB --session work safety set flag-only   # add prompt_injection_risk + signals to responses
@@ -554,7 +555,7 @@ VIBATCHIUM_LOG_BACKUPS=5        # how many rotated daemon-log backups to keep
 > Enable `VIBATCHIUM_DAEMON_IDLE_TIMEOUT` on dogfood/isolated daemons so a stray
 > one-shot daemon self-reaps; leave it off (default) for long-lived bot daemons.
 
-**MCP tool surface (0.8.0).** `vb mcp` exposes the **lean** profile (86 verbs — the 80%-case: browse, extract, interact, screenshot, tabs, multi-session, the agent loop incl. `explore`/`expect`) by default, not all 161. Pass `vb mcp --caps=full` (or `all`) for everything, or a custom bucket CSV. The long tail (network, devtools incl. `console_*`, secrets, safety, liveview, goals, storage, **and plugin `x.*` verbs**) is one re-registration away — note the lean default also hides dotted plugin verbs, so pass `--caps=full` or `--caps=lean,plugins` if an agent needs them over MCP.
+**MCP tool surface (0.8.0).** `vb mcp` exposes the **lean** profile (86 verbs — the 80%-case: browse, extract, interact, screenshot, tabs, multi-session, the agent loop incl. `explore`/`expect`) by default, not all 162. Pass `vb mcp --caps=full` (or `all`) for everything, or a custom bucket CSV. The long tail (network, devtools incl. `console_*`, secrets, safety, liveview, goals, storage, **and plugin `x.*` verbs**) is one re-registration away — note the lean default also hides dotted plugin verbs, so pass `--caps=full` or `--caps=lean,plugins` if an agent needs them over MCP.
 
 ## Plugins — extend the verb surface
 

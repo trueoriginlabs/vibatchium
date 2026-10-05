@@ -696,7 +696,7 @@ class SessionRegistry:
         # them (the relaunch/self-heal path), so a mid-life `vb proxy set` is
         # honored on recovery.
         proxy_cfg, geo_cfg, gpu_on, gpu_node = self._load_session_overrides(name, pdir)
-        # 0.20.0: the device-scale posture (display.json) resolves the same way —
+        # 0.19.3: the device-scale posture (display.json) resolves the same way —
         # read here for the warm-claim guard, then handed to _launch_for so the
         # cold path doesn't re-read it. Kept out of _load_session_overrides's tuple
         # because it needs none of that helper's cross-config coherence logic (it's
@@ -840,7 +840,7 @@ class SessionRegistry:
         SwiftShader). create() passes its already-loaded cfgs through to avoid a
         redundant read.
 
-        The 0.20.0 device-scale posture is ALWAYS read here rather than passed in:
+        The 0.19.3 device-scale posture is ALWAYS read here rather than passed in:
         it needs the same self-heal guarantee (a crashed 2x capture session that
         came back at 1x would silently halve every subsequent screenshot) and has
         no caller that could usefully override it, so making it unconditional is
@@ -993,7 +993,7 @@ class SessionRegistry:
             log.warning("session %s has GPU WebGL configured but is ATTACHing to an "
                         "existing Chrome — GPU applies only to cold-launch (`start`); "
                         "the attached browser keeps its own WebGL renderer.", name)
-        # 0.20.0: and the same for a device-scale pin — deviceScaleFactor is a
+        # 0.19.3: and the same for a device-scale pin — deviceScaleFactor is a
         # context-CREATION option, and attach connects to a context we didn't
         # create. The attached browser keeps its own devicePixelRatio (which, on a
         # real headful Chrome, is the honest one anyway). Warn rather than let a

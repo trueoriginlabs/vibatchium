@@ -579,7 +579,7 @@ def register_all(daemon) -> None:
             gpu_persisted = bool(args["gpu"])
             save_session_gpu(profile_dir, {"on": gpu_persisted})
 
-        # 0.20.0: `--scale N` persists to display.json for exactly the same reasons
+        # 0.19.3: `--scale N` persists to display.json for exactly the same reasons
         # `--gpu` persists — the launch posture must survive a self-heal relaunch,
         # and create()/relaunch() resolve it from disk, never from a transient param.
         # A scale of 1 REMOVES the file (back to the no_viewport default), so
@@ -696,7 +696,7 @@ def register_all(daemon) -> None:
                 out["gpu_ignored"] = True
                 out["note"] = f"GPU WebGL configured but not applied: {reason}"
 
-        # 0.20.0: a scaled session traded the no_viewport default for a pinned
+        # 0.19.3: a scaled session traded the no_viewport default for a pinned
         # viewport — that's the whole mechanism, and a posture change the caller has
         # to know about. Reported on every scaled launch, whether the scale came
         # from this call or from a previously persisted display.json. Runs AFTER the
@@ -2811,7 +2811,7 @@ def register_all(daemon) -> None:
             )
         size = s.page.viewport_size or {}
         out = {"width": size.get("width"), "height": size.get("height")}
-        # 0.20.0: on a scaled session the CSS viewport is no longer the size a
+        # 0.19.3: on a scaled session the CSS viewport is no longer the size a
         # screenshot comes back at — report the scale AND the device-pixel dims so a
         # caller sizing a capture doesn't have to know the multiplication. Only when
         # scaled, so an ordinary session's response is byte-identical to before.

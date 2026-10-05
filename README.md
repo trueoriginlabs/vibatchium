@@ -22,6 +22,18 @@ URLs without a search API, **`vb fetch`** to read them — both with per-request
 > **unattended, headless, N-at-a-time**, on a box with no human in front of it,
 > against sites that fight automation. That is the whole of the wedge, and it is
 > worth being precise about which side of it you are on.
+>
+> **2026-09-15 sharpened the split.** For new domains and free-plan zones,
+> Cloudflare now blocks *Training* and *Agent* crawlers by default on
+> ad-monetized pages, leaving *Search* allowed; existing paid zones keep the
+> settings they had. That default targets crawlers which **declare themselves** — by user-agent, or
+> by a Web Bot Auth signature — and it catches multi-purpose crawlers along with
+> the dedicated ones. It does not change what a real Chrome session looks like,
+> so the lane this tool works in is untouched by the rule itself. Be precise
+> about the limit, though: it is a change to *policy defaults*, not to
+> detection. The fingerprint and behavioural scoring under
+> [Honest limits](#honest-limits) is a separate axis and moves independently of
+> anything Cloudflare publishes in a blog post.
 
 ```
 pipx install vibatchium             # core: browse / extract / screenshot / N parallel sessions
@@ -45,7 +57,7 @@ vb research --target https://example.com \          # parallel fan-out, N intent
   --intent "pricing model" --intent "customers" --intent "tech stack"
 ```
 
-**Status:** active development, alpha. **1,250 tests** green in CI (Linux, Python 3.11–3.13). Apache-2.0 (AGPL only via the opt-in `nodriver` extra).
+**Status:** active development, alpha. **1,250 tests** green in CI (Linux, Python 3.11–3.14). Apache-2.0 (AGPL only via the opt-in `nodriver` extra).
 
 <sub>Detector scores quoted below (bot.sannysoft, CreepJS, Cloudflare cold-launch) are **manual observations, not CI-asserted** — no test in the suite gates on them, and they are only as current as the last hand-run. The generated block under [Measured scores](#measured-scores) is the one to trust; it is empty until someone runs it.</sub>
 
@@ -212,6 +224,15 @@ with no verb (default 90) and thaws them on the next call, so an idle WebGL /
 animation page drops to zero CPU without a teardown (default on;
 `VIBATCHIUM_IDLE_FREEZE=0` disables).
 
+Freezing rather than closing is a deliberate trade, and it cuts both ways.
+playwright-mcp's `--idle-timeout` (v0.0.81, 1 h default for headless) *closes*
+an idle browser: that reclaims its memory, and its persistent profile keeps the
+cookies, but the open tabs and in-page state are gone, and the next call pays a
+cold launch. A frozen session keeps its resident memory and resumes on the next
+verb with its tabs, page state and login intact — which is the behaviour a
+long-lived authenticated session mid-flow needs. Memory is bounded by the other two levers above,
+the RAM floor and the cgroup, rather than by teardown.
+
 ## Documentation
 
 - [`AGENTS.md`](AGENTS.md) — coding-agent contract (Codex / Cursor / Claude Code)
@@ -294,6 +315,9 @@ measured without it are a floor rather than what a GPU-backed deployment gets.
   `nodriver` slightly *ahead* on creepjs (50 vs 44) — but that run silently
   denied it the GPU while patchright got a real one, so it was scoring from
   behind. Once both arms get a real renderer the difference disappears.
+  Worth knowing before reaching for the tier: upstream has not published since
+  **nodriver 0.50.3 (2026-05-13)**, so what the `>=0.50.0,<1.0` pin resolves to
+  is now several months old. The rung still works; it is no longer moving.
 
 > **What these do and don't cover.** These are *fingerprint scoreboards* —
 > the static axis. Through 2026 the major anti-bot vendors moved to

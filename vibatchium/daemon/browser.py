@@ -191,7 +191,7 @@ class BrowserSession:
     # 0.13.0 de-twinning: the render-node pin this GPU session launched with (e.g.
     # "nvidia"), or None for the host-default GPU. Observability only.
     gpu_node: str | None = None
-    # 0.20.0: the devicePixelRatio this session launched with (1.0 = the default
+    # 0.19.3: the devicePixelRatio this session launched with (1.0 = the default
     # no_viewport posture). Recorded for observability (`status`) and the
     # warm-claim/self-heal posture check, mirroring `gpu`. Only ever > 1 on a
     # patchright launch — nodriver connects over CDP to a context it didn't create.
@@ -440,7 +440,7 @@ async def launch_session(profile_dir: Path, headless: bool = False,
     report DIFFERENT real GPUs. None = host default (Intel here). Requires `gpu` +
     headless; a node with no matching EGL vendor is a no-op (default GPU).
 
-    `device_scale_factor` (0.20.0): pin `window.devicePixelRatio` so captures come
+    `device_scale_factor` (0.19.3): pin `window.devicePixelRatio` so captures come
     back at N image pixels per CSS pixel — a real 2x/retina shot of a page you drove
     to an interactive state. Chromium only accepts deviceScaleFactor as a CONTEXT
     option and Playwright rejects it alongside `no_viewport`, so a scaled launch
@@ -450,7 +450,7 @@ async def launch_session(profile_dir: Path, headless: bool = False,
     not a walled-browsing one. None/1.0 = unchanged default. See display.py for why
     the runtime CDP override was rejected.
 
-    `viewport` (0.20.0): the {width, height} pin that a scaled launch requires.
+    `viewport` (0.19.3): the {width, height} pin that a scaled launch requires.
     Ignored unless `device_scale_factor` > 1 — on its own it would trade the
     no_viewport stealth default for nothing. `vb viewport` resizes afterwards and
     Playwright re-applies the scale, so this is only the starting size.
@@ -548,7 +548,7 @@ async def launch_session(profile_dir: Path, headless: bool = False,
         "no_viewport": True,
         "args": extra_args if extra_args else None,
     }
-    # 0.20.0: a device-scale pin and `no_viewport` are mutually exclusive —
+    # 0.19.3: a device-scale pin and `no_viewport` are mutually exclusive —
     # Playwright hard-errors with `"deviceScaleFactor" option is not supported
     # with null "viewport"`, and passing both viewport and no_viewport is also
     # refused. So a scaled launch SWAPS the default posture for an explicit

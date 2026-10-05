@@ -1,4 +1,4 @@
-"""0.20.0 — per-session devicePixelRatio (`vb start --scale N`).
+"""0.19.3 — per-session devicePixelRatio (`vb start --scale N`).
 
 Layered the same way as test_gpu_webgl: the pure tests (display.json resolution,
 persistence, corrupt-file degrade, launch-kwargs capture, backend threading, the
