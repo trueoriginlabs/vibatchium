@@ -493,6 +493,26 @@ async def test_dispatcher_hooks_session_and_page_wait_verbs_only(monkeypatch):
                           ("reap", None)]
 
 
+async def test_dispatcher_hooks_unlocked_plugin_verbs(monkeypatch):
+    # An `unlocked` plugin verb takes no entry.lock, so without the hook
+    # nothing would stop ambient moving the pointer under it.
+    d, e, _ = _daemon(monkeypatch)
+    rec = _Recorder()
+    d._ambient = rec
+
+    async def ok(daemon, args):
+        return {}
+
+    d.add_verb("x.drive", ok, lock="unlocked")
+    d.add_verb("x.config", ok, lock="registry")
+    d.add_verb("x.locked", ok)
+    for i, verb in enumerate(("x.drive", "x.config", "x.locked")):
+        out = await d.dispatch({"cmd": verb, "args": {"_session": "t"}, "id": str(i)})
+        assert out["ok"], out
+    assert rec.events == [("begin", "x.drive"), ("end", "x.drive"), ("reap", None),
+                          ("begin", "x.locked"), ("end", "x.locked")]
+
+
 async def test_dispatcher_pairs_end_even_when_the_verb_fails(monkeypatch):
     d, e, _ = _daemon(monkeypatch)
     rec = _Recorder()

@@ -516,9 +516,13 @@ class Daemon:
             else:
                 lock_class = "session"
 
-        # Ambient yields to every verb that drives this session's page: the
-        # session-scoped verbs (incl. session-locked plugin verbs) and the
-        # unlocked page waits. verb_begin cancels an in-flight burst before the
+        # Ambient yields to every verb that may drive this session's page: the
+        # session-scoped verbs, the unlocked page waits, and EVERY plugin verb
+        # that isn't registry-class — an `unlocked` plugin verb holds no
+        # entry.lock, so st.busy (set by verb_begin) is the only thing that
+        # keeps ambient's pointer out of its way. Registry-class verbs (built-in
+        # or plugin) are session-lifecycle/config operations and only reap.
+        # verb_begin cancels an in-flight burst before the
         # verb runs; verb_end restarts the idle clock and updates the scroll
         # pin. Both run only once the verb is actually going to run — after the
         # goal-caps and lease gates — so a refused call changes nothing. A
@@ -526,7 +530,9 @@ class Daemon:
         # resets the idle clock nor touches the pin. A dict lookup when ambient
         # is off.
         ambient_hook = ((lock_class == "session" or cmd in self.PAGE_WAIT_VERBS
-                         or cmd == "wait_response")
+                         or cmd == "wait_response"
+                         or (lock_class == "unlocked"
+                             and cmd in self._plugin_verbs))
                         and not (cmd == "humanize_ambient"
                                  and str(args.get("mode") or "status").lower()
                                  == "status"))

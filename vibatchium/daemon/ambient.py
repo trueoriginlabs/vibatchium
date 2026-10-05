@@ -41,7 +41,9 @@ SAFETY CONTRACT (each enforced in code below, and tested):
   * Never clicks, presses a button, types, selects, or navigates — the only
     calls are `page.mouse.move` and `page.mouse.wheel`.
   * Never acts during a verb. The dispatcher calls `verb_begin()` before ANY
-    session-scoped verb (and the page waits); that cancels an in-flight burst
+    session-scoped verb, the page waits and every non-registry plugin verb
+    (an `unlocked` one included — it holds no lock), once the lease/goal-caps
+    gates have let it through; that cancels an in-flight burst
     and parks the loop. Ambient NEVER takes `entry.lock`; instead, before every
     single CDP dispatch, `_blocked()` re-checks (synchronously — no await
     between check and dispatch) that no verb is in flight, `entry.lock` is free,
