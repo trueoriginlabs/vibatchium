@@ -3546,9 +3546,11 @@ def persona_info(ctx, profile):
 
 @cli.command("fleet-check")
 @click.option("--sessions", default=None,
-              help="Comma-separated EXISTING running sessions to probe as-is. "
-                   "NOTE: each is navigated to a loopback blank page — don't point "
-                   "this at a session mid-task.")
+              help="Comma-separated RUNNING sessions to probe as-is (a name that "
+                   "isn't running is refused, never auto-started). Each is "
+                   "navigated to a loopback blank page for the probe, then back "
+                   "to the URL it was on — still, don't point this at a session "
+                   "mid-task (in-page state such as a half-filled form is lost).")
 @click.option("--spawn", "spawn", type=int, default=0,
               help="Spawn N throwaway ephemeral default sessions.")
 @click.option("--variant", "variants", multiple=True,
@@ -3580,7 +3582,7 @@ def fleet_check(sessions, spawn, variants, persona_on, before_after, url,
         vb fleet-check --variant default --variant default \\
             --variant gpu=intel --variant gpu=nvidia --variant geo=DE
         vb fleet-check --spawn 4 --before-after
-        vb fleet-check --sessions work,work2      # your live identities, as-is
+        vb fleet-check --sessions work,work2      # your RUNNING identities, as-is
 
     Spawned sessions are ephemeral and deleted afterwards. CLI-only.
     """
@@ -3601,15 +3603,19 @@ def fleet_check(sessions, spawn, variants, persona_on, before_after, url,
                                "(--spawn / --variant)")
 
     runs = []
-    if before_after:
-        runs.append(("before", _fleet.run_fleet_check(
-            call, sessions=names, variants=specs, persona=False, url=url)))
-        runs.append(("after (persona)", _fleet.run_fleet_check(
-            call, sessions=names, variants=specs, persona=True, url=url)))
-    else:
-        runs.append(("fleet-check" + (" (persona)" if persona_on else ""),
-                     _fleet.run_fleet_check(call, sessions=names, variants=specs,
-                                            persona=persona_on, url=url)))
+    try:
+        if before_after:
+            runs.append(("before", _fleet.run_fleet_check(
+                call, sessions=names, variants=specs, persona=False, url=url)))
+            runs.append(("after (persona)", _fleet.run_fleet_check(
+                call, sessions=names, variants=specs, persona=True, url=url)))
+        else:
+            runs.append(("fleet-check" + (" (persona)" if persona_on else ""),
+                         _fleet.run_fleet_check(call, sessions=names,
+                                                variants=specs,
+                                                persona=persona_on, url=url)))
+    except ValueError as exc:      # a --sessions name that isn't running
+        raise click.UsageError(str(exc)) from exc
     if as_json:
         output = json.dumps({label: res for label, res in runs}, indent=2,
                             default=str)

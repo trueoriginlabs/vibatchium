@@ -178,6 +178,9 @@ def test_run_fleet_check_cleans_up_spawned_sessions_on_error():
 
 def test_run_fleet_check_probes_all_and_reports_errors():
     def fake_call(cmd, args=None, *, session=None):
+        if cmd == "session_list":
+            return {"sessions": [{"name": "live", "running": True,
+                                  "url": "https://example.test/"}]}
         if cmd == "eval":
             if session == "fleet-t-1":
                 raise RuntimeError("renderer gone")
@@ -189,6 +192,53 @@ def test_run_fleet_check_probes_all_and_reports_errors():
     assert sorted(res["sessions"]) == ["fleet-t-0", "live"]
     assert "fleet-t-1" in res["errors"]
     assert res["meta"]["live"] == {"existing": True}
+
+
+def test_fleet_check_refuses_a_session_that_is_not_running():
+    calls = []
+
+    def fake_call(cmd, args=None, *, session=None):
+        calls.append((cmd, session))
+        if cmd == "session_list":
+            return {"sessions": [{"name": "live", "running": True, "url": "x"},
+                                 {"name": "parked", "running": False}]}
+        return {}
+
+    with pytest.raises(ValueError, match="not running: parked, ghost"):
+        fleet.run_fleet_check(fake_call, sessions=["live", "parked", "ghost"],
+                              variants=[{}], tag="t")
+    # refused before anything was spawned, started or navigated
+    assert calls == [("session_list", None)]
+
+
+def test_fleet_check_navigates_existing_sessions_back():
+    gone = []
+
+    def fake_call(cmd, args=None, *, session=None):
+        if cmd == "session_list":
+            return {"sessions": [
+                {"name": "a", "running": True, "url": "https://a.test/inbox"},
+                {"name": "b", "running": True, "url": "about:blank"}]}
+        if cmd == "go":
+            gone.append((session, args["url"]))
+            if session == "b" and args["url"] == "about:blank":
+                raise RuntimeError("nav failed")
+        if cmd == "eval":
+            return {"value": {"screen": 1, "lies": []}}
+        return {}
+
+    res = fleet.run_fleet_check(fake_call, sessions=["a", "b"], url="http://p/")
+    assert gone[-2:] == [("a", "https://a.test/inbox"), ("b", "about:blank")]
+    assert ("a", "http://p/") in gone and ("b", "http://p/") in gone
+    assert "b (restore)" in res["errors"]
+
+
+def test_cli_fleet_check_turns_a_refusal_into_a_usage_error(monkeypatch):
+    from click.testing import CliRunner
+    from vibatchium import cli as C
+    monkeypatch.setattr(C, "call", lambda cmd, args=None, **k: {"sessions": []})
+    r = CliRunner().invoke(C.cli, ["fleet-check", "--sessions", "x,y"])
+    assert r.exit_code == 2 and "not running" in r.output, r.output
 
 
 # ─── persona: generation + coherence ────────────────────────────────────

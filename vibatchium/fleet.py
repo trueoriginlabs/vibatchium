@@ -641,15 +641,33 @@ def run_fleet_check(client_call: Callable[..., Any], *,
     entry in ``variants`` (see parse_variant), in parallel; spawned sessions are
     closed + deleted afterwards even on error. Returns a ``summarize`` dict.
 
+    ``sessions`` must already be RUNNING — a name that isn't is refused
+    (ValueError) before anything is spawned or navigated, rather than silently
+    auto-started by the probe's `go`. Each one is navigated back to the URL it
+    was on once probing is done (a failure to restore lands in ``errors``
+    under ``"<name> (restore)"``).
+
     ``persona`` turns the persona posture on for every SPAWNED session (the
     "after" pass); existing sessions are probed as they are.
     """
     import uuid
+    sessions = list(sessions)
     tag = tag or uuid.uuid4().hex[:6]
     spawned: list[str] = []
     meta: dict[str, dict] = {s: {"existing": True} for s in sessions}
     vectors: dict[str, dict] = {}
     errors: dict[str, str] = {}
+    origin: dict[str, str | None] = {}
+    if sessions:
+        rows = (client_call("session_list", {}) or {}).get("sessions") or []
+        running = {r.get("name"): r for r in rows if r.get("running")}
+        missing = [s for s in sessions if s not in running]
+        if missing:
+            raise ValueError(
+                f"not running: {', '.join(missing)} — fleet-check --sessions "
+                f"probes live sessions as they are and won't start one (start "
+                f"it first, or use --spawn / --variant for throwaway sessions)")
+        origin = {s: running[s].get("url") for s in sessions}
     try:
         for i, var in enumerate(variants):
             name = f"fleet-{tag}-{i}"
@@ -681,6 +699,14 @@ def run_fleet_check(client_call: Callable[..., Any], *,
             with _BlankServer() as srv:
                 run(srv.url)
     finally:
+        for n in sessions:
+            back = origin.get(n)
+            if not back or back == "about:blank":
+                back = "about:blank"
+            try:
+                client_call("go", {"url": back}, session=n)
+            except Exception as exc:  # noqa: BLE001
+                errors[f"{n} (restore)"] = f"{type(exc).__name__}: {exc}"[:200]
         for n in spawned:
             for verb in ("session_close", "session_delete"):
                 try:
