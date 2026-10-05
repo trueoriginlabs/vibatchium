@@ -100,3 +100,44 @@ def test_mouse_moves_between_verbs_only_with_ambient_on(amb_session):
     st = next(r for r in rows if r["ambient"])["ambient_status"]
     assert st["ambient"] and st["stats"]["moves"] >= 1
     assert call("humanize_ambient", {"mode": "status"}, session=amb_session)["ambient"] is False
+
+
+_MENU_PAGE = (
+    "data:text/html,<!doctype html><meta charset=utf-8><style>"
+    "body{font:16px sans-serif;margin:0}main{padding:80px 40px}"
+    "p{max-width:700px;line-height:1.6}"
+    ".menu{display:inline-block;padding:6px;margin:30px 0}"
+    "%23m{display:none;padding:8px;border:1px solid %23999}"
+    ".menu:hover %23m{display:block}"
+    "</style><main>"
+    + "<p>" + "Plain reading text that ambient is allowed to drift over. " * 12
+    + "</p><div class=menu><span id=trig>Account</span>"
+    "<div id=m>Profile<br>Settings<br>Sign out</div></div>"
+    + "<p>" + "More plain text below the menu for the reader to rest on. " * 12
+    + "</p></main>"
+)
+
+
+def _menu_display(s):
+    return call("eval", {"expr": "getComputedStyle(document.getElementById('m'))"
+                                 ".display"}, session=s)["value"]
+
+
+def test_hover_opened_menu_stays_open_with_ambient_on(amb_session):
+    # Regression (0.20.0 review B1): ambient drifted the pointer off a hovered
+    # trigger within seconds and closed CSS/JS hover menus before the agent's
+    # next click.
+    s = amb_session
+    call("go", {"url": _MENU_PAGE}, session=s)
+    call("humanize_ambient", {"mode": "on", "seed": 7, "horizon_s": 60}, session=s)
+    try:
+        call("hover", {"target": "#trig"}, session=s)
+        assert _menu_display(s) == "block"     # a read: must not release the park
+        import time
+        time.sleep(6.0)
+        st = call("humanize_ambient", {"mode": "status"}, session=s)
+        assert st["pointer_parked"] is True, st
+        assert _menu_display(s) == "block", st["stats"]
+        assert st["stats"]["moves"] == 0 and st["stats"]["wheel_notches"] == 0, st
+    finally:
+        call("humanize_ambient", {"mode": "off"}, session=s)

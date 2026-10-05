@@ -575,6 +575,44 @@ async def test_scroll_pin_survives_reads_until_a_verb_acts(monkeypatch):
     d._ambient.disable("t")
 
 
+async def test_no_motion_after_a_pointer_parking_verb(monkeypatch):
+    # hover / focus / mouse move leave the pointer somewhere ON PURPOSE (a
+    # hover-opened menu): no drift, no scroll until the next verb that acts —
+    # reads in between keep it parked.
+    d, e, page = _daemon(monkeypatch)
+    page.ptr = [400.0, 200.0]
+    st = await _enable(d, e)
+    _fast(st, scroll_p=0.5)
+
+    async def ok(daemon, args):
+        return {}
+
+    for verb in ("hover", "focus", "mouse", "text", "click"):
+        d._handlers[verb] = ok
+
+    async def run(verb, **a):
+        out = await d.dispatch({"cmd": verb, "id": verb,
+                                "args": {"_session": "t", **a}})
+        assert out["ok"], out
+
+    for park in (("hover", {}), ("focus", {}), ("mouse", {"action": "move"})):
+        await run(park[0], **park[1])
+        assert st.pointer_parked, park
+        await run("text")
+        assert st.pointer_parked, f"a read released the pointer after {park}"
+        n = len(page.calls)
+        await asyncio.sleep(0.4)
+        assert len(page.calls) == n, f"ambient moved after {park}"
+        assert d._ambient.status("t")["pointer_parked"] is True
+        await run("click", target="#x")
+        assert not st.pointer_parked
+    await asyncio.sleep(0.4)
+    assert page.calls, "ambient never resumed after the click"
+    await run("mouse", action="click", x=5, y=5)
+    assert not st.pointer_parked, "a mouse click is not a park"
+    d._ambient.disable("t")
+
+
 async def test_freezer_skips_one_poll_mid_burst(monkeypatch):
     from vibatchium.daemon import freeze
     monkeypatch.setattr(freeze, "_find_renderers", lambda p: [100])

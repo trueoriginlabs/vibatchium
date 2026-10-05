@@ -70,6 +70,10 @@ SAFETY CONTRACT (each enforced in code below, and tested):
     Chrome re-runs hover after a scroll, so content arriving under the cursor
     gets a real mouseover. If the column under the cursor isn't clean, the hand
     first moves onto a text block, then scrolls; otherwise no scroll.
+  * No motion at all after a pointer-parking verb (`hover`, `focus`, `mouse
+    move`) until the next verb that navigates or acts: the agent left the
+    pointer there on purpose — on a hover-opened menu or card — and any drift
+    or scroll could close it before the click that was coming.
   * Scroll is suppressed after a viewport-pinning verb (screenshot, candidates,
     vision_find, mouse …) until the next verb that navigates or acts — reads in
     between (text, extract, eval, url, waits, `humanize_ambient status`) keep the
@@ -120,6 +124,22 @@ VIEWPORT_PINNING_VERBS = frozenset({
     "screenshot", "screenshot_annotate", "candidates", "vision_find",
     "mouse", "highlight", "map", "map_compact", "diff_map",
 })
+
+# Verbs whose PURPOSE is to leave the pointer (or focus) where it is: a hover
+# that opened a CSS/JS menu or hover card, a `mouse move` that parked the
+# pointer, a focus that opened a :focus-within dropdown. Any ambient motion
+# after one of these can close what the agent just opened before its next
+# click, so ambient makes NO pointer motion or scroll at all until the next
+# verb that navigates or acts (reads in between keep the pointer parked).
+# `mouse` parks only for action=move (see pointer_parks()).
+POINTER_PARKING_VERBS = frozenset({"hover", "focus"})
+
+
+def pointer_parks(cmd: str, args: dict | None = None) -> bool:
+    if cmd in POINTER_PARKING_VERBS:
+        return True
+    return cmd == "mouse" and str((args or {}).get("action") or "").lower() == "move"
+
 
 # Verbs that only READ (the page, or daemon/session state). They leave
 # ambient's suppression state exactly as they found it: the usual agent loop is
@@ -597,6 +617,7 @@ class _State:
     last_verb_end: float = field(default_factory=time.monotonic)
     bursts_since_verb: int = 0
     scroll_pinned: bool = False
+    pointer_parked: bool = False
     task: asyncio.Task | None = None
     burst: asyncio.Task | None = None
     arm: asyncio.Task | None = None
@@ -672,9 +693,10 @@ class AmbientManager:
             "seed": st.params.seed, "seed_source": st.seed_source,
             "horizon_s": st.horizon_s, "effective_horizon_s": eff,
             "scroll": st.scroll, "scroll_pinned": st.scroll_pinned,
+            "pointer_parked": st.pointer_parked,
             "idle_s": round(idle, 1),
             # (`status` is itself a verb, so st.busy counts it — not used here)
-            "active": idle < eff and not st.stopped
+            "active": idle < eff and not st.stopped and not st.pointer_parked
                       and not getattr(st.entry, "frozen", False),
             "stats": dict(st.stats, skipped=dict(st.stats["skipped"])),
             "params": st.params.summary(),
@@ -705,6 +727,10 @@ class AmbientManager:
             st.scroll_pinned = True
         elif cmd not in READ_ONLY_VERBS:
             st.scroll_pinned = False      # navigation / input: positions are stale anyway
+        if pointer_parks(cmd, args):
+            st.pointer_parked = True
+        elif cmd not in READ_ONLY_VERBS:
+            st.pointer_parked = False
         st.wake.set()
         if st.busy == 0 and (st.arm is None or st.arm.done()):
             # Arm the in-page pointer tracker right after the verb (a `go` just
@@ -766,6 +792,8 @@ class AmbientManager:
             return "frozen"
         if time.monotonic() - st.last_verb_end >= st.horizon_s:
             return "horizon"
+        if st.pointer_parked:
+            return "parked"
         if entry.flags.get("_buttons_down"):
             return "button_held"
         if self._takeover_active(name):
@@ -795,6 +823,8 @@ class AmbientManager:
                     reason = "frozen"
                 elif idle >= st.horizon_s:
                     reason = "horizon"
+                elif st.pointer_parked:
+                    reason = "parked"     # hover/focus/mouse move: hands off
                 if reason is not None:
                     # Parked: wait for the next verb. Re-check liveness now and
                     # then so a closed session's task doesn't linger.
