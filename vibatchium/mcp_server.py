@@ -118,7 +118,7 @@ TOOLS: list[tuple[str, str, dict, str, Any]] = [
      "Cloudflare/DataDome \"Just a moment...\" challenge, a login/paywall, or an "
      "empty \"JavaScript is required\" shell: don't report failure, use this — "
      "patchright clears most such walls cold. "
-     "ONE-CALL 'look at this URL', TEXT-FIRST. Does verify_url → auto-start session if needed (headless) → go → extract text. It does NOT screenshot by default: read and navigate with the returned text/selectors, and a screenshot is captured only as a FALLBACK when the page yields no usable text (canvas/image/blank SPA). This is the 80% case of 'just show me what's on this page' — use it instead of separate start/go/text calls unless you need multi-step interaction. Pass screenshot='always' to force a screenshot, 'never' to suppress even the fallback; when one is captured it comes back as a viewable image, not base64 text. Without an explicit session it runs on an OFF-BUDGET transient ephemeral session (0.7.0) — it never competes with persistent sessions for a slot and is auto-deleted afterward, so it won't touch your 'default' session.",
+     "ONE-CALL 'look at this URL', TEXT-FIRST. Does a DNS pre-check → auto-start a session if needed (headless) → navigate → extract the text. It does NOT screenshot by default: read and navigate with the returned text/selectors, and a screenshot is captured only as a FALLBACK when the page yields no usable text (canvas/image/blank SPA). This is the 80% case of 'just show me what's on this page' — use it instead of separate start / navigate / read calls unless you need multi-step interaction. Pass screenshot='always' to force a screenshot, 'never' to suppress even the fallback; when one is captured it comes back as a viewable image, not base64 text. Without an explicit session it runs on an OFF-BUDGET transient ephemeral session (0.7.0) — it never competes with persistent sessions for a slot and is auto-deleted afterward, so it won't touch your 'default' session.",
      {"type": "object",
       "properties": {"url": _str("Target URL — required."),
                      "intent": _str("Optional natural-language description (reserved for future)."),
@@ -138,7 +138,7 @@ TOOLS: list[tuple[str, str, dict, str, Any]] = [
       "required": ["url"]},
      "explore", None),
     ("expect",
-     "ONE-CALL verification gate. Assert the page reached an expected state — composes element-state / page-text / URL checks plus a native challenge-wall check into a single {passed, failures[]} verdict. Use after an action to confirm it landed (or that you got soft-blocked) instead of stitching wait/text/url/screenshot calls. Every check is optional.",
+     "ONE-CALL verification gate. Assert the page reached an expected state — composes element-state / page-text / URL checks plus a native challenge-wall check into a single {passed, failures[]} verdict. Use after an action to confirm it landed (or that you got soft-blocked) instead of stitching several wait and read calls together. Every check is optional.",
      {"type": "object",
       "properties": {"target": _str("Element to assert — @eN / @text: / @label: / CSS."),
                      "state": _str("Expected element state (default 'visible'): visible|hidden|attached|detached."),
@@ -150,8 +150,8 @@ TOOLS: list[tuple[str, str, dict, str, Any]] = [
                                     "default": "auto",
                                     "description": "auto = capture only on failure (evidence); always; never."}}},
      "expect", None),
-    ("go", "Navigate to a URL in the stealth browser, then pair with "
-     "extract/text/html/map. Reach for this (or explore) when WebFetch/curl was "
+    ("go", "Navigate to a URL in the stealth browser, then read the page with "
+     "a content tool. Reach for this when WebFetch/curl was "
      "blocked — a 403, a Cloudflare/DataDome \"Just a moment...\" challenge, a "
      "login/paywall, or a JavaScript-only page that returns no usable HTML — or "
      "when the page needs a real browser.",
@@ -268,9 +268,9 @@ TOOLS: list[tuple[str, str, dict, str, Any]] = [
      {"type": "object",
       "properties": {"target": _str("@eN ref or selector."),
                      "timeout_ms": _int("Timeout in ms.", 30_000),
-                     "index": _int("Act on the Nth match (0-based, from `candidates`) when the target is ambiguous."),
+                     "index": _int("Act on the Nth match (0-based, document order) when the target matches several elements."),
                      "auto_dismiss_banners": _bool(
-                         "On 'intercepted' failure, try dismiss_banners once and retry.",
+                         "On 'intercepted' failure, dismiss cookie/consent banners once and retry.",
                          False)},
       "required": ["target"]},
      "click", None),
@@ -278,7 +278,7 @@ TOOLS: list[tuple[str, str, dict, str, Any]] = [
      {"type": "object",
       "properties": {"target": _str("@eN ref or selector."),
                      "timeout_ms": _int("Timeout in ms.", 30_000),
-                     "index": _int("Act on the Nth match (0-based, from `candidates`).")},
+                     "index": _int("Act on the Nth match (0-based, document order).")},
       "required": ["target"]},
      "dblclick", None),
     ("focus", "Focus an element (without clicking).",
@@ -303,7 +303,7 @@ TOOLS: list[tuple[str, str, dict, str, Any]] = [
                      "text": _str("Text to fill (or use use_secret)."),
                      "use_secret": _str("Vault reference 'site:key' (or 'site:totp'). Origin-bound: "
                                         "the target must be on that site."),
-                     "index": _int("Fill the Nth match (0-based, from `candidates`) when the target is ambiguous."),
+                     "index": _int("Fill the Nth match (0-based, document order) when the target matches several elements."),
                      "timeout_ms": _int("Timeout in ms.", 30_000)},
       "required": ["target"]},
      "fill", None),
@@ -311,13 +311,13 @@ TOOLS: list[tuple[str, str, dict, str, Any]] = [
      {"type": "object",
       "properties": {"target": _str("@eN ref or selector."),
                      "text": _str("Text to type."),
-                     "index": _int("Type into the Nth match (0-based, from `candidates`)."),
+                     "index": _int("Type into the Nth match (0-based, document order)."),
                      "delay_ms": _int("Per-keystroke delay (ms).", 0)},
       "required": ["target", "text"]},
      "type", None),
     ("hover", "Hover over an element.",
      {"type": "object", "properties": {"target": _str("@eN ref or selector."),
-                     "index": _int("Hover the Nth match (0-based, from `candidates`).")},
+                     "index": _int("Hover the Nth match (0-based, document order).")},
       "required": ["target"]},
      "hover", None),
     ("press", "Press a key on a specific element (e.g. Enter on @e3).",
@@ -638,7 +638,7 @@ TOOLS: list[tuple[str, str, dict, str, Any]] = [
                      "force": _bool("Bypass cache.", False)},
       "required": ["intent"]},
      "observe", None),
-    ("act", "Observe + execute the resulting plan in one shot.",
+    ("act", "Plan the action for a natural-language intent and execute it in one shot.",
      {"type": "object",
       "properties": {"intent": _str("Natural-language intent."),
                      "llm": _bool("Use Claude.", False)},

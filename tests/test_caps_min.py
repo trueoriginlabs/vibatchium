@@ -77,6 +77,58 @@ def test_min_instructions_name_no_absent_tool():
     assert "session_lease" in M._build_instructions(C.resolve_caps("lean"))
 
 
+# Tool names that are also ordinary English words — prose may use them ("page
+# text", "the URL", "back"), but never as a CALL: not in backticks, not as
+# `name(`, not inside a slash-list like extract/text/html.
+_ENGLISH_TOOL_NAMES = {"back", "check", "clean", "content", "count", "fetch",
+                       "pages", "scroll", "start", "stop", "text", "type", "url",
+                       "value", "viewport", "find", "title", "select", "focus",
+                       "reload", "forward", "frame", "keys", "media", "search"}
+
+
+def _descriptions(obj):
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if k == "description" and isinstance(v, str):
+                yield v
+            else:
+                yield from _descriptions(v)
+    elif isinstance(obj, list):
+        for v in obj:
+            yield from _descriptions(v)
+
+
+def test_min_tool_text_names_no_absent_tool():
+    # Best-effort scan: a --caps min client must never be pointed at a tool it
+    # doesn't have (`candidates`, `dismiss_banners`, `go` → "pair with
+    # extract/text/html/map" were the review's examples).
+    import re
+    caps = C.resolve_caps("min")
+    tools = M._filter_tools(caps)
+    exposed = {t[0] for t in tools}
+    absent = {t[0] for t in M.TOOLS} - exposed
+    chunks = [M._build_instructions(caps)]
+    for t in tools:
+        chunks.append(t[1])
+        chunks += list(_descriptions(M._augment_schema_with_session(t[2])))
+    txt = "\n".join(chunks)
+    names = {t[0] for t in M.TOOLS}
+    # a slash-list of TOOL names ("extract/text/html/map"), not prose
+    # ("text/selectors")
+    slash_lists = [set(m.split("/")) for m in
+                   re.findall(r"[A-Za-z_]+(?:/[A-Za-z_]+)+", txt)]
+    hits = set()
+    for w in set(re.findall(r"[A-Za-z_]+", txt)) & absent:
+        if w not in _ENGLISH_TOOL_NAMES:
+            hits.add(w)
+            continue
+        w_ = re.escape(w)
+        if re.search(rf"`{w_}`|\b{w_}\(", txt) or any(
+                w in grp and len(grp & names) > 1 for grp in slash_lists):
+            hits.add(w)
+    assert not hits, f"min tool text names absent tools: {sorted(hits)}"
+
+
 def test_setup_registers_min(tmp_path, monkeypatch):
     # `vb setup --caps min` validates through the same resolver and registers
     # `vb mcp --caps min` verbatim.
