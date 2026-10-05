@@ -1967,6 +1967,7 @@ name = "vibatchium"
 source = { editable = "." }
 dependencies = [
     { name = "click" },
+    { name = "idna" },
     { name = "mcp" },
     { name = "patchright" },
 ]
@@ -2023,6 +2024,7 @@ requires-dist = [
     { name = "curl-cffi", marker = "extra == 'fetch'", specifier = ">=0.16.3,<1.0" },
     { name = "fastapi", marker = "extra == 'all'", specifier = ">=0.110,<2.0" },
     { name = "fastapi", marker = "extra == 'rest'", specifier = ">=0.110,<2.0" },
+    { name = "idna", specifier = ">=3.7,<4" },
     { name = "keyring", marker = "extra == 'all'", specifier = ">=24.0,<26.0" },
     { name = "keyring", marker = "extra == 'secrets'", specifier = ">=24.0,<26.0" },
     { name = "mcp", specifier = ">=1.30.0,<2.0" },

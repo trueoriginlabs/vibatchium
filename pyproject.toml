@@ -33,6 +33,9 @@ dependencies = [
     "patchright>=1.59.1,!=1.61.1,<1.62",  # <1.62 until 1.62 clears the stealth gate (see tests/test_stealth_drift_gate.py)
     "click>=8.1.7,<9.0",
     "mcp>=1.30.0,<2.0",
+    # UTS #46 host normalisation for secret origin binding (already pulled in
+    # by httpx; declared because secrets.py relies on it directly).
+    "idna>=3.7,<4",
 ]
 
 [project.optional-dependencies]

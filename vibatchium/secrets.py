@@ -527,6 +527,10 @@ def resolve_secret_reference(ref: str) -> str:
 
 ORIGINS_KEY = "origins"
 ALLOW_CROSS_ORIGIN_ENV = "VIBATCHIUM_SECRET_ALLOW_CROSS_ORIGIN"
+# Lets value / eval / wait_fn / eval_handle / handle_eval / detect_forms
+# values=true run while a vault secret is live in the session, and lets a secret
+# be filled into a document caller JS already ran in. Daemon env only.
+ALLOW_READBACK_ENV = "VIBATCHIUM_SECRET_ALLOW_READBACK"
 
 # Args that only an operator may set. The MCP server (and a caps-restricted
 # REST shim) refuse them, because an injected agent on those surfaces would
@@ -534,6 +538,19 @@ ALLOW_CROSS_ORIGIN_ENV = "VIBATCHIUM_SECRET_ALLOW_CROSS_ORIGIN"
 # already run as the user with direct access to the vault.
 OPERATOR_ONLY_ARGS: dict[str, tuple[str, ...]] = {
     "fill": ("allow_cross_origin",),
+}
+
+# Verbs refused outright on agent surfaces: every vault MUTATION (any key, not
+# just `origins` — `email-poll` repoints the IMAP poller, deleting `origins`
+# drops a narrowing policy, `secret_init --force` orphans the vault) and every
+# verb that RETURNS a code without an origin check. `secret_list` stays: it is
+# masked and read-only.
+OPERATOR_ONLY_VERBS: dict[str, str] = {
+    "secret_init": "provisions or replaces the vault key",
+    "secret_set": "writes a vault entry",
+    "secret_delete": "deletes a vault entry",
+    "secret_totp": "returns a live TOTP code with no origin check",
+    "wait_email_code": "returns a one-time email code with no origin check",
 }
 
 _DEFAULT_PORTS = {"https": 443, "http": 80}
@@ -555,9 +572,18 @@ def normalize_host(host: str | None) -> str | None:
         return None
     if h.isascii():
         return h
+    # UTS #46 non-transitional (IDNA2008), which is what browsers resolve:
+    # `straße.de` is `xn--strae-oqa.de`, NOT `strasse.de` (Python's built-in
+    # "idna" codec is IDNA2003 and maps ß→ss, so a `straße.de` entry would have
+    # matched a different registrable domain). Without the `idna` package we
+    # refuse the name instead of guessing — use the punycode form.
     try:
-        return h.encode("idna").decode("ascii").lower()
-    except UnicodeError:
+        import idna as _idna
+    except ImportError:  # pragma: no cover — declared in pyproject
+        return None
+    try:
+        return _idna.encode(h, uts46=True, transitional=False).decode("ascii").lower()
+    except (_idna.IDNAError, UnicodeError, ValueError):
         return None
 
 
@@ -742,27 +768,37 @@ def get_site_origins(site: str) -> list[str]:
             f"invalid ({exc})") from exc
 
 
+def _env_flag(name: str) -> bool:
+    return (os.environ.get(name) or "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def cross_origin_env_enabled() -> bool:
-    return (os.environ.get(ALLOW_CROSS_ORIGIN_ENV) or "").strip().lower() \
-        in ("1", "true", "yes", "on")
+    return _env_flag(ALLOW_CROSS_ORIGIN_ENV)
+
+
+def readback_env_enabled() -> bool:
+    return _env_flag(ALLOW_READBACK_ENV)
 
 
 def agent_surface_violation(cmd: str, args: dict | None) -> str | None:
     """For agent-facing surfaces (MCP, caps-restricted REST): return an error
-    message if the call tries to set an operator-only knob, else None.
+    message if the call is operator-only, else None.
 
-    Two knobs would let an injected agent defeat origin binding: the fill
-    escape hatch, and rewriting an entry's `origins` policy to its own host.
+    Operator-only: the fill escape hatch (`allow_cross_origin`), every vault
+    mutation, and the verbs that hand back a TOTP / email code without the
+    origin check `fill --use-secret` applies. An agent that needs a TOTP fills
+    it: `fill <target> --use-secret site:totp`.
     """
     args = args or {}
+    why = OPERATOR_ONLY_VERBS.get(cmd)
+    if why:
+        shell = "vb " + cmd.replace("_", " ", 1) if cmd.startswith("secret_") \
+            else "vb " + cmd.replace("_", "-")
+        return (f"{cmd!r} {why} and is operator-only — it is not accepted on "
+                f"this surface. Run `{shell} ...` from a shell.")
     for name in OPERATOR_ONLY_ARGS.get(cmd, ()):
         if args.get(name):
             return (f"{name!r} is operator-only and is not accepted on this "
                     f"surface — use `vb {cmd} --allow-cross-origin` from a shell "
                     f"or set {ALLOW_CROSS_ORIGIN_ENV}=1 on the daemon")
-    if cmd == "secret_set" and \
-            str(args.get("key") or "").strip().lower() == ORIGINS_KEY:
-        return ("the 'origins' policy of a vault entry cannot be changed on "
-                "this surface — run `vb secret set <site> origins ...` from a "
-                "shell")
     return None

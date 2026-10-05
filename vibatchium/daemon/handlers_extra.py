@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import json as _json
 import logging
 import re
@@ -17,7 +18,14 @@ from io import BytesIO
 from pathlib import Path
 
 from . import elements, observe as _observe_mod
+from . import secret_guard as _secret_guard
+from .registry import current_session_ctx as _session_ctx
 from .. import fspolicy
+
+
+def _entry(d):
+    """The SessionEntry of the current call (None outside a session)."""
+    return d.registry.get(_session_ctx.get())
 
 log = logging.getLogger("vibatchium.handlers_extra")
 
@@ -183,6 +191,10 @@ def register_extra(daemon) -> None:
         s = _session(d)
         html = args["html"]
         wait_until = args.get("wait_until", "domcontentloaded")
+        # 0.19.4: set_content rewrites the document but keeps its origin, so
+        # caller markup + script would run AS that origin — mark the document
+        # so a later secret fill into it is refused until a reload.
+        await _secret_guard.guard_caller_js(_entry(d), "content", s.page)
         await s.page.set_content(html, wait_until=wait_until)
         return {"set": True, "url": s.page.url}
 
@@ -614,6 +626,10 @@ def register_extra(daemon) -> None:
             if rule["mode"] == "abort":
                 await route.abort()
             elif rule["mode"] == "fulfill":
+                # 0.19.4: caller bytes served AS the requested origin — mark
+                # the document they land in, like caller JS (secret_guard).
+                with contextlib.suppress(Exception):
+                    await _secret_guard.record_fulfilled(request)
                 await route.fulfill(
                     status=rule["status"],
                     body=rule["body"],
@@ -1678,6 +1694,7 @@ def register_extra(daemon) -> None:
         # Bounded for the same reason as `eval` — a wedged main thread would
         # otherwise hold entry.lock for the daemon's life.
         timeout_ms = int(args.get("timeout_ms") or 30_000)
+        await _secret_guard.guard_caller_js(_entry(d), "eval_handle", s.page)
         handle = await asyncio.wait_for(s.page.evaluate_handle(expr),
                                         timeout_ms / 1000)
         d._handle_counter += 1
@@ -1704,6 +1721,14 @@ def register_extra(daemon) -> None:
             raise KeyError(f"unknown handle: {hid} (use eval_handle first)")
         expr = args["expr"]
         timeout_ms = int(args.get("timeout_ms") or 30_000)
+        # The handle's page, not necessarily the current one.
+        page = None
+        with contextlib.suppress(Exception):
+            el = d._handles[hid].as_element()
+            frame = await el.owner_frame() if el is not None else None
+            page = frame.page if frame is not None else None
+        await _secret_guard.guard_caller_js(_entry(d), "handle_eval",
+                                            page or _session(d).page)
         return {"value": await asyncio.wait_for(d._handles[hid].evaluate(expr),
                                                 timeout_ms / 1000)}
 
@@ -2244,9 +2269,14 @@ def register_extra(daemon) -> None:
             url = spec["url"]
             extract_js = custom_extract or spec["extract"]
 
+        if _secret_guard.is_javascript_url(url):
+            await _secret_guard.guard_caller_js(_entry(d), "fingerprint", s.page)
         await s.page.goto(url, wait_until="networkidle", timeout=60_000)
         # Let JS detection scripts settle
         await asyncio.sleep(settle_ms / 1000)
+        if custom_extract:
+            # 0.19.4: caller-supplied JS, same guard as `eval`.
+            await _secret_guard.guard_caller_js(_entry(d), "fingerprint", s.page)
         signals = await s.page.evaluate(extract_js)
 
         # Backend tag from session entry (set by registry.create)
@@ -2352,6 +2382,10 @@ def register_extra(daemon) -> None:
             "maxChars": int(args.get("max_chars", 200)),
         }
         target = args.get("target") or args.get("selector")
+        if jarg["values"]:
+            # 0.19.4: values=true returns live input values — refused while a
+            # vault secret is live (the sensitive-field heuristic is no guard).
+            await _secret_guard.refuse_secret_readback(_entry(d), "detect_forms values=true")
         # wait_for so a wedged renderer frees the session lock (mirrors extract_fields).
         if target:
             loc = _guarded_locator(d, s.page, target)

@@ -19,6 +19,7 @@ from .. import fspolicy
 from . import elements
 from . import freeze as _freeze
 from . import lease as _lease
+from . import secret_guard as _secret_guard
 from .paths import (
     CACHE_DIR, DEFAULT_SESSION_NAME, PROFILES_DIR, get_active_session_name,
     list_session_names, secure_mkdir, secure_write, session_dir,
@@ -230,6 +231,22 @@ _MASK_JS = """el => {
     // also makes the AX-snapshot redaction cover password fields.
     el.style.setProperty('-webkit-text-security', 'disc', 'important');
     el.setAttribute('data-vb-secret', '1');
+    // 0.19.4: no clipboard/drag route out either. `keys ctrl+a ctrl+c` on a
+    // text-type secret field, then a paste on another site, would read the
+    // value back without any read verb. Listeners added here (isolated world)
+    // still fire for page events; an empty clipboardData + preventDefault
+    // makes the copy write nothing.
+    if (!el.__vbSecretCopyGuard) {
+      el.__vbSecretCopyGuard = true;
+      const block = (e) => {
+        if (!el.getAttribute('data-vb-secret')) return;
+        try { if (e.clipboardData) e.clipboardData.setData('text/plain', ''); } catch (_) {}
+        e.preventDefault();
+      };
+      el.addEventListener('copy', block, true);
+      el.addEventListener('cut', block, true);
+      el.addEventListener('dragstart', block, true);
+    }
     return el.type === 'password' ? 'password' : 'masked';
   } catch (e) { return 'failed'; }
 }"""
@@ -316,26 +333,6 @@ async def _resolve_action_target(daemon, args):
 
 # ─── secret origin binding + field-swap guard (0.19.4) ───────────────────
 
-# Deep active element of the target's document (through open shadow roots),
-# classified relative to the target. 'frame' = focus sits on a nested browsing
-# context, i.e. inserted text would go INTO another document.
-_FOCUS_JS = """el => {
-  const doc = el.ownerDocument;
-  let a = doc && doc.activeElement;
-  while (a && a.shadowRoot && a.shadowRoot.activeElement) a = a.shadowRoot.activeElement;
-  if (!a || a === doc.body || a === doc.documentElement) return 'none';
-  if (a === el) return 'self';
-  const t = (a.tagName || '').toUpperCase();
-  if (t === 'IFRAME' || t === 'FRAME' || t === 'OBJECT' || t === 'EMBED') return 'frame';
-  return 'other';
-}"""
-
-_ACTIVE_ELEMENT_JS = """el => {
-  let a = el.ownerDocument && el.ownerDocument.activeElement;
-  while (a && a.shadowRoot && a.shadowRoot.activeElement) a = a.shadowRoot.activeElement;
-  return a;
-}"""
-
 # Best-effort scrub of a field we no longer trust: set the value directly AND
 # fire input/change so a controlled-input framework drops its copy too.
 _SCRUB_JS = """el => {
@@ -348,21 +345,52 @@ _SCRUB_JS = """el => {
   } catch (e) {}
 }"""
 
+# The secret write. Runs in Patchright's ISOLATED world (its evaluate default),
+# straight into the pinned node through the native prototype `value` setter —
+# no focus, no keyboard, so page script that moves focus mid-fill has nothing
+# to redirect. The setter is the isolated world's own, which page script can't
+# patch, and calling it bypasses any value tracker a framework installed on the
+# node in the main world (React's `_valueTracker`), so the `input` event that
+# follows is seen as a real change and controlled inputs pick the value up.
+# With `check` set it only reports whether the node is a supported target —
+# run before the secret is resolved, so an unsupported target (a <select>, a
+# checkbox, a contenteditable) is refused with nothing masked or written.
+_SECRET_WRITE_JS = """(el, {v, check}) => {
+  const TEXTLIKE = new Set(['', 'text', 'password', 'email', 'tel', 'url',
+                            'search', 'number']);
+  let proto = null;
+  if (el instanceof HTMLTextAreaElement) proto = HTMLTextAreaElement.prototype;
+  else if (el instanceof HTMLInputElement) {
+    const t = (el.getAttribute('type') || '').toLowerCase();
+    if (!TEXTLIKE.has(t)) return 'unsupported:input[type=' + t + ']';
+    proto = HTMLInputElement.prototype;
+  } else return 'unsupported:' + (el.tagName || '?').toLowerCase();
+  if (el.disabled) return 'disabled';
+  if (el.readOnly) return 'readonly';
+  const desc = Object.getOwnPropertyDescriptor(proto, 'value');
+  if (!desc || typeof desc.set !== 'function') return 'no-setter';
+  if (check) return 'ok';
+  desc.set.call(el, v);
+  el.dispatchEvent(new Event('input', {bubbles: true}));
+  el.dispatchEvent(new Event('change', {bubbles: true}));
+  return 'ok';
+}"""
+
 
 async def _frame_origin_url(frame) -> str | None:
-    """URL that determines `frame`'s origin. about:blank / about:srcdoc frames
-    inherit from their parent, so walk up to the first real URL. Uses the
-    browser's tracked frame URL (navigation events), not an in-page read — a
-    main-world script can shadow DOM getters like `ownerDocument`, but it
-    cannot rewrite this."""
-    hops = 0
-    while frame is not None and hops < 32:
-        url = frame.url or ""
-        if url and not url.startswith("about:"):
-            return url
-        frame = frame.parent_frame
-        hops += 1
-    return None
+    """URL that determines `frame`'s origin, from the browser's tracked frame
+    URL (navigation events), not an in-page read — a main-world script can
+    shadow DOM getters like `ownerDocument`, but it cannot rewrite this.
+
+    No inheritance: an about:blank / about:srcdoc document takes its origin
+    from whoever CREATED or last NAVIGATED it, which need not be its parent
+    (a hostile top page can navigate a grandchild of an allowed frame to
+    about:blank and write a field into it). That can't be recovered from the
+    frame tree, so such frames have no usable origin and secrets are never
+    written into them."""
+    if frame is None:
+        return None
+    return frame.url or None
 
 
 async def _element_origin_url(handle) -> str | None:
@@ -376,10 +404,41 @@ async def _scrub(target) -> None:
         await asyncio.wait_for(target.evaluate(_SCRUB_JS), timeout=3)
 
 
-async def _secret_swap_guard(loc, handle, pre_origin, origin_ok) -> str | None:
+def _opaque_frame_refusal(site: str, url: str | None) -> str:
+    return (f"refusing to fill a {site!r} secret: the field is in a frame with "
+            f"no verifiable origin ({url or 'no URL'!r}). about:blank / "
+            f"about:srcdoc frames inherit their origin from whichever document "
+            f"created or navigated them, so vibatchium never writes secrets "
+            f"into them — open the login page itself.")
+
+
+async def _ancestor_violation(frame, site: str, origin_ok) -> str | None:
+    """Every frame ABOVE the field's frame must also be an allowed origin for
+    the site. An allowed login page framed by another origin is the setup for
+    focus / overlay / navigation games by the framing page."""
+    parent = frame.parent_frame if frame is not None else None
+    hops = 0
+    while parent is not None and hops < 32:
+        url = parent.url or ""
+        if not origin_ok(url):
+            from .. import secrets as _secrets
+            o = _secrets.url_origin(url)
+            shown = _secrets.format_origin(o) if o else (url or "an opaque document")
+            return (f"refusing to fill a {site!r} secret: the field's frame is "
+                    f"embedded by {shown}, which is not an allowed origin for "
+                    f"{site!r}. Open the login page directly, or — if this "
+                    f"embedding is intended — list the embedding origin too: "
+                    f"`vb secret set {site} origins \"...\"`.")
+        parent = parent.parent_frame
+        hops += 1
+    if parent is not None:
+        return f"refusing to fill a {site!r} secret: frame nesting too deep to verify"
+    return None
+
+
+async def _secret_swap_guard(loc, handle, pre_origin) -> str | None:
     """After a secret write: None if the value provably landed in the node we
-    checked, else the reason it didn't. `origin_ok(url)` is the policy for a
-    nested document that ended up holding focus."""
+    checked, else the reason it didn't."""
     from .. import secrets as _secrets
     try:
         connected = await asyncio.wait_for(
@@ -408,30 +467,16 @@ async def _secret_swap_guard(loc, handle, pre_origin, origin_ok) -> str | None:
     post_url = await _element_origin_url(handle)
     if _secrets.url_origin(post_url) != pre_origin:
         return f"the target's document changed origin during fill ({post_url!r})"
-    # 3. Focus must not have been redirected into a nested browsing context of
-    #    a disallowed origin — fill inserts text into the FOCUSED element.
-    try:
-        where = await handle.evaluate(_FOCUS_JS)
-    except Exception:  # noqa: BLE001
-        return "could not verify focus after fill"
-    if where == "frame":
-        frame_url = None
-        try:
-            ae = (await handle.evaluate_handle(_ACTIVE_ELEMENT_JS)).as_element()
-            cf = await ae.content_frame() if ae is not None else None
-            frame_url = await _frame_origin_url(cf) if cf is not None else None
-        except Exception:  # noqa: BLE001
-            frame_url = None
-        if not frame_url or not origin_ok(frame_url):
-            return (f"focus was redirected into a nested frame during fill "
-                    f"({frame_url or 'unknown origin'})")
     return None
 
 
-async def _fill_secret(args, loc):
-    """`fill --use-secret`: pin node → origin check → resolve → mask → pinned
-    write → swap guard → re-mask. The why is in `_fill`'s docstring."""
+async def _fill_secret(args, loc, entry=None):
+    """`fill --use-secret`: pin node → origin check (field frame + every
+    ancestor) → caller-JS taint / fulfill-route check → target-type check →
+    resolve → mask → isolated-world write → swap guard → re-mask. The why is
+    in `_fill`'s docstring."""
     from .. import secrets as _secrets
+    from . import secret_guard as _guard
     ref = args["use_secret"]
     site, _key = _secrets.split_secret_reference(ref)
     timeout = int(args.get("timeout_ms", 30_000))
@@ -443,9 +488,14 @@ async def _fill_secret(args, loc):
     handle = await loc.element_handle(timeout=timeout)
     if handle is None:
         raise RuntimeError(f"fill target {args['target']!r} did not resolve")
+    keep_handle = False
     try:
-        origin_url = await _element_origin_url(handle)
+        frame = await handle.owner_frame()
+        origin_url = await _frame_origin_url(frame)
         pre_origin = _secrets.url_origin(origin_url)
+        if not origin_url or origin_url.startswith("about:"):
+            # Opaque even with the escape hatch: there is no origin to bypass TO.
+            raise _secrets.SecretOriginError(_opaque_frame_refusal(site, origin_url))
         if allow_cross:
             if pre_origin is None:
                 raise _secrets.SecretOriginError(
@@ -455,10 +505,9 @@ async def _fill_secret(args, loc):
             origin_check = "bypassed"
             log.warning("fill use_secret site=%s origin check BYPASSED "
                         "(allow_cross_origin, origin=%s)", site, shown)
-
-            def origin_ok(url):
-                return _secrets.url_origin(url) == pre_origin
         else:
+            # get_site_origins decrypts the vault to read the POLICY only; no
+            # secret value is resolved or written before these checks pass.
             origins = _secrets.get_site_origins(site)
             # Raises SecretOriginError — nothing has been resolved yet.
             shown = _secrets.check_secret_origin(origin_url, site, origins)
@@ -470,6 +519,28 @@ async def _fill_secret(args, loc):
                     return True
                 except _secrets.SecretOriginError:
                     return False
+
+            problem = await _ancestor_violation(frame, site, origin_ok)
+            if problem:
+                raise _secrets.SecretOriginError(problem)
+        page = frame.page
+        taint = await _guard.caller_js_violation(page, pre_origin, site)
+        if taint:
+            raise _guard.CallerJsTaintError(taint)
+        fulfill = _guard.fulfill_route_violation(
+            getattr(entry, "session", None), site)
+        if fulfill:
+            raise _guard.CallerJsTaintError(fulfill)
+        # Wait for the field to be fillable WITHOUT focusing it (the write
+        # below never uses focus or the keyboard).
+        await handle.wait_for_element_state("visible", timeout=timeout)
+        supported = await asyncio.wait_for(handle.evaluate(
+            _SECRET_WRITE_JS, {"v": None, "check": True}), timeout / 1000)
+        if supported not in ("ok", "disabled", "readonly"):
+            raise RuntimeError(
+                f"refusing to fill secret into {args['target']!r}: {supported} "
+                f"(secrets go into text-like <input> / <textarea> fields only)")
+        await handle.wait_for_element_state("editable", timeout=timeout)
 
         value = _secrets.resolve_secret_reference(ref)
         # 0.18.6: mask the EMPTY field FIRST, then write the value — so the
@@ -487,29 +558,35 @@ async def _fill_secret(args, loc):
             raise RuntimeError(
                 f"refusing to fill secret: render mask not applied "
                 f"({masked}); the value would be visible")
+        # From here on a value may be in the page: arm the read-back refusal
+        # BEFORE writing, so even a half-finished fill is covered.
+        if entry is not None:
+            entry.flags["secret_filled"] = True
+
         async def _scrub_all():
-            # The value may be in the pinned node, in whatever the locator now
-            # resolves to, or in whatever grabbed focus — clear all three.
+            # The value may be in the pinned node or in whatever the locator
+            # now resolves to — clear both.
             await _scrub(handle)
             with contextlib.suppress(Exception):
                 await _scrub(await loc.element_handle(timeout=1_000))
-            with contextlib.suppress(Exception):
-                await _scrub((await handle.evaluate_handle(
-                    _ACTIVE_ELEMENT_JS)).as_element())
 
         try:
-            await handle.fill(value, timeout=timeout)
+            res = await asyncio.wait_for(handle.evaluate(
+                _SECRET_WRITE_JS, {"v": value, "check": False}), timeout / 1000)
         except BaseException:
-            # A write that errored part-way may still have inserted text (e.g.
-            # node replaced on focus → text went to the replacement).
             await _scrub_all()
             raise
         finally:
             del value
+        if res != "ok":
+            await _scrub_all()
+            raise RuntimeError(
+                f"refusing to fill secret into {args['target']!r}: {res} "
+                f"(secrets go into text-like <input> / <textarea> fields only)")
         # 0.19.4 swap guard. This replaces the old "re-mask whatever the
         # locator resolves to now": a node replaced mid-fill is a refusal, not
         # something to re-cover — the value may have gone somewhere else.
-        problem = await _secret_swap_guard(loc, handle, pre_origin, origin_ok)
+        problem = await _secret_swap_guard(loc, handle, pre_origin)
         if problem:
             await _scrub_all()
             raise _secrets.SecretOriginError(
@@ -524,12 +601,16 @@ async def _fill_secret(args, loc):
             raise RuntimeError(
                 f"refusing to leave secret unmasked: render mask lost "
                 f"after fill ({recheck}); cleared the field")
+        # Track the node so read-back verbs are refused while it holds a value
+        # (works across frames and closed shadow roots, unlike a DOM sweep).
+        keep_handle = _guard.track_secret_field(page, handle)
         return {"filled": args["target"], "from_secret": ref,
                 "render_masked": recheck, "origin": shown,
                 "origin_check": origin_check}
     finally:
-        with contextlib.suppress(Exception):
-            await handle.dispose()
+        if not keep_handle:
+            with contextlib.suppress(Exception):
+                await handle.dispose()
 
 
 # ─── 0.14.0 agent-extract: structured extract + dump-mode shaping ─────────
@@ -2322,6 +2403,10 @@ def register_all(daemon) -> None:
                     f"({allow_csv})")
         wait_until = args.get("wait_until", "domcontentloaded")
         timeout = int(args.get("timeout_ms", 60_000))
+        if _secret_guard.is_javascript_url(url):
+            # 0.19.4: a javascript: URL runs its body in the CURRENT document's
+            # main world — it is `eval` under another verb. Same guard.
+            await _secret_guard.guard_caller_js(entry, "go javascript:", s.page)
         resp = await s.page.goto(url, wait_until=wait_until, timeout=timeout)
         # Wave 7.7.12: bounded SPA-hydration wait. `domcontentloaded` fires
         # before client-side render on heavy SPAs (Immunefi, HackerOne,
@@ -2642,6 +2727,10 @@ def register_all(daemon) -> None:
         # those are lease-gated. wait_for lets the handler raise, return, and
         # RELEASE the lock. Same guard `detect_forms` / `candidates` already use.
         timeout_ms = int(args.get("timeout_ms") or 30_000)
+        # 0.19.4: refused while a vault secret is live; marks the document so a
+        # later secret fill into it is refused (see secret_guard).
+        await _secret_guard.guard_caller_js(
+            d.registry.get(current_session_ctx.get()), "eval", s.page)
         # Patchright's isolated-context default is what we want for stealth.
         return {"value": await _asyncio.wait_for(s.page.evaluate(expr),
                                                  timeout_ms / 1000)}
@@ -2659,6 +2748,8 @@ def register_all(daemon) -> None:
         target = args.get("target") or args.get("selector")
         if not target:
             raise ValueError("value requires `target` (or legacy `selector`)")
+        await _secret_guard.refuse_secret_readback(
+            d.registry.get(current_session_ctx.get()), "value")
         loc = _resolve_target(d, target)
         return {"value": await loc.input_value()}
 
@@ -2935,19 +3026,30 @@ def register_all(daemon) -> None:
         the browser's own frame URL, which page script cannot rewrite. Default
         rule: https and the site's host or a subdomain of it; an `origins` key
         on the vault entry replaces that; loopback hosts may be plain http.
-        The check runs BEFORE the secret is resolved (TOTP included), and the
-        write goes through a handle pinned to the checked node, so a re-resolve
-        can't land it in another document. After the write the target must
-        still be that same, connected node in a document of the same origin,
-        with focus not moved into a foreign nested frame — otherwise the field
-        is cleared and the call fails. `allow_cross_origin` (CLI
-        `--allow-cross-origin`, or VIBATCHIUM_SECRET_ALLOW_CROSS_ORIGIN=1 in
-        the daemon's env) skips the origin rule but not the swap guard; the
-        MCP surface refuses it.
+        Every ANCESTOR frame must be an allowed origin too, and about:blank /
+        about:srcdoc frames (whose origin comes from their creator, not their
+        parent) are refused outright. A document the caller already ran JS in
+        (`eval`, `wait_fn`, `eval_handle`, `handle_eval`, `content`,
+        `go javascript:`, `fingerprint extract=`, a `route_add` fulfill
+        response) is refused until it is reloaded, and so is any fill while a
+        fulfill route rule is installed. Only text-like <input> / <textarea>
+        targets are accepted. All of that runs BEFORE the secret is resolved
+        (TOTP included). The write goes through a handle pinned to the checked
+        node, in the isolated world, via the native `value` setter plus
+        `input`/`change` events — never focus + keyboard, so page script can't
+        redirect it by moving focus. After the write the target must still be
+        that same, connected node in a document of the same origin — otherwise
+        the field is cleared and the call fails. While the field holds the
+        value, read-back verbs are refused (see secret_guard).
+        `allow_cross_origin` (CLI `--allow-cross-origin`, or
+        VIBATCHIUM_SECRET_ALLOW_CROSS_ORIGIN=1 in the daemon's env) skips the
+        origin rules but not the swap guard, the taint check or the opaque-frame
+        refusal; the MCP surface refuses it.
         """
         loc = await _resolve_action_target(d, args)
         if args.get("use_secret"):
-            return await _fill_secret(args, loc)
+            return await _fill_secret(args, loc,
+                                      d.registry.get(current_session_ctx.get()))
         await loc.fill(args["text"], timeout=int(args.get("timeout_ms", 30_000)))
         # Explicitly overwriting with caller-supplied plaintext clears a mask
         # left by an earlier secret fill — the caller knows this value.
@@ -3221,6 +3323,8 @@ def register_all(daemon) -> None:
         s = _need_session(d)
         expr = args["expr"]
         timeout = int(args.get("timeout_ms", 30_000))
+        await _secret_guard.guard_caller_js(
+            d.registry.get(current_session_ctx.get()), "wait_fn", s.page)
         await s.page.wait_for_function(expr, timeout=timeout)
         return {"satisfied": True}
 
