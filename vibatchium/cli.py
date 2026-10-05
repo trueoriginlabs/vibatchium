@@ -1934,18 +1934,31 @@ def click_cmd(ctx, target, timeout_ms, index, auto_dismiss_banners):
               help="Fill the Nth match (0-based, from `vb candidates`) when TARGET is ambiguous.")
 @click.option("--use-secret", "use_secret", default=None,
               help="Resolve value from vault: 'site:key' (or 'site:totp' for TOTP).")
+@click.option("--allow-cross-origin", "allow_cross_origin", is_flag=True,
+              help="With --use-secret: skip the origin check and write the secret "
+                   "into a page that is NOT on the secret's site. Operator-only "
+                   "(refused over MCP); prefer `vb secret set SITE origins ...`.")
 @click.pass_context
-def fill(ctx, target, text_arg, timeout_ms, index, use_secret):
+def fill(ctx, target, text_arg, timeout_ms, index, use_secret, allow_cross_origin):
     """Clear an input and fill it with text (React-input-safe via Locator.fill).
 
     With --use-secret site:key, value comes from the encrypted vault — never
-    appears in command line, response, or logs.
+    appears in command line, response, or logs. It is ORIGIN-BOUND: written
+    only into a document on that site (https, the site's host or a subdomain
+    of it, or one of the entry's `origins`; loopback may be http). Anything
+    else is refused before the secret is even resolved.
     """
     args = {"target": target, "timeout_ms": timeout_ms}
     if index is not None:
         args["index"] = index
+    if allow_cross_origin and not use_secret:
+        click.echo("error: --allow-cross-origin only applies with --use-secret",
+                   err=True)
+        sys.exit(2)
     if use_secret:
         args["use_secret"] = use_secret
+        if allow_cross_origin:
+            args["allow_cross_origin"] = True
     else:
         if not text_arg:
             click.echo("error: TEXT or --use-secret required", err=True)
@@ -2747,6 +2760,11 @@ def secret():
         vb secret set github.com totp-seed JBSWY3DPEHPK3PXP
         vb secret list
         vb fill @e7 --use-secret github.com:totp
+
+    `fill --use-secret` only writes into pages on the entry's site (https,
+    the site or a subdomain). If the login lives on another domain, list it:
+
+        vb secret set github.com origins "https://github.com,https://gist.github.com"
     """
 
 

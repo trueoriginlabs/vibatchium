@@ -372,6 +372,14 @@ def build_app(*, require_auth: bool = True, token: str | None = None,
         # verbs) pass through unchanged.
         cmd, mapper = _tool_dispatch.get(verb, (verb, None))
         call_args = mapper(body) if mapper else body
+        # 0.19.4: a caps-restricted shim serves untrusted clients — refuse the
+        # operator-only knobs that would defeat secret origin binding, same as
+        # MCP. (Unrestricted = local-code-equivalent by design; see above.)
+        if _allowed is not None:
+            from .secrets import agent_surface_violation
+            violation = agent_surface_violation(cmd, call_args)
+            if violation:
+                raise HTTPException(status_code=403, detail=violation)
         # Spawn daemon if not running (mirror MCP behavior)
         if not daemon_is_running():
             spawn_daemon()

@@ -498,6 +498,14 @@ threat model is "a credential must never reach the model, a screenshot, or a log
   confirmed), covers password fields so a show-password toggle can't unmask, and
   the accessibility snapshot returned by `map` / `diff_map` strips masked values so
   the secret can't leak into the model's context as text either.
+- **Secrets are origin-bound.** `fill --use-secret github.com:password` only writes
+  into a document on that site — https, `github.com` or a subdomain, judged by the
+  frame that owns the field (so an iframe can't borrow the top page's origin) —
+  or into the entry's explicit `origins` list. Anywhere else it refuses *before*
+  the secret is resolved, so a prompt-injected agent can't type your password
+  into a lookalike page and read it back. If the field is swapped or focus is
+  redirected mid-fill, it's cleared and the call fails. The escape hatch
+  (`--allow-cross-origin`) is shell-only; the MCP surface refuses it.
 - **Live-view is authenticated.** The WebSocket requires a per-server token and
   rejects foreign-`Origin` connections (the CSWSH class), and *driving* the page is
   a separate token from watch-only — a read-only link can be shared without handing

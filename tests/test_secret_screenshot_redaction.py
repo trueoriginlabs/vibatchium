@@ -44,21 +44,24 @@ def page(local_server):
 
 
 @pytest.fixture
-def vault():
+def vault(local_server):
     """Two same-length secrets in the REAL vault.
 
     The value is resolved inside the daemon process, so an in-test
     monkeypatch cannot reach it — the secrets have to genuinely exist. Unique
-    site name so a real vault is never stomped; removed on teardown.
+    site name so a real vault is never stomped; removed on teardown. 0.19.4:
+    fills are origin-bound, so the entry lists the local fixture server in its
+    `origins` (the site name itself matches no host).
     """
     import uuid
     site = f"redaction-test-{uuid.uuid4().hex[:8]}"
     call("secret_set", {"site": site, "key": "a", "value": "AAAAAAAAAAAA"})
     call("secret_set", {"site": site, "key": "b", "value": "BBBBBBBBBBBB"})
+    call("secret_set", {"site": site, "key": "origins", "value": local_server})
     try:
         yield site
     finally:
-        for k in ("a", "b"):
+        for k in ("a", "b", "origins"):
             try:
                 call("secret_delete", {"site": site, "key": k})
             except Exception:  # noqa: BLE001

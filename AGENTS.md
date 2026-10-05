@@ -331,6 +331,36 @@ screenshots — so `--use-secret` never round-trips a credential back through a
 tool response. `vb secret list` shows entries masked; `vb secret totp <site>`
 prints the current code.
 
+**Secrets are origin-bound (0.19.4).** `--use-secret site:key` (and
+`site:totp`) only writes into a document whose origin belongs to the site,
+judged by the frame that *owns the target field* — an iframe is its own origin,
+not the top page's:
+
+- default: `https://` and the site's host or any subdomain — `github.com`
+  allows `github.com` and `gist.github.com`, never `github.com.evil.com` or
+  `evilgithub.com`. A leading `www.` on the site name is dropped first.
+- explicit: an `origins` key on the entry **replaces** the default. Entries are
+  exact origins (`https://host[:port]`), wildcards (`https://*.host`, subdomains
+  only) or bare hosts:
+  ```bash
+  $VB secret set github.com origins "https://github.com,https://gist.github.com"
+  $VB secret set work-sso origins "https://login.microsoftonline.com"   # site name needn't be a host
+  ```
+- loopback (`localhost`, `*.localhost`, `127.0.0.0/8`, `::1`) may be plain
+  `http://`; nothing else may.
+
+A mismatch is refused **before** the secret is resolved, with an error naming
+the page's origin and the fix. The success response carries `origin` and
+`origin_check` (`site` | `origins` | `bypassed`). After the write, the field must
+still be the same connected node in a same-origin document and focus must not
+have moved into a foreign iframe — otherwise it's cleared and the call fails.
+
+Escape hatch, operator-only: `vb fill … --use-secret … --allow-cross-origin`, or
+`VIBATCHIUM_SECRET_ALLOW_CROSS_ORIGIN=1` in the daemon's env. Neither is
+reachable from an agent-only surface: MCP (and a `--caps`-restricted REST shim)
+refuses `allow_cross_origin` and refuses `secret_set … origins`, because an
+injected agent would simply pass them. Set `origins` from a shell.
+
 ## Untrusted content — prompt-injection safety
 
 Scraped page text can carry instructions aimed at *you*. Every session starts in
@@ -539,7 +569,8 @@ VIBATCHIUM_MAX_EPHEMERAL=2      # off-budget one-shot lane cap (0 disables explo
 VIBATCHIUM_SELF_HEAL=0          # disable Chrome crash auto-recovery (fail loudly)
 VIBATCHIUM_LEASE=<token>        # client-side lease token presented on every call
 VIBATCHIUM_LOG_VERBS=1          # per-verb DEBUG audit trail
-VIBATCHIUM_DEFAULT_SAFETY=wrap  # auto-flag prompt-injection in scraped content
+VIBATCHIUM_DEFAULT_SAFETY=wrap  # session-default injection safety mode (alias: VIBATCHIUM_SAFETY_MODE)
+VIBATCHIUM_SECRET_ALLOW_CROSS_ORIGIN=1  # daemon-wide: let `fill --use-secret` write off-site (dangerous; prefer `origins`)
 VIBATCHIUM_SECRETS_KEY=<b64-32> # vault key for headless/CI (else the OS keyring)
 VIBATCHIUM_SKILLS=1             # surface per-host skill notes on go/explore (opt-in)
 VIBATCHIUM_PLUGINS=0            # disable plugin discovery at daemon startup

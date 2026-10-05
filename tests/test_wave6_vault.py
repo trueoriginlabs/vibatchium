@@ -244,6 +244,8 @@ def test_fill_use_secret_resolves_from_vault(local_server):
     sentinel = "USE_SECRET_FILL_VALUE_99"
     try:
         call("secret_set", {"site": site, "key": "password", "value": sentinel})
+        # 0.19.4: fills are origin-bound — allow the local fixture server.
+        call("secret_set", {"site": site, "key": "origins", "value": local_server})
         call("go", {"url": f"{local_server}/simple.html"})
         res = call("fill", {"target": "#q",
                              "use_secret": f"{site}:password"})

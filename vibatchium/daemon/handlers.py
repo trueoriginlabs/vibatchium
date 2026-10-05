@@ -5,6 +5,7 @@ BrowserSession for most verbs; lifecycle verbs (start/attach/stop/status) are ex
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import contextlib
 import logging
@@ -311,6 +312,224 @@ async def _resolve_action_target(daemon, args):
             )
         loc = loc.nth(idx)
     return loc
+
+
+# ─── secret origin binding + field-swap guard (0.19.4) ───────────────────
+
+# Deep active element of the target's document (through open shadow roots),
+# classified relative to the target. 'frame' = focus sits on a nested browsing
+# context, i.e. inserted text would go INTO another document.
+_FOCUS_JS = """el => {
+  const doc = el.ownerDocument;
+  let a = doc && doc.activeElement;
+  while (a && a.shadowRoot && a.shadowRoot.activeElement) a = a.shadowRoot.activeElement;
+  if (!a || a === doc.body || a === doc.documentElement) return 'none';
+  if (a === el) return 'self';
+  const t = (a.tagName || '').toUpperCase();
+  if (t === 'IFRAME' || t === 'FRAME' || t === 'OBJECT' || t === 'EMBED') return 'frame';
+  return 'other';
+}"""
+
+_ACTIVE_ELEMENT_JS = """el => {
+  let a = el.ownerDocument && el.ownerDocument.activeElement;
+  while (a && a.shadowRoot && a.shadowRoot.activeElement) a = a.shadowRoot.activeElement;
+  return a;
+}"""
+
+# Best-effort scrub of a field we no longer trust: set the value directly AND
+# fire input/change so a controlled-input framework drops its copy too.
+_SCRUB_JS = """el => {
+  try {
+    if (el && 'value' in el && el.tagName !== 'IFRAME') {
+      el.value = '';
+      el.dispatchEvent(new Event('input', {bubbles: true}));
+      el.dispatchEvent(new Event('change', {bubbles: true}));
+    }
+  } catch (e) {}
+}"""
+
+
+async def _frame_origin_url(frame) -> str | None:
+    """URL that determines `frame`'s origin. about:blank / about:srcdoc frames
+    inherit from their parent, so walk up to the first real URL. Uses the
+    browser's tracked frame URL (navigation events), not an in-page read — a
+    main-world script can shadow DOM getters like `ownerDocument`, but it
+    cannot rewrite this."""
+    hops = 0
+    while frame is not None and hops < 32:
+        url = frame.url or ""
+        if url and not url.startswith("about:"):
+            return url
+        frame = frame.parent_frame
+        hops += 1
+    return None
+
+
+async def _element_origin_url(handle) -> str | None:
+    return await _frame_origin_url(await handle.owner_frame())
+
+
+async def _scrub(target) -> None:
+    if target is None:
+        return
+    with contextlib.suppress(Exception):
+        await asyncio.wait_for(target.evaluate(_SCRUB_JS), timeout=3)
+
+
+async def _secret_swap_guard(loc, handle, pre_origin, origin_ok) -> str | None:
+    """After a secret write: None if the value provably landed in the node we
+    checked, else the reason it didn't. `origin_ok(url)` is the policy for a
+    nested document that ended up holding focus."""
+    from .. import secrets as _secrets
+    try:
+        connected = await asyncio.wait_for(
+            handle.evaluate("el => el.isConnected"), timeout=5)
+    except Exception:  # noqa: BLE001
+        connected = False
+    if not connected:
+        return "the target element was detached or replaced during fill"
+    # 1. The locator must still resolve to the SAME node we masked + filled.
+    try:
+        now = await loc.element_handle(timeout=2_000)
+    except Exception:  # noqa: BLE001
+        now = None
+    if now is None:
+        return "the target no longer resolves after fill (field replaced)"
+    try:
+        same = await handle.evaluate("(a, b) => a === b", now)
+    except Exception:  # noqa: BLE001
+        same = False
+    finally:
+        with contextlib.suppress(Exception):
+            await now.dispose()
+    if not same:
+        return "the target resolves to a different element after fill (field swapped)"
+    # 2. Its document must still have the origin we checked.
+    post_url = await _element_origin_url(handle)
+    if _secrets.url_origin(post_url) != pre_origin:
+        return f"the target's document changed origin during fill ({post_url!r})"
+    # 3. Focus must not have been redirected into a nested browsing context of
+    #    a disallowed origin — fill inserts text into the FOCUSED element.
+    try:
+        where = await handle.evaluate(_FOCUS_JS)
+    except Exception:  # noqa: BLE001
+        return "could not verify focus after fill"
+    if where == "frame":
+        frame_url = None
+        try:
+            ae = (await handle.evaluate_handle(_ACTIVE_ELEMENT_JS)).as_element()
+            cf = await ae.content_frame() if ae is not None else None
+            frame_url = await _frame_origin_url(cf) if cf is not None else None
+        except Exception:  # noqa: BLE001
+            frame_url = None
+        if not frame_url or not origin_ok(frame_url):
+            return (f"focus was redirected into a nested frame during fill "
+                    f"({frame_url or 'unknown origin'})")
+    return None
+
+
+async def _fill_secret(args, loc):
+    """`fill --use-secret`: pin node → origin check → resolve → mask → pinned
+    write → swap guard → re-mask. The why is in `_fill`'s docstring."""
+    from .. import secrets as _secrets
+    ref = args["use_secret"]
+    site, _key = _secrets.split_secret_reference(ref)
+    timeout = int(args.get("timeout_ms", 30_000))
+    allow_cross = bool(args.get("allow_cross_origin")) \
+        or _secrets.cross_origin_env_enabled()
+
+    # Pin the node. Every later step acts on THIS element, so the origin check
+    # and the write can't be split by a re-resolve onto another document.
+    handle = await loc.element_handle(timeout=timeout)
+    if handle is None:
+        raise RuntimeError(f"fill target {args['target']!r} did not resolve")
+    try:
+        origin_url = await _element_origin_url(handle)
+        pre_origin = _secrets.url_origin(origin_url)
+        if allow_cross:
+            if pre_origin is None:
+                raise _secrets.SecretOriginError(
+                    f"refusing to fill a {site!r} secret: the target document "
+                    f"has no http(s) origin ({origin_url!r})")
+            shown = _secrets.format_origin(pre_origin)
+            origin_check = "bypassed"
+            log.warning("fill use_secret site=%s origin check BYPASSED "
+                        "(allow_cross_origin, origin=%s)", site, shown)
+
+            def origin_ok(url):
+                return _secrets.url_origin(url) == pre_origin
+        else:
+            origins = _secrets.get_site_origins(site)
+            # Raises SecretOriginError — nothing has been resolved yet.
+            shown = _secrets.check_secret_origin(origin_url, site, origins)
+            origin_check = "origins" if origins else "site"
+
+            def origin_ok(url):
+                try:
+                    _secrets.check_secret_origin(url, site, origins)
+                    return True
+                except _secrets.SecretOriginError:
+                    return False
+
+        value = _secrets.resolve_secret_reference(ref)
+        # 0.18.6: mask the EMPTY field FIRST, then write the value — so the
+        # secret renders as discs from its first paint. The old order
+        # (fill → mask, a separate CDP round-trip) left a window in which
+        # the plaintext was in the DOM and painted but not yet masked; the
+        # live-view frame loop (5fps, deliberately holds no per-session
+        # lock) or a concurrent screenshot could capture it. It also failed
+        # OPEN — a mask-eval error still returned success with the value
+        # left visible AND untagged (so the AX-snapshot redaction stopped
+        # covering it too). Now we fail CLOSED: no plaintext is written
+        # unless the mask is confirmed.
+        masked = await _mask_secret_render(handle)
+        if masked not in ("masked", "password"):
+            raise RuntimeError(
+                f"refusing to fill secret: render mask not applied "
+                f"({masked}); the value would be visible")
+        async def _scrub_all():
+            # The value may be in the pinned node, in whatever the locator now
+            # resolves to, or in whatever grabbed focus — clear all three.
+            await _scrub(handle)
+            with contextlib.suppress(Exception):
+                await _scrub(await loc.element_handle(timeout=1_000))
+            with contextlib.suppress(Exception):
+                await _scrub((await handle.evaluate_handle(
+                    _ACTIVE_ELEMENT_JS)).as_element())
+
+        try:
+            await handle.fill(value, timeout=timeout)
+        except BaseException:
+            # A write that errored part-way may still have inserted text (e.g.
+            # node replaced on focus → text went to the replacement).
+            await _scrub_all()
+            raise
+        finally:
+            del value
+        # 0.19.4 swap guard. This replaces the old "re-mask whatever the
+        # locator resolves to now": a node replaced mid-fill is a refusal, not
+        # something to re-cover — the value may have gone somewhere else.
+        problem = await _secret_swap_guard(loc, handle, pre_origin, origin_ok)
+        if problem:
+            await _scrub_all()
+            raise _secrets.SecretOriginError(
+                f"refusing to leave a {site!r} secret in place: {problem}; "
+                f"cleared the field")
+        # Re-assert the mask on the (verified same) node: a site script can
+        # strip the inline style during the write. If even that can't be
+        # confirmed, clear the field rather than leave a rendered secret.
+        recheck = await _mask_secret_render(handle)
+        if recheck not in ("masked", "password"):
+            await _scrub(handle)
+            raise RuntimeError(
+                f"refusing to leave secret unmasked: render mask lost "
+                f"after fill ({recheck}); cleared the field")
+        return {"filled": args["target"], "from_secret": ref,
+                "render_masked": recheck, "origin": shown,
+                "origin_check": origin_check}
+    finally:
+        with contextlib.suppress(Exception):
+            await handle.dispose()
 
 
 # ─── 0.14.0 agent-extract: structured extract + dump-mode shaping ─────────
@@ -913,6 +1132,10 @@ def register_all(daemon) -> None:
         value = args["value"]
         if not (site and key and value):
             raise ValueError("secret_set requires site, key, value")
+        if key == _secrets.ORIGINS_KEY:
+            # 0.19.4: validate the fill origin policy now, not at fill time
+            # (a malformed stored policy makes every fill for the site refuse).
+            _secrets.parse_origins(value)
         _secrets.set_secret(site, key, value)
         # NEVER include value in response
         return {"set": True, "site": site, "key": key}
@@ -2683,43 +2906,26 @@ def register_all(daemon) -> None:
 
         The DOM VALUE is untouched, so the form still submits correctly — only
         the rendering changes.
+
+        0.19.4: ORIGIN-BOUND. The value is only written into a document whose
+        origin belongs to the secret's site — the frame that OWNS the target
+        element (an iframe counts as itself, not as the top page), read from
+        the browser's own frame URL, which page script cannot rewrite. Default
+        rule: https and the site's host or a subdomain of it; an `origins` key
+        on the vault entry replaces that; loopback hosts may be plain http.
+        The check runs BEFORE the secret is resolved (TOTP included), and the
+        write goes through a handle pinned to the checked node, so a re-resolve
+        can't land it in another document. After the write the target must
+        still be that same, connected node in a document of the same origin,
+        with focus not moved into a foreign nested frame — otherwise the field
+        is cleared and the call fails. `allow_cross_origin` (CLI
+        `--allow-cross-origin`, or VIBATCHIUM_SECRET_ALLOW_CROSS_ORIGIN=1 in
+        the daemon's env) skips the origin rule but not the swap guard; the
+        MCP surface refuses it.
         """
         loc = await _resolve_action_target(d, args)
         if args.get("use_secret"):
-            from .. import secrets as _secrets
-            ref = args["use_secret"]
-            value = _secrets.resolve_secret_reference(ref)
-            timeout = int(args.get("timeout_ms", 30_000))
-            # 0.18.6: mask the EMPTY field FIRST, then write the value — so the
-            # secret renders as discs from its first paint. The old order
-            # (fill → mask, a separate CDP round-trip) left a window in which
-            # the plaintext was in the DOM and painted but not yet masked; the
-            # live-view frame loop (5fps, deliberately holds no per-session
-            # lock) or a concurrent screenshot could capture it. It also failed
-            # OPEN — a mask-eval error still returned success with the value
-            # left visible AND untagged (so the AX-snapshot redaction stopped
-            # covering it too). Now we fail CLOSED: no plaintext is written
-            # unless the mask is confirmed.
-            masked = await _mask_secret_render(loc)
-            if masked not in ("masked", "password"):
-                raise RuntimeError(
-                    f"refusing to fill secret: render mask not applied "
-                    f"({masked}); the value would be visible")
-            await loc.fill(value, timeout=timeout)
-            # Re-assert after the write: a framework (React/Vue controlled
-            # input) can replace the node during fill, dropping the pre-applied
-            # mask; re-running the mask re-covers the final node. If even that
-            # can't be confirmed, clear the field rather than leave a rendered
-            # secret behind.
-            recheck = await _mask_secret_render(loc)
-            if recheck not in ("masked", "password"):
-                with contextlib.suppress(Exception):
-                    await loc.fill("")
-                raise RuntimeError(
-                    f"refusing to leave secret unmasked: render mask lost "
-                    f"after fill ({recheck}); cleared the field")
-            return {"filled": args["target"], "from_secret": ref,
-                    "render_masked": recheck}
+            return await _fill_secret(args, loc)
         await loc.fill(args["text"], timeout=int(args.get("timeout_ms", 30_000)))
         # Explicitly overwriting with caller-supplied plaintext clears a mask
         # left by an earlier secret fill — the caller knows this value.

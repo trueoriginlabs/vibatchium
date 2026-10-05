@@ -295,11 +295,14 @@ TOOLS: list[tuple[str, str, dict, str, Any]] = [
                      "index": _int("Zero-based option index.")},
       "required": ["target"]},
      "select", None),
-    ("fill", "Clear an input and fill it with text. With use_secret, value comes from the encrypted vault.",
+    ("fill", "Clear an input and fill it with text. With use_secret, value comes from the "
+             "encrypted vault — and is only written into a page on the secret's own site "
+             "(https, same host or a subdomain, or the entry's `origins`); otherwise refused.",
      {"type": "object",
       "properties": {"target": _str("@eN ref or selector."),
                      "text": _str("Text to fill (or use use_secret)."),
-                     "use_secret": _str("Vault reference 'site:key' (or 'site:totp')."),
+                     "use_secret": _str("Vault reference 'site:key' (or 'site:totp'). Origin-bound: "
+                                        "the target must be on that site."),
                      "index": _int("Fill the Nth match (0-based, from `candidates`) when the target is ambiguous."),
                      "timeout_ms": _int("Timeout in ms.", 30_000)},
       "required": ["target"]},
@@ -1462,6 +1465,15 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.Content]
     else:
         _name, _desc, _schema, cmd, mapper = entry
     args = mapper(arguments) if mapper else dict(arguments or {})
+
+    # 0.19.4: operator-only knobs are refused here, not just left out of the
+    # schema — the arguments dict is forwarded verbatim, so an injected agent
+    # could pass `allow_cross_origin` (or rewrite a vault entry's `origins`)
+    # and defeat secret origin binding. The CLI still accepts them.
+    from .secrets import agent_surface_violation
+    violation = agent_surface_violation(cmd, args)
+    if violation:
+        return _err(violation)
 
     args = _apply_mcp_start_posture(cmd, args)
 

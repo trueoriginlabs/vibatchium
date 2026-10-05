@@ -227,14 +227,12 @@ def _within_profiles_dir(path: Path) -> bool:
 
 
 def _default_safety_mode() -> str:
-    """Wave 7.7.1: default safety mode for new sessions. Reads VIBATCHIUM_DEFAULT_SAFETY
-    (off | flag-only | wrap | redact). Defaults to `flag-only` — every scraped
-    content field gets risk metadata, no content mutation, ~1ms overhead. To
-    silence entirely set VIBATCHIUM_DEFAULT_SAFETY=off."""
-    val = os.environ.get("VIBATCHIUM_DEFAULT_SAFETY", "flag-only").lower()
-    if val in ("off", "flag-only", "wrap", "redact"):
-        return val
-    return "flag-only"
+    """Wave 7.7.1: default safety mode for new sessions (off | flag-only | wrap |
+    redact), default `flag-only`. 0.19.4: delegates to `safety.default_mode()`
+    so new sessions and mode-less sessions read the SAME env var
+    (VIBATCHIUM_DEFAULT_SAFETY, alias VIBATCHIUM_SAFETY_MODE)."""
+    from .. import safety as _safety
+    return _safety.default_mode()
 
 
 def get_warm_mode() -> str:

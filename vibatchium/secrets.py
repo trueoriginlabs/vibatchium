@@ -22,7 +22,8 @@ A single encrypted blob at `~/.config/vibatchium/secrets.enc`:
       "username": "alice",
       "password": "hunter2",
       "totp-seed": "JBSWY3DPEHPK3PXP",
-      "email-poll": "imap://user:pass@imap.gmail.com:993?regex=\\d{6}"
+      "email-poll": "imap://user:pass@imap.gmail.com:993?regex=\\d{6}",
+      "origins": "https://github.com,https://gist.github.com"
     }
   }
 }
@@ -34,6 +35,9 @@ A single encrypted blob at `~/.config/vibatchium/secrets.enc`:
 - `secret list` returns MASKED values (`<set>` instead of the value).
 - Logs only mention site names + key names, never values.
 - The CI grep-for-leakage test in `test_wave6_vault.py` enforces this.
+
+`origins` is optional: it replaces the default rule for where `fill
+--use-secret` may write this entry's values (see "origin binding" below).
 
 ### TOTP
 
@@ -465,14 +469,28 @@ def wait_for_email_code(cfg: EmailPollConfig, *, timeout: int = 60,
     return None
 
 
+def split_secret_reference(ref: str) -> tuple[str, str]:
+    """Parse a 'site:key' reference WITHOUT touching the vault. The site is
+    everything before the FIRST colon, so a site can never carry a port or a
+    scheme — it is a bare host name."""
+    if not isinstance(ref, str) or ":" not in ref:
+        raise ValueError(f"invalid secret reference {ref!r}; expected site:key")
+    site, key = ref.split(":", 1)
+    if not site or not key:
+        raise ValueError(f"invalid secret reference {ref!r}; expected site:key")
+    return site, key
+
+
 def resolve_secret_reference(ref: str) -> str:
     """Resolve a 'site:key' reference (e.g. 'github.com:totp') to a value.
 
     Special case: 'site:totp' generates a TOTP from the stored 'totp-seed'.
+
+    Callers that WRITE the value into a page must run `check_secret_origin`
+    first (the `fill` handler does) — this function has no idea where the value
+    is going.
     """
-    if ":" not in ref:
-        raise ValueError(f"invalid secret reference {ref!r}; expected site:key")
-    site, key = ref.split(":", 1)
+    site, key = split_secret_reference(ref)
     if key == "totp":
         seed = get_secret(site, "totp-seed")
         if not seed:
@@ -482,3 +500,269 @@ def resolve_secret_reference(ref: str) -> str:
     if val is None:
         raise KeyError(f"no secret {key!r} for site {site!r}")
     return val
+
+
+# ─── origin binding for `fill --use-secret` (0.19.4) ───────────────────
+#
+# A vault entry is keyed by a site name, and `fill --use-secret site:key` used
+# to write the value into whatever element was targeted on whatever page was
+# open. A prompt-injected agent could therefore `fill @e3 --use-secret
+# github.com:password` on evil.com and read the field back. The value is now
+# only written into a document whose origin belongs to the site:
+#
+#   * default — the frame's host is the site or a subdomain of it ("github.com"
+#     allows github.com and *.github.com; never github.com.evil.com or
+#     evilgithub.com). A leading "www." on the site is dropped first, so
+#     "www.example.com" also allows login.example.com.
+#   * explicit — an `origins` key on the entry REPLACES the default:
+#       vb secret set github.com origins "https://github.com,https://gist.github.com"
+#     Entries: "https://host[:port]" (exact origin), "https://*.host" (any
+#     subdomain, not the apex), or a bare "host" (the default host rule).
+#   * always — https only, except loopback hosts (localhost, *.localhost,
+#     127.0.0.0/8, ::1) which may be plain http, for local dev and tests.
+#
+# No public-suffix list: a site named after a suffix ("co.uk") would match
+# every host under it. Site names are chosen by the operator, not the page, and
+# a single-label site ("intranet", "com") matches only itself exactly.
+
+ORIGINS_KEY = "origins"
+ALLOW_CROSS_ORIGIN_ENV = "VIBATCHIUM_SECRET_ALLOW_CROSS_ORIGIN"
+
+# Args that only an operator may set. The MCP server (and a caps-restricted
+# REST shim) refuse them, because an injected agent on those surfaces would
+# simply pass them. The daemon itself accepts them from the CLI / SDK, which
+# already run as the user with direct access to the vault.
+OPERATOR_ONLY_ARGS: dict[str, tuple[str, ...]] = {
+    "fill": ("allow_cross_origin",),
+}
+
+_DEFAULT_PORTS = {"https": 443, "http": 80}
+
+
+class SecretOriginError(PermissionError):
+    """The target document's origin is not one the secret's site allows."""
+
+
+def normalize_host(host: str | None) -> str | None:
+    """Lower-case, strip a trailing dot / IPv6 brackets, and IDNA-encode a host
+    so `Bücher.DE.` and `xn--bcher-kva.de` compare equal. None if unusable."""
+    if not host or not isinstance(host, str):
+        return None
+    h = host.strip().rstrip(".").strip("[]").lower()
+    if not h:
+        return None
+    if any(c in h for c in "/\\@:?#% ") and not _is_ip(h):
+        return None
+    if h.isascii():
+        return h
+    try:
+        return h.encode("idna").decode("ascii").lower()
+    except UnicodeError:
+        return None
+
+
+def _is_ip(host: str) -> bool:
+    import ipaddress
+    try:
+        ipaddress.ip_address(host)
+        return True
+    except ValueError:
+        return False
+
+
+def is_loopback_host(host: str | None) -> bool:
+    import ipaddress
+    h = normalize_host(host)
+    if not h:
+        return False
+    if h == "localhost" or h.endswith(".localhost"):
+        return True
+    try:
+        return ipaddress.ip_address(h).is_loopback
+    except ValueError:
+        return False
+
+
+def host_matches_site(host: str | None, site: str | None) -> bool:
+    """True when `host` is `site` or a subdomain of it. Label-boundary aware
+    (no `evilgithub.com`, no `github.com.evil.com`); IPs and single-label sites
+    match exactly only."""
+    h, s = normalize_host(host), normalize_host(site)
+    if not h or not s:
+        return False
+    if h == s:
+        return True
+    if _is_ip(h) or _is_ip(s):
+        return False
+    if s.startswith("www.") and "." in s[4:]:
+        s = s[4:]
+        if h == s:
+            return True
+    if "." not in s:
+        return False
+    return h.endswith("." + s)
+
+
+def url_origin(url: str | None) -> tuple[str, str, int] | None:
+    """(scheme, normalized host, effective port) for an http(s) URL, else None.
+    A `blob:` URL takes its creator's origin; about:/data:/file: are opaque."""
+    from urllib.parse import urlsplit
+    if not url or not isinstance(url, str):
+        return None
+    if url.startswith("blob:"):
+        url = url[5:]
+    try:
+        p = urlsplit(url.strip())
+        scheme = (p.scheme or "").lower()
+        port = p.port
+    except ValueError:
+        return None
+    if scheme not in _DEFAULT_PORTS:
+        return None
+    host = normalize_host(p.hostname)
+    if not host:
+        return None
+    return scheme, host, port or _DEFAULT_PORTS[scheme]
+
+
+def format_origin(origin: tuple[str, str, int]) -> str:
+    scheme, host, port = origin
+    shown = f"[{host}]" if ":" in host else host
+    if port == _DEFAULT_PORTS.get(scheme):
+        return f"{scheme}://{shown}"
+    return f"{scheme}://{shown}:{port}"
+
+
+def parse_origins(value) -> list[str]:
+    """Split a stored `origins` value (comma/whitespace-separated string, or a
+    list) into entries, validating each. Raises ValueError on a bad entry so a
+    typo is caught at `secret set` time, not at fill time."""
+    if value is None:
+        return []
+    items = value if isinstance(value, (list, tuple)) else \
+        str(value).replace(",", " ").split()
+    out: list[str] = []
+    for raw in items:
+        entry = str(raw).strip().rstrip("/")
+        if not entry:
+            continue
+        if "://" in entry:
+            scheme, _, rest = entry.partition("://")
+            if scheme.lower() not in _DEFAULT_PORTS:
+                raise ValueError(f"origins entry {raw!r}: scheme must be https "
+                                 f"(or http for a loopback host)")
+            if "/" in rest:
+                raise ValueError(f"origins entry {raw!r}: an origin has no path")
+            wildcard = rest.startswith("*.")
+            probe = f"{scheme}://{rest[2:] if wildcard else rest}"
+            o = url_origin(probe)
+            if o is None:
+                raise ValueError(f"origins entry {raw!r} is not a valid origin")
+            if o[0] == "http" and not is_loopback_host(o[1]):
+                raise ValueError(f"origins entry {raw!r}: plain http is only "
+                                 f"allowed for loopback hosts")
+        else:
+            if normalize_host(entry.removeprefix("*.")) is None:
+                raise ValueError(f"origins entry {raw!r} is not a valid host")
+        out.append(entry)
+    return out
+
+
+def _entry_allows(entry: str, origin: tuple[str, str, int]) -> bool:
+    scheme, host, port = origin
+    if "://" not in entry:
+        # Bare host: the default host-or-subdomain rule (scheme rule applied by
+        # the caller, port ignored — same as a site name).
+        if entry.startswith("*."):
+            base = normalize_host(entry[2:])
+            return bool(base) and host != base and host_matches_site(host, base)
+        return host_matches_site(host, entry)
+    e_scheme, _, rest = entry.partition("://")
+    if e_scheme.lower() != scheme:
+        return False
+    if rest.startswith("*."):
+        o = url_origin(f"{e_scheme}://{rest[2:]}")
+        if o is None or o[2] != port or host == o[1] or _is_ip(host):
+            return False
+        return host.endswith("." + o[1])
+    return url_origin(f"{e_scheme}://{rest}") == origin
+
+
+def check_secret_origin(url: str | None, site: str,
+                        origins=None) -> str:
+    """Raise SecretOriginError unless a secret for `site` may be written into a
+    document at `url`. Returns the serialized origin on success.
+
+    `origins` is the entry's stored `origins` value (string or list); when
+    non-empty it REPLACES the default site-name rule. Pure function — no vault
+    access — so it is unit-testable and runs before anything is decrypted.
+    """
+    origin = url_origin(url)
+    if origin is None:
+        raise SecretOriginError(
+            f"refusing to fill a {site!r} secret: the target document has no "
+            f"http(s) origin ({url!r})")
+    scheme, host, _port = origin
+    shown = format_origin(origin)
+    if scheme != "https" and not is_loopback_host(host):
+        raise SecretOriginError(
+            f"refusing to fill a {site!r} secret into {shown}: plain http is "
+            f"only allowed for loopback hosts")
+    entries = parse_origins(origins)
+    if entries:
+        if any(_entry_allows(e, origin) for e in entries):
+            return shown
+        raise SecretOriginError(
+            f"refusing to fill a {site!r} secret into {shown}: not in the "
+            f"entry's origins ({', '.join(entries)}). Add it with "
+            f"`vb secret set {site} origins \"...\"` if this is intended.")
+    if host_matches_site(host, site):
+        return shown
+    raise SecretOriginError(
+        f"refusing to fill a {site!r} secret into {shown}: the page is not "
+        f"{site} or a subdomain of it. If this site legitimately uses another "
+        f"domain, list it with `vb secret set {site} origins \"https://...\"`.")
+
+
+def get_site_origins(site: str) -> list[str]:
+    """The entry's explicit `origins` policy (possibly empty). Decrypts the
+    vault to read it but returns ONLY the policy — no secret value is resolved
+    here. A missing vault / site yields [] (the default rule then applies, and
+    the later resolve reports the missing secret)."""
+    if not VAULT_PATH.exists():
+        return []
+    entry = load_vault().get("sites", {}).get(site) or {}
+    try:
+        return parse_origins(entry.get(ORIGINS_KEY))
+    except ValueError as exc:
+        # A malformed stored policy must fail CLOSED, not fall back to the
+        # (possibly broader) default rule.
+        raise SecretOriginError(
+            f"refusing to fill a {site!r} secret: its stored origins policy is "
+            f"invalid ({exc})") from exc
+
+
+def cross_origin_env_enabled() -> bool:
+    return (os.environ.get(ALLOW_CROSS_ORIGIN_ENV) or "").strip().lower() \
+        in ("1", "true", "yes", "on")
+
+
+def agent_surface_violation(cmd: str, args: dict | None) -> str | None:
+    """For agent-facing surfaces (MCP, caps-restricted REST): return an error
+    message if the call tries to set an operator-only knob, else None.
+
+    Two knobs would let an injected agent defeat origin binding: the fill
+    escape hatch, and rewriting an entry's `origins` policy to its own host.
+    """
+    args = args or {}
+    for name in OPERATOR_ONLY_ARGS.get(cmd, ()):
+        if args.get(name):
+            return (f"{name!r} is operator-only and is not accepted on this "
+                    f"surface — use `vb {cmd} --allow-cross-origin` from a shell "
+                    f"or set {ALLOW_CROSS_ORIGIN_ENV}=1 on the daemon")
+    if cmd == "secret_set" and \
+            str(args.get("key") or "").strip().lower() == ORIGINS_KEY:
+        return ("the 'origins' policy of a vault entry cannot be changed on "
+                "this surface — run `vb secret set <site> origins ...` from a "
+                "shell")
+    return None

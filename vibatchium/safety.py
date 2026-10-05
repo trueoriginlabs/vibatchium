@@ -43,17 +43,29 @@ import re
 #
 # Cost is a regex pass over content-bearing fields — measured ~70 ms on a
 # 114k-char text response and ~125 ms on a 186k-char html one, far less on
-# ordinary pages. Set VIBATCHIUM_SAFETY_MODE=off to restore zero overhead.
+# ordinary pages. Set VIBATCHIUM_DEFAULT_SAFETY=off (in the DAEMON's env) to
+# restore zero overhead.
 DEFAULT_MODE = "flag-only"
+MODES = ("off", "flag-only", "wrap", "redact")
+
+# 0.19.4: ONE env var decides the session default. It used to be two: the
+# registry seeded new sessions from VIBATCHIUM_DEFAULT_SAFETY (the documented
+# name) while this function — the fallback for sessions with no stored mode —
+# read VIBATCHIUM_SAFETY_MODE, and the comment above told users to set the
+# latter, which never reached a new session. VIBATCHIUM_SAFETY_MODE is still
+# accepted as an alias; the documented name wins when both are set.
+ENV_DEFAULT_SAFETY = "VIBATCHIUM_DEFAULT_SAFETY"
+ENV_DEFAULT_SAFETY_ALIAS = "VIBATCHIUM_SAFETY_MODE"
 
 
 def default_mode() -> str:
-    """Session-default safety mode, overridable by env. Unknown values fall
-    back rather than raising — a typo in a shell profile must not break every
-    response on the daemon."""
-    mode = (os.environ.get("VIBATCHIUM_SAFETY_MODE") or "").strip().lower()
-    if mode in ("off", "flag-only", "wrap", "redact"):
-        return mode
+    """Session-default safety mode, overridable by env (VIBATCHIUM_DEFAULT_SAFETY,
+    alias VIBATCHIUM_SAFETY_MODE). Unknown values fall back rather than raising
+    — a typo in a shell profile must not break every response on the daemon."""
+    for var in (ENV_DEFAULT_SAFETY, ENV_DEFAULT_SAFETY_ALIAS):
+        mode = (os.environ.get(var) or "").strip().lower()
+        if mode in MODES:
+            return mode
     return DEFAULT_MODE
 
 # Verb → list of response-dict keys whose values are content worth scanning
