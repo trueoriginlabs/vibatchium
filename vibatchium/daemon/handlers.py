@@ -14,6 +14,7 @@ import sys
 import time
 from pathlib import Path
 
+from .. import fspolicy
 from . import elements
 from . import freeze as _freeze
 from . import lease as _lease
@@ -553,6 +554,12 @@ def register_all(daemon) -> None:
         raw = args.get("profile")
         if raw:
             p = Path(raw)
+            # A caller-chosen user-data-dir is a write target (and, pointed at
+            # ~/.config/google-chrome, a handover of the user's real logins).
+            # Dirs under PROFILES_DIR are ours and pass; `../` escapes don't.
+            fspolicy.check_profile_dir(
+                p if p.is_absolute() else PROFILES_DIR / raw,
+                managed_root=PROFILES_DIR)
             if p.is_absolute():
                 profile_dir = p
             else:
@@ -984,7 +991,7 @@ def register_all(daemon) -> None:
         url = args.get("url")
         path = args.get("path")
         if path:
-            url = load_proxy_file(path)
+            url = load_proxy_file(fspolicy.check_read(path, verb="proxy_set"))
         if not url:
             raise ValueError("proxy_set requires url= or path=")
         # Validate before persisting (raises ProxyParseError on bad URL)
@@ -2428,6 +2435,13 @@ def register_all(daemon) -> None:
         full_page = bool(args.get("full_page", False)) or tiles
         path = args.get("path")
         tile_height = int(args.get("tile_height", 1024))
+        # Confine caller-chosen outputs BEFORE the (expensive) capture.
+        # tile_dir wins over path for tiles, exactly as the write below does.
+        real_path = real_tile_dir = None
+        if tiles and args.get("tile_dir"):
+            real_tile_dir = fspolicy.check_write(args["tile_dir"], verb="screenshot")
+        elif path:
+            real_path = fspolicy.check_write(path, verb="screenshot")
 
         # ── tile-count cap (0.10.0): explicit max_tiles is the caller's opt-in;
         # absent one, default VIBATCHIUM_MAX_TILES (60). ──────────────────────
@@ -2528,10 +2542,10 @@ def register_all(daemon) -> None:
                 total = count_tiles(png, tile_height=tile_height)
             parts = tile_png(png, tile_height=tile_height, max_tiles=max_tiles)
             del png  # free the full-page bytes before the write loop
-            if args.get("tile_dir"):
-                base = Path(args["tile_dir"]).expanduser().resolve()
-            elif path:
-                base = Path(path).expanduser().resolve().parent
+            if real_tile_dir:
+                base = Path(real_tile_dir)
+            elif real_path:
+                base = Path(real_path).parent
             else:
                 base = CACHE_DIR / "screenshots"
             secure_mkdir(base)
@@ -2554,7 +2568,7 @@ def register_all(daemon) -> None:
         if path:
             # Always secure-write — page captures may include authenticated
             # sessions (banking, dashboards) and must not leak via umask.
-            secure_write(Path(path), png)
+            secure_write(Path(real_path), png)
             return _with_height_signal({"path": path})
         return _with_height_signal({"png_b64": base64.b64encode(png).decode()})
 
@@ -2832,7 +2846,8 @@ def register_all(daemon) -> None:
         s = _need_session(d)
         path = args.get("path")
         if path:
-            await s.context.storage_state(path=path)
+            real = fspolicy.check_write(path, verb="storage_export")
+            await s.context.storage_state(path=real)
             return {"path": path}
         state = await s.context.storage_state()
         return {"state": state}
@@ -2854,7 +2869,8 @@ def register_all(daemon) -> None:
         import json as _json
         path = args.get("path")
         if path:
-            state = _json.loads(Path(path).read_text())
+            real = fspolicy.check_read(path, verb="storage_restore")
+            state = _json.loads(Path(real).read_text())
         else:
             state = args.get("state") or {}
 

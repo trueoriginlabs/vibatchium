@@ -503,6 +503,32 @@ for one-shot work — the call moves onto the `MAX_SESSIONS` budget and leaves a
 behind — so only pin when you need the page to survive the call. Worst-case live
 Chromes = `MAX_SESSIONS + MAX_EPHEMERAL` (+ any warms).
 
+## File access — caller paths are confined
+
+Every path you hand the daemon — `upload` files, `pdf` / `screenshot --path` /
+`--tile-dir` / `download save` / `record stop` / `har start` / `network dump` /
+`console dump` / `storage export` / `screenshot --annotate` outputs, the
+`storage restore` / `proxy set --path` / `skill import` inputs, and
+`start --profile <abs-dir>` — is checked in the daemon (so CLI, MCP, REST and
+SDK all get it) after `~` expansion and **symlink resolution**:
+
+- **Always refused:** `~/.ssh`, `~/.gnupg`, `~/.aws`, `~/.config/gcloud`,
+  `~/.kube`, `~/.docker/config.json`, `~/.netrc`, `~/.pgpass`,
+  `~/.git-credentials`, `~/.config/vibatchium` (vault + profiles), real-browser
+  profiles (`~/.config/google-chrome`, `~/.mozilla`, …), keyrings, `/proc`,
+  `/sys`, `/dev`, `/etc/shadow`, `/etc/sudoers*`. Writes are also refused for
+  shell rc files, `~/.config/autostart`, `~/.config/systemd`, `~/.local/bin`,
+  agent configs (`~/.claude`, …), cron spools and system dirs. Not overridable.
+- **Opt-in strict mode:** `VIBATCHIUM_FILE_ROOTS=/tmp/vb:/home/me/Downloads`
+  (`os.pathsep`-separated, set in the **daemon's** env) confines every caller
+  path to those roots; the deny list still wins inside them.
+
+A refusal is `FileAccessDenied: file access denied: <verb> <read|write> of …`
+naming the protected location — not a bug; pick a normal working path. Relative
+paths resolve against the daemon's cwd over MCP/REST (the CLI absolutizes
+against yours). vibatchium's own default outputs (screenshots cache, explore
+output, checkpoints) aren't caller paths and are never checked.
+
 ## Env overrides
 
 ```bash
@@ -525,6 +551,7 @@ VIBATCHIUM_DISK_CACHE_MB=256    # per-session Chrome disk-cache ceiling (0 = let
 VIBATCHIUM_LOG_FILE=<path>      # full daemon-log path (default: a persistent state dir, see below)
 VIBATCHIUM_LOG_MAX_BYTES=10485760 # rotate the daemon log past this size (0 = never rotate)
 VIBATCHIUM_LOG_BACKUPS=5        # how many rotated daemon-log backups to keep
+VIBATCHIUM_FILE_ROOTS=<a>:<b>   # strict mode: caller-supplied paths must resolve inside these roots (see "File access")
 ```
 
 > **The daemon log is persistent (0.9.2).** It lives at

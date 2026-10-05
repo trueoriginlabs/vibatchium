@@ -16,6 +16,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from .. import fspolicy
 from . import match, safety, store
 
 log = logging.getLogger("vibatchium.skills")
@@ -82,6 +83,7 @@ def _import_from_dir(src: Path) -> dict:
     skipped: list[dict] = []
     if not src.is_dir():
         raise FileNotFoundError(f"import source not found: {src}")
+    src_real = os.path.realpath(src)
     for host_dir in sorted(p for p in src.iterdir() if p.is_dir()):
         host = host_dir.name
         try:
@@ -90,7 +92,14 @@ def _import_from_dir(src: Path) -> dict:
             skipped.append({"host": host, "reason": "invalid host name"})
             continue
         for note in sorted(host_dir.glob("*.md")):
-            body = note.read_text(encoding="utf-8", errors="replace")
+            # A symlinked note (or host dir) must not reach outside the import
+            # source — a cloned repo can carry `x.md -> ~/.ssh/id_ed25519`.
+            note_real = os.path.realpath(note)
+            if not note_real.startswith(src_real + os.sep):
+                skipped.append({"host": host, "file": note.name,
+                                "reason": "symlink escapes the import source"})
+                continue
+            body = Path(note_real).read_text(encoding="utf-8", errors="replace")
             sec = safety.scan_secrets(body)
             if sec["has_secret"]:
                 skipped.append({"host": host, "file": note.name,
@@ -114,7 +123,9 @@ def _import_from_git(spec: str) -> dict:
     tmp = Path(tempfile.mkdtemp(prefix="vibatchium-skill-import-"))
     try:
         rc = subprocess.call(
-            ["git", "clone", "--depth", "1", raw, str(tmp / "repo")],
+            # `--` so a source like `git+--upload-pack=<cmd>` is a (bad) URL,
+            # never a git option.
+            ["git", "clone", "--depth", "1", "--", raw, str(tmp / "repo")],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
         if rc != 0:
@@ -198,7 +209,7 @@ def register_skill_verbs(daemon) -> None:
             raise ValueError("skill_import requires `source` (git+url or path)")
         if source.startswith("git+") or source.startswith(("http://", "https://", "git@")):
             return _import_from_git(source)
-        return _import_from_dir(Path(source).expanduser())
+        return _import_from_dir(Path(fspolicy.check_read(source, verb="skill_import")))
 
     for v in ("skill_list", "skill_show", "skill_write", "skill_rm", "skill_import"):
         daemon._verb_lock_class[v] = "unlocked"

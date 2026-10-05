@@ -17,6 +17,7 @@ from io import BytesIO
 from pathlib import Path
 
 from . import elements, observe as _observe_mod
+from .. import fspolicy
 
 log = logging.getLogger("vibatchium.handlers_extra")
 
@@ -340,14 +341,19 @@ def register_extra(daemon) -> None:
 
     @daemon.handler("upload")
     async def _upload(d, args):
-        """Set files on an input[type=file] element."""
+        """Set files on an input[type=file] element.
+
+        Every path is confined by fspolicy BEFORE the page is touched: an
+        upload is the one verb that moves local bytes to a remote site, so a
+        prompt-injected `upload ~/.ssh/id_ed25519` must die here."""
         target = args["target"]
         files = args["files"]
         if isinstance(files, str):
             files = [files]
+        resolved = fspolicy.check_upload(files)
         surf = _surface(d)
         loc = elements.resolve_target(surf, getattr(d, "_snapshot", None), target)
-        await loc.set_input_files(files)
+        await loc.set_input_files(resolved)
         return {"uploaded": files, "to": target}
 
     # ─── dialogs ──────────────────────────────────────────────────────────
@@ -442,20 +448,22 @@ def register_extra(daemon) -> None:
 
     @daemon.handler("download_save")
     async def _download_save(d, args):
+        path = args["path"]
+        real = fspolicy.check_write(path, verb="download_save")
         s = _session(d)
         i = int(args["index"])
-        path = args["path"]
         entry = s.downloads[i]
-        await entry["download"].save_as(path)
+        await entry["download"].save_as(real)
         return {"saved": path, "from_url": entry["url"]}
 
     # ─── pdf ──────────────────────────────────────────────────────────────
 
     @daemon.handler("pdf")
     async def _pdf(d, args):
-        s = _session(d)
         path = args["path"]
-        await s.page.pdf(path=path, format=args.get("format", "Letter"))
+        real = fspolicy.check_write(path, verb="pdf")
+        s = _session(d)
+        await s.page.pdf(path=real, format=args.get("format", "Letter"))
         return {"path": path}
 
     # ─── tracing (record) ─────────────────────────────────────────────────
@@ -472,9 +480,10 @@ def register_extra(daemon) -> None:
 
     @daemon.handler("record_stop")
     async def _record_stop(d, args):
-        s = _session(d)
         path = args["path"]
-        await s.context.tracing.stop(path=path)
+        real = fspolicy.check_write(path, verb="record_stop")
+        s = _session(d)
+        await s.context.tracing.stop(path=real)
         return {"path": path}
 
     # ─── highlight (visual debug) ─────────────────────────────────────────
@@ -828,7 +837,8 @@ def register_extra(daemon) -> None:
             # headers + cookies. 0600 instead of inheriting umask (typically
             # 0644/0664).
             from .paths import secure_write as _sw
-            _sw(Path(path), _json.dumps(events, indent=2))
+            real = fspolicy.check_write(path, verb="network_dump")
+            _sw(Path(real), _json.dumps(events, indent=2))
             return {"path": path, "events": len(events)}
         return {"events": events}
 
@@ -1273,7 +1283,8 @@ def register_extra(daemon) -> None:
             # Console text can echo URLs/tokens printed by the page — 0600 like
             # the network/HAR dumps, never inherit umask.
             from .paths import secure_write as _sw
-            _sw(Path(path), _json.dumps(events, indent=2))
+            real = fspolicy.check_write(path, verb="console_dump")
+            _sw(Path(real), _json.dumps(events, indent=2))
             return {"path": path, "events": len(events)}
         return {"events": events}
 
@@ -1299,6 +1310,9 @@ def register_extra(daemon) -> None:
         """
         s = _session(d)
         path = args["path"]
+        # Fail at start, not after a whole capture; har_stop re-checks because
+        # the target can change (a symlink planted) while recording.
+        fspolicy.check_write(path, verb="har_start")
         content = args.get("content", "embed")  # embed | attach | omit
         url_filter = args.get("url_filter")     # glob
 
@@ -1434,7 +1448,13 @@ def register_extra(daemon) -> None:
         # Wave 7.5d: HAR contains every request body + Authorization header
         # + cookie. Same threat as a session cookie jar — 0600 always.
         from .paths import secure_write as _sw
-        _sw(Path(har_state["path"]), _json.dumps(har_doc, indent=2))
+        try:
+            real = fspolicy.check_write(har_state["path"], verb="har_stop")
+        except fspolicy.FileAccessDenied:
+            # listeners are already detached — don't leave a zombie "recording"
+            s._har_state = {"recording": False, "path": har_state["path"]}
+            raise
+        _sw(Path(real), _json.dumps(har_doc, indent=2))
         s._har_state = {"recording": False, "path": har_state["path"]}
         return {
             "recording": False,
@@ -1455,6 +1475,7 @@ def register_extra(daemon) -> None:
         s = _session(d)
         full_page = bool(args.get("full_page", False))
         path = args.get("path") or "screenshot.png"
+        real = fspolicy.check_write(path, verb="screenshot_annotate")
 
         if not _HAS_PILLOW:
             # Fail loudly rather than silently fall back — caller asked for
@@ -1488,7 +1509,7 @@ def register_extra(daemon) -> None:
             draw.rectangle([x, max(0, y - 14), x + tw, y], fill=(255, 32, 32, 220))
             draw.text((x + 2, max(0, y - 14)), label, fill=(255, 255, 255, 255), font=font)
         out = Image.alpha_composite(img, overlay).convert("RGB")
-        out.save(path)
+        out.save(real)
         return {"path": path, "annotated": True, "boxes": len(boxes)}
 
     # ─── cookie banner / consent dismissal ────────────────────────────────
