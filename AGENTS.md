@@ -494,7 +494,8 @@ holds the session lock and stops the instant a verb starts. Two things to know:
 ambient scroll moves the viewport between verbs, so re-read positions before a
 coordinate click (`mouse click x y`) — scroll is paused after
 `screenshot`/`candidates`/`mouse` until your next verb, or pass `--no-scroll`;
-and it is refused on `attach` sessions (that browser is yours).
+and it is refused on `attach` sessions (that browser is yours) and on headed
+ones (a human may be at that window — `vb show`, a captcha hand-off).
 
 ### Retina / 2× captures — `start --scale` (and what it costs)
 

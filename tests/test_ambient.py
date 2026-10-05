@@ -446,6 +446,17 @@ async def test_refused_on_attach_and_nodriver(monkeypatch):
         d._ambient.enable("t", e)
 
 
+async def test_refused_on_headed_sessions(monkeypatch):
+    d, e, _ = _daemon(monkeypatch)
+    e.session.headless = False
+    with pytest.raises(RuntimeError, match="headed"):
+        d._ambient.enable("t", e)
+    out = await d.dispatch({"cmd": "humanize_ambient", "id": "1",
+                            "args": {"_session": "t", "mode": "on"}})
+    assert out["ok"] is False and "headed" in out["error"]
+    assert not d._ambient.is_on("t") and "ambient" not in e.flags
+
+
 async def test_seed_derived_from_session_when_not_given(monkeypatch):
     d, e, _ = _daemon(monkeypatch)
     out = d._ambient.enable("t", e)

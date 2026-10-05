@@ -89,8 +89,9 @@ SAFETY CONTRACT (each enforced in code below, and tested):
     that parked the pointer on an element centre without telling us. (`:hover`
     can't answer this: measured empty in headless Chrome after plain moves and
     locator clicks.) Humanize and ambient share one per-page cursor.
-  * Visible + focused pages only; only the session's ACTIVE page; launch-mode
-    patchright only (never attach — that browser is the user's own).
+  * Visible + focused pages only; only the session's ACTIVE page; headless
+    launch-mode patchright only (never attach — that browser is the user's
+    own — and never a headed window, which a human may be using).
 
 HONEST LIMIT. This is CDP-synthesised input: it fires NO `pointerrawupdate`
 events and carries no coalesced samples (`getCoalescedEvents`) — the raw-pointer
@@ -666,6 +667,12 @@ class AmbientManager:
             raise RuntimeError(
                 "ambient is refused on attach-mode sessions — that browser is the "
                 "user's own and synthetic pointer input would land in their window")
+        if getattr(sess, "headless", True) is False:
+            raise RuntimeError(
+                "ambient is refused on headed sessions — a visible window may "
+                "have a human at it (`vb show` / `vb login`, a captcha hand-off), "
+                "and synthetic pointer drift would fight their mouse. Use it on "
+                "headless sessions")
         if entry.flags.get("backend", "patchright") != "patchright":
             raise RuntimeError("ambient needs the patchright backend")
         old = self._st.get(name)
