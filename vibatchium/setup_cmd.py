@@ -83,14 +83,16 @@ _SKILL_DESCRIPTION = (
     "behind Cloudflare/DataDome/PerimeterX, JavaScript SPAs, logged-in or "
     "authenticated pages, multi-step form/checkout flows, and parallel "
     "multi-site automation. Use whenever the user wants to browse, scrape, "
-    "research, log into, or click through a website that blocks bots or needs "
-    "a real browser. Also does bulk web SEARCH (`vb search`) without spending "
+    "research, screenshot, log into, or click through a website that blocks "
+    "bots or needs a real browser — including when a plain fetch came back "
+    "403, a \"Just a moment...\" challenge, or an empty JavaScript shell. "
+    "Also does bulk web SEARCH (`vb search`) without spending "
     "the host's capped WebSearch budget. Runs via the `vb` CLI + MCP tools."
 )
 
 _SKILL_BODY = """# vibatchium — agentic stealth browser
 
-`vb` is installed at `{binary}` (also on `$PATH` as `vb`).
+{intro}
 
 **Reach for this when** a page is walled (Cloudflare/DataDome/PerimeterX), is a
 JavaScript SPA, needs a login/session, or the task is multi-step. For plain
@@ -235,10 +237,12 @@ started were never explicitly closed. When a task is done:
 Use `--ephemeral` at `start` for one-shot work that shouldn't leave a profile
 behind at all, and `vb explore` (which auto-closes) whenever one look suffices.
 
-Slow, ad-heavy pages: `vb go <url> --wait-until commit --timeout 12000`. The
-default wait condition may never settle on a page with long-lived XHR, and
-killing the client does **not** release the daemon-side lock — every later verb
-on that session then queues behind the hung one and the session looks dead.
+Slow, ad-heavy pages: plain `vb go <url>` is already the right call — it waits
+for `domcontentloaded` (60s cap), never for network idle, so don't weaken it
+to `--wait-until commit`; follow it with `wait selector` for the element you
+need. A killed or timed-out client does **not** cancel the verb — the click or
+navigation may still land — so re-check the page before retrying. If a session
+looks hung, `vb session close <name>` gets through without queueing behind it.
 
 ## When a page is walled
 
@@ -307,7 +311,7 @@ If a lane is missing, two things trip people up:
   call respawns the daemon with the lane available.
 
 ## Notes
-- Already installed; do **not** `pip install` or `python -m vibatchium`. Call `vb`.
+- {install_note}
 - `explore` is available BOTH as an MCP tool and on the CLI — prefer the MCP
   tool if you have it. `research` is **CLI only**: it fans out N parallel
   browser sessions and writes markdown artifacts to a directory, which is a
@@ -324,9 +328,48 @@ If a lane is missing, two things trip people up:
 """
 
 
-def _skill_md(binary: str) -> str:
-    fm = f"---\nname: vibatchium\ndescription: {_SKILL_DESCRIPTION}\n---\n\n"
-    return fm + _SKILL_BODY.format(binary=binary)
+# The skill ships in two renderings of ONE template:
+#   * installed — `vb setup` writes it to ~/.claude/skills/ on a box where vb
+#     already runs, so it names the resolved binary and says "don't install";
+#   * portable  — `_skill_md(None)`, committed at skills/vibatchium/SKILL.md for
+#     `npx skills add trueoriginlabs/vibatchium` (skills.sh) and the Claude Code
+#     plugin. It lands on machines that may not have vb yet, so it says how to
+#     get it instead of pointing at a path that only exists here.
+# Regenerate the committed file with `python scripts/sync_skill.py`;
+# tests/test_skill_file_sync.py fails when it drifts from this template.
+SKILL_NAME = "vibatchium"
+REPO_SKILL_PATH = Path("skills") / SKILL_NAME / "SKILL.md"
+
+_INSTALLED_INTRO = "`vb` is installed at `{binary}` (also on `$PATH` as `vb`)."
+_INSTALLED_NOTE = ("Already installed; do **not** `pip install` or "
+                   "`python -m vibatchium`. Call `vb`.")
+
+_PORTABLE_INTRO = """Everything below runs through the `vb` CLI. Check it's there with
+`vb --version`; if it isn't, install it once (Python 3.11+ on Linux or another
+Unix; Chrome downloads itself on first launch):
+
+    pipx install 'vibatchium[all]'    # or: uv tool install 'vibatchium[all]'
+    vb setup                          # optional: register the MCP server too"""
+_PORTABLE_NOTE = """Install with `pipx` / `uv tool` as above — never a bare `pip install`
+  into the system Python (Debian/Ubuntu block it under PEP 668) — and don't
+  `python -m vibatchium`. Call `vb`."""
+
+
+def _skill_md(binary: str | None) -> str:
+    """Render SKILL.md. ``binary`` = the resolved vb path for `vb setup`;
+    ``None`` = the portable copy committed to the repo."""
+    fm = (f"---\nname: {SKILL_NAME}\n"
+          f"description: {_SKILL_DESCRIPTION}\n---\n\n")
+    if binary is None:
+        intro, note = _PORTABLE_INTRO, _PORTABLE_NOTE
+    else:
+        intro, note = _INSTALLED_INTRO.format(binary=binary), _INSTALLED_NOTE
+    return fm + _SKILL_BODY.format(intro=intro, install_note=note)
+
+
+def portable_skill_md() -> str:
+    """The exact bytes committed at ``REPO_SKILL_PATH``."""
+    return _skill_md(None)
 
 
 def _write_owned_file(path: Path, content: str, dry_run: bool = False) -> str:

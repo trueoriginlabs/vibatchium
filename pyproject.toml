@@ -97,6 +97,12 @@ include = [
     "/pyproject.toml",
     "/tests",
     "/.github",
+    # The committed agent skill + plugin manifests: not runtime code (the wheel
+    # is packages=["vibatchium"] only), but tests/test_skill_file_sync.py reads
+    # them, so the sdist's test suite needs them to pass.
+    "/skills",
+    "/.claude-plugin",
+    "/scripts/sync_skill.py",
 ]
 exclude = [
     "**/__pycache__",

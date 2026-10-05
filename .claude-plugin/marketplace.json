@@ -1,0 +1,17 @@
+{
+  "name": "vibatchium",
+  "description": "vibatchium — a stealth-browser skill and MCP server for coding agents.",
+  "owner": {
+    "name": "monodev-eth",
+    "url": "https://github.com/trueoriginlabs"
+  },
+  "plugins": [
+    {
+      "name": "vibatchium",
+      "source": ".",
+      "description": "Stealth Chrome for agents: the vibatchium skill plus the `vb mcp` server. Needs the vb CLI on PATH (pipx install 'vibatchium[all]').",
+      "category": "browser-automation",
+      "tags": ["browser", "stealth", "scraping", "cloudflare", "mcp"]
+    }
+  ]
+}

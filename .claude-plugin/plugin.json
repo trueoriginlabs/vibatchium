@@ -1,0 +1,31 @@
+{
+  "name": "vibatchium",
+  "displayName": "vibatchium",
+  "version": "0.19.3",
+  "description": "Stealth Chrome for agents: browse, scrape, log into and click through sites behind Cloudflare/DataDome/PerimeterX, JavaScript SPAs and login walls. Bundles the vibatchium skill and the `vb mcp` server. Requires the vb CLI (pipx install 'vibatchium[all]').",
+  "author": {
+    "name": "monodev-eth",
+    "url": "https://github.com/trueoriginlabs"
+  },
+  "homepage": "https://github.com/trueoriginlabs/vibatchium",
+  "repository": "https://github.com/trueoriginlabs/vibatchium",
+  "license": "Apache-2.0",
+  "keywords": [
+    "browser",
+    "stealth",
+    "scraping",
+    "cloudflare",
+    "playwright",
+    "patchright",
+    "automation",
+    "mcp"
+  ],
+  "mcpServers": {
+    "vibatchium": {
+      "command": "vb",
+      "args": [
+        "mcp"
+      ]
+    }
+  }
+}

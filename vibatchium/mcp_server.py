@@ -1354,13 +1354,42 @@ def _annotations_for(name: str):
     return types.ToolAnnotations(**fields)
 
 
+# ─── always-loaded core (Claude Code tool search) ────────────────────────
+#
+# Claude Code defers MCP tools behind tool search, so a big server's tools are
+# invisible until the model thinks to search for them — and a browser server
+# that has to be searched for loses to WebFetch, which is always there. A tool
+# whose ``_meta`` carries ``"anthropic/alwaysLoad": true`` is exempt: it loads
+# at session start while the rest of the server stays deferred
+# (code.claude.com/docs/en/mcp, "Exempt a server from deferral"). Other clients
+# ignore the key — ``_meta`` is the spec's namespaced extension slot.
+#
+# Every always-loaded schema costs context on EVERY turn, so this is the
+# smallest set that finishes the common job without a search round trip:
+#   explore     — the one-call entry point; the 80% case on its own.
+#   go, extract — navigate + LLM-ready Markdown: the stateful read loop.
+#   screenshot  — the fallback when extract flags structure_loss (tiles=true).
+#   act         — interact by intent without first learning the selector verbs.
+# Deliberately not here: `text` (extract supersedes it) and `click`/`fill`
+# (act covers the common case; the long tail is one search away).
+_ALWAYS_LOAD = ("explore", "go", "extract", "screenshot", "act")
+_ALWAYS_LOAD_META = {"anthropic/alwaysLoad": True}
+
+
+def _meta_for(name: str) -> dict | None:
+    # Hand this to types.Tool as ``_meta=`` (the field alias). ``meta=`` is
+    # silently kept as an extra attribute and never reaches the wire.
+    return dict(_ALWAYS_LOAD_META) if name in _ALWAYS_LOAD else None
+
+
 @server.list_tools()
 async def list_tools() -> list[types.Tool]:
     tools = _filter_tools(_ACTIVE_CAPS)
     static = [
         types.Tool(name=name, description=desc,
                    inputSchema=_augment_schema_with_session(schema),
-                   annotations=_annotations_for(name))
+                   annotations=_annotations_for(name),
+                   _meta=_meta_for(name))
         for (name, desc, schema, _cmd, _mapper) in tools
     ]
     # Dynamically discovered plugin verbs (dotted names — never collide with

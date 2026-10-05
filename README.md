@@ -49,6 +49,26 @@ TLS-fingerprint lane) are the `[fetch]` extra; `vb install` reports which option
 
 > Bleeding edge from `master`: `pipx install 'git+https://github.com/trueoriginlabs/vibatchium#egg=vibatchium[all]'`
 
+## Install as a skill / plugin
+
+`vb setup` wires up the agents on *this* machine. To pull just the agent skill
+into any agent [skills.sh](https://skills.sh) supports (Claude Code, Codex,
+Cursor, Gemini CLI, Copilot, …), or to install skill + MCP server as one Claude
+Code plugin:
+
+```
+npx skills add trueoriginlabs/vibatchium                  # skill only, any agent
+
+/plugin marketplace add trueoriginlabs/vibatchium         # Claude Code: skill + `vb mcp`
+/plugin install vibatchium@vibatchium
+```
+
+Both still need the `vb` CLI on `PATH` (`pipx install 'vibatchium[all]'`) — the
+skill drives it and the plugin's MCP server *is* `vb mcp`. On Claude Code, pick
+the plugin **or** `vb setup`, not both, or you register the server twice. The
+skill file is generated from `vibatchium/setup_cmd.py`; edit there and run
+`python scripts/sync_skill.py`.
+
 > **Coding agents (Codex / Cursor / Claude Code):** read [`AGENTS.md`](AGENTS.md) first — it has the one-call recipes (`explore`, `research`) and the env-discovery traps to skip.
 
 ```
