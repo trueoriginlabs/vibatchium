@@ -46,7 +46,12 @@ def go_frame_host(local_server: str, host: str = "127.0.0.1", **params) -> str:
 
 def probe(prefix: str = "") -> dict:
     """Click the page's probe button (optionally inside a frame) and return its
-    snapshot: {vals, inputs, sec, ts, maskedAtWrite, react, active}."""
+    snapshot: {vals, inputs, sec, ts, maskedAtWrite, react, active}.
+
+    Waits for the page's ready marker first: in a frame, the button can exist
+    before the script that listens on it has run, and that click is lost."""
+    call("wait_selector", {"selector": f"{prefix}html[data-ready]", "state": "attached",
+                           "timeout_ms": 10_000})
     call("click", {"target": f"{prefix}#probe"})
     if prefix:
         return json.loads(call("text", {"target": f"{prefix}#out"})["text"])
