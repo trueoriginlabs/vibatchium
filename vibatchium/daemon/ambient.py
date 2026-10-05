@@ -80,7 +80,9 @@ SAFETY CONTRACT (each enforced in code below, and tested):
     vision_find, mouse …) until the next verb that navigates or acts — reads in
     between (text, extract, eval, url, waits, `humanize_ambient status`) keep the
     pin — so an agent that read coordinates off a screenshot never clicks into a
-    page ambient scrolled.
+    page ambient scrolled. And because a wheel's scroll lands ~10 ms after its
+    CDP call returns, coordinate verbs (screenshot, mouse, candidates, vision_*)
+    wait until the last notch is >= 50 ms old before running.
   * No teleports: every burst starts from where the DOCUMENT last saw the
     pointer — an isolated-world listener (invisible to page JS) records the
     last pointer position from any source, including a plain Playwright click
@@ -125,6 +127,17 @@ EDGE_MARGIN_PX = 8
 VIEWPORT_PINNING_VERBS = frozenset({
     "screenshot", "screenshot_annotate", "candidates", "vision_find",
     "mouse", "highlight", "map", "map_compact", "diff_map",
+})
+
+# A CDP wheel's scroll is applied by the compositor AFTER Input.dispatchMouseEvent
+# returns (~9-10 ms measured in the 0.20.0 review), so a notch cancelled by
+# verb_begin can still move the page under a verb that has already started.
+# Verbs that read or act on viewport COORDINATES wait until the last notch is
+# at least this old before they run.
+WHEEL_SETTLE_S = 0.05
+COORDINATE_VERBS = frozenset({
+    "screenshot", "screenshot_annotate", "mouse", "candidates", "highlight",
+    "vision_click", "vision_find", "vision_type",
 })
 
 # Verbs whose PURPOSE is to leave the pointer (or focus) where it is: a hover
@@ -620,6 +633,7 @@ class _State:
     bursts_since_verb: int = 0
     scroll_pinned: bool = False
     pointer_parked: bool = False
+    last_wheel_at: float = 0.0    # monotonic; stamped before AND after each notch
     task: asyncio.Task | None = None
     burst: asyncio.Task | None = None
     arm: asyncio.Task | None = None
@@ -740,6 +754,20 @@ class AmbientManager:
             # plain click parks the pointer somewhere. A read-only isolated-world
             # evaluate — never input — so it may overlap the next verb safely.
             st.arm = asyncio.create_task(self._arm_tracker(name, st))
+
+    async def settle(self, name: str, cmd: str) -> float:
+        """Before a coordinate-sensitive verb: wait out the tail of a wheel
+        notch ambient sent just before the verb began (its scroll lands after
+        the CDP call returns). Called after verb_begin, so no new notch can go
+        out meanwhile. Returns the seconds waited (0 almost always)."""
+        st = self._st.get(name)
+        if st is None or cmd not in COORDINATE_VERBS:
+            return 0.0
+        wait = st.last_wheel_at + WHEEL_SETTLE_S - time.monotonic()
+        if wait <= 0:
+            return 0.0
+        await asyncio.sleep(wait)
+        return wait
 
     def reap(self) -> None:
         """Drop states whose session is gone (closed / deleted / replaced)."""
@@ -1043,5 +1071,7 @@ class AmbientManager:
                     math.log(params.notch_interval_median_ms), 0.35) / 1000.0)
             if self._blocked(name, st):
                 raise _Yield()
+            st.last_wheel_at = time.monotonic()   # covers a notch cancelled mid-call
             await asyncio.wait_for(page.mouse.wheel(0, dy), CDP_TIMEOUT_S)
+            st.last_wheel_at = time.monotonic()
             st.stats["wheel_notches"] += 1

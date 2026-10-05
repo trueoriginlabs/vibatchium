@@ -664,6 +664,10 @@ class Daemon:
                             return {"id": req_id, "ok": False, "error": reason}
                     # Both gates passed: the verb WILL run — now ambient yields.
                     _ambient_begin()
+                    if (cmd in _ambient.COORDINATE_VERBS
+                            and self._ambient.is_on(session_name)):
+                        # let a just-sent wheel notch finish scrolling first
+                        await self._ambient.settle(session_name, cmd)
                     # 0.7.0 self-heal: run the verb under the per-session lock
                     # with transparent Chrome renderer-crash recovery.
                     result = await self._run_session_verb_with_recovery(

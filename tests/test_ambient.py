@@ -633,6 +633,44 @@ async def test_no_motion_after_a_pointer_parking_verb(monkeypatch):
     d._ambient.disable("t")
 
 
+async def test_coordinate_verbs_wait_out_a_fresh_wheel_notch(monkeypatch):
+    d, e, page = _daemon(monkeypatch)
+    st = await _enable(d, e)
+    seen = {}
+
+    async def stamp(daemon, args):
+        seen["at"] = time.monotonic()
+        return {}
+
+    d._handlers["screenshot"] = stamp
+    d._handlers["text"] = stamp
+    st.last_wheel_at = time.monotonic()
+    t0 = st.last_wheel_at
+    out = await d.dispatch({"cmd": "screenshot", "args": {"_session": "t"}, "id": "1"})
+    assert out["ok"]
+    assert seen["at"] - t0 >= ambient.WHEEL_SETTLE_S, "acted on a still-scrolling page"
+    # a non-coordinate verb doesn't wait, and an old notch costs nothing
+    st.last_wheel_at = time.monotonic()
+    t1 = time.monotonic()
+    await d.dispatch({"cmd": "text", "args": {"_session": "t"}, "id": "2"})
+    assert seen["at"] - t1 < ambient.WHEEL_SETTLE_S
+    st.last_wheel_at = time.monotonic() - 1
+    assert await d._ambient.settle("t", "screenshot") == 0.0
+    d._ambient.disable("t")
+
+
+async def test_wheel_notch_is_stamped(monkeypatch):
+    d, e, page = _daemon(monkeypatch)
+    page.ptr = [400.0, 200.0]
+    st = await _enable(d, e)
+    _fast(st, scroll_p=1.0)
+    await asyncio.sleep(0.5)
+    wheels = [c for c in page.calls if c[0] == "wheel"]
+    assert wheels, "no wheel in 0.5 s at scroll_p=1"
+    assert st.last_wheel_at >= wheels[-1][1]
+    d._ambient.disable("t")
+
+
 async def test_freezer_skips_one_poll_mid_burst(monkeypatch):
     from vibatchium.daemon import freeze
     monkeypatch.setattr(freeze, "_find_renderers", lambda p: [100])
