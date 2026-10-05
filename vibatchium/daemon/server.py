@@ -35,6 +35,7 @@ from collections.abc import Awaitable, Callable
 
 from . import handlers, handlers_extra
 from . import lease as _lease
+from .. import fspolicy as _fspolicy
 from ..caps import resolve_caps as _resolve_caps, verb_in_caps
 from .paths import (
     CACHE_DIR, DEFAULT_SESSION_NAME, LOCK_PATH, LOG_PATH, PID_PATH, SOCK_PATH,
@@ -461,6 +462,16 @@ class Daemon:
         self._last_activity = time.monotonic()   # 0.9.1: feeds the idle reaper
         # Extract + consume the session selector; default to active session.
         session_name = args.pop("_session", None) or get_active_session_name()
+        # 0.19.4: agent-facing surfaces (MCP, caps-restricted REST) attach a
+        # file-access scope (roots + their cwd) to every call; CLI/SDK calls
+        # carry none. Validated up front and FAIL CLOSED — a malformed scope is
+        # an error, never "unconfined".
+        fs_scope = args.pop(_fspolicy.SCOPE_ARG, None)
+        if fs_scope is not None:
+            try:
+                _fspolicy.parse_scope(fs_scope)
+            except ValueError as exc:
+                return {"id": req_id, "ok": False, "error": f"ValueError: {exc}"}
         if cmd not in self._handlers:
             return {"id": req_id, "ok": False, "error": f"unknown command: {cmd}"}
 
@@ -489,6 +500,7 @@ class Daemon:
         # Push the selected session into the contextvar so handlers (via the
         # session-routed properties above) operate on the right SessionEntry.
         tok = current_session_ctx.set(session_name)
+        fs_tok = _fspolicy.push_scope(fs_scope) if fs_scope is not None else None
         try:
             if lock_class == "registry":
                 # 0.7.0 lease gate: refuse the DISRUPTIVE registry verbs (those
@@ -636,6 +648,8 @@ class Daemon:
                 return {"id": req_id, "ok": False, "error": str(exc)}
             return {"id": req_id, "ok": False, "error": f"{type(exc).__name__}: {exc}"}
         finally:
+            if fs_tok is not None:
+                _fspolicy.pop_scope(fs_tok)
             current_session_ctx.reset(tok)
 
     async def _run_session_verb_with_recovery(self, cmd, args, entry, name):

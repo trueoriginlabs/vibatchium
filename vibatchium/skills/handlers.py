@@ -114,6 +114,31 @@ def _import_from_dir(src: Path) -> dict:
     return {"imported": imported, "skipped": skipped}
 
 
+_REMOTE_GIT_SCHEMES = ("http", "https", "ssh", "git", "git+ssh", "ssh+git")
+
+
+def _local_git_path(spec: str) -> str | None:
+    """The local path a git source would clone from, or None if it's remote.
+
+    Remote = an http(s)/ssh/git URL or scp-like ``[user@]host:path`` (a ``:``
+    before any ``/``). Anything else — a bare path, ``file://``, or an unknown
+    ``scheme://`` — is treated as local and returned for checking."""
+    from urllib.parse import unquote, urlsplit
+    raw = spec[len("git+"):] if spec.startswith("git+") else spec
+    raw = raw.split("#", 1)[0]
+    if "://" in raw:
+        scheme = raw.split("://", 1)[0].lower()
+        if scheme in _REMOTE_GIT_SCHEMES:
+            return None
+        if scheme == "file":
+            return unquote(urlsplit(raw).path) or "/"
+        return raw.split("://", 1)[1] or "/"
+    colon, slash = raw.find(":"), raw.find("/")
+    if colon > 0 and (slash == -1 or colon < slash):
+        return None                       # scp-like host:path
+    return raw
+
+
 def _import_from_git(spec: str) -> dict:
     """Clone a ``git+<url>[#subpath]`` shallowly and import its note dir."""
     raw = spec[len("git+"):] if spec.startswith("git+") else spec
@@ -208,6 +233,12 @@ def register_skill_verbs(daemon) -> None:
         if not source:
             raise ValueError("skill_import requires `source` (git+url or path)")
         if source.startswith("git+") or source.startswith(("http://", "https://", "git@")):
+            # 0.19.4: a git source can name a LOCAL repo (git+/path,
+            # git+file:///path, git+~/repo) — that's a disk read like any
+            # other, so it gets the same check_read.
+            local = _local_git_path(source)
+            if local is not None:
+                fspolicy.check_read(local, verb="skill_import")
             return _import_from_git(source)
         return _import_from_dir(Path(fspolicy.check_read(source, verb="skill_import")))
 

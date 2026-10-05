@@ -63,31 +63,67 @@ and **symlink resolution**. Both the lexical path and its realpath have to clear
 the policy, so neither a `/tmp` symlink into `~/.ssh` nor a `~/.ssh` that is
 itself a symlink elsewhere slips through. For writes the target needn't exist:
 the existing prefix is resolved, and a dangling final symlink is followed to
-where it *would* write. Writes then go to the resolved path.
+where it *would* write. Writes then go to the resolved path. Deny matching is
+case-insensitive, so `~/.SSH/id_ed25519` is no way round it on a casefolded
+filesystem.
 
-- **Always refused:** `~/.ssh`, `~/.gnupg`, `~/.aws`, `~/.config/gcloud`,
-  `~/.kube`, `~/.docker/config.json`, `~/.netrc`, `~/.pgpass`,
-  `~/.git-credentials`, `~/.config/gh`, `~/.config/vibatchium` (vault key,
-  vault, profiles), real-browser profiles, keyrings, `/proc`, `/sys`, `/dev`,
-  `/etc/shadow`, `/etc/sudoers*`. Writes are also refused for shell rc files,
-  autostart and systemd user units, `~/.local/bin`, agent configs (`~/.claude`,
-  …), cron spools and system dirs. Not overridable.
-- **Opt-in strict mode:** `VIBATCHIUM_FILE_ROOTS` (`os.pathsep`-separated, set
-  in the daemon's env) confines every caller path to those roots. The deny list
-  still wins inside a root.
+- **Always refused, every surface, not overridable:**
+  - *read or write* — `~/.ssh`, `~/.gnupg`, `~/.aws`, `~/.config/gcloud`,
+    `~/.kube`, `~/.docker/config.json`, `~/.netrc`, `~/.pgpass`,
+    `~/.git-credentials`, `~/.config/gh`, `~/.cargo/credentials*`,
+    `~/.config/rclone`, `~/.Xauthority`, `~/.claude`, `~/.claude.json`,
+    `~/.codex`, shell/REPL histories, `~/.config/vibatchium` (vault key, vault,
+    profiles), real-browser profiles (Chrome/Chromium/Brave/Edge/Vivaldi/Opera,
+    `~/.mozilla`, Flatpak `~/.var/app`, Snap `~/snap/{chromium,firefox,brave}`),
+    keyrings, `/proc`, `/sys`, `/dev`, `/etc/shadow`, `/etc/sudoers*`.
+  - *write* — shell rc files and `~/.bashrc.d`, vim/nvim/tmux/emacs/pip/git
+    configs, autostart and systemd user units (incl. `~/.local/share/systemd`,
+    `~/.local/share/applications` and their relocated `$XDG_CONFIG_HOME` /
+    `$XDG_DATA_HOME` twins), `~/.local/bin`, cron spools, system dirs, and
+    vibatchium's own runtime dir (`daemon.sock`, pidfile, lock, observe/vision
+    caches — only `screenshots/` and `explores/` stay writable) and state dir.
+  - *write, anywhere on disk* — any path through a `.git`, `.claude`, `.vscode`
+    or `.idea` dir, `.mcp.json` / `.envrc` files, `site-packages` /
+    `dist-packages`, `*.pth` files and `.venv*/bin`: a project's hooks and
+    agent settings are code execution too. A Claude Code agent worktree's
+    content (`<repo>/.claude/worktrees/<name>/…`) is an ordinary checkout and
+    stays writable.
+- **Navigation is a file read too.** `go`, `explore`, `storage restore`
+  origins, `checkpoint load` tabs and `fingerprint --url` map a `file:` URL to
+  its path and judge it like `upload` would (a directory URL — a listing —
+  checks the dir). `view-source:`, `chrome:`, `devtools:`, `filesystem:`,
+  `javascript:` and other non-web schemes are refused; `http(s)`, `data:`,
+  `blob:` and `about:blank` pass (plus `chrome://crash`/`kill`, which only
+  kill the session's own renderer).
+- **Agent surfaces get roots by default.** `vb mcp` (and a `--caps`-restricted
+  `vb rest`) confine caller paths to the server's cwd — the agent's project dir,
+  skipped if it is `/` or all of `$HOME` — plus `/tmp`, `$TMPDIR`,
+  `~/Downloads` and vibatchium's screenshot/explore output dirs; relative paths
+  resolve against that cwd rather than the daemon's. `VIBATCHIUM_FILE_ROOTS` in
+  the MCP server's env replaces the defaults; `VIBATCHIUM_FILE_ROOTS=*` opts out.
+  The surface sends this as an internal `_fs_scope` arg on every call and
+  strips any caller-supplied copy; the daemon validates it fail-closed and a
+  nested scope can only narrow. CLI and SDK calls carry no scope, so bots
+  writing into their own project dirs behave exactly as before.
+- **Daemon-wide strict mode:** `VIBATCHIUM_FILE_ROOTS` in the daemon's env
+  (`os.pathsep`-separated; `*` or empty = off) confines every caller, CLI
+  included, and stacks with an agent surface's roots. The deny list still wins
+  inside any root.
 
 Covered: `upload`, `pdf`, `screenshot --path`/`--tile-dir`,
 `screenshot --annotate`, `download save`, `record stop`, `har start`/`stop`,
 `network dump`, `console dump`, `storage export`/`restore`, `proxy set --path`,
-`skill import`, and `start --profile <dir>` (pointing a session at
-`~/.config/google-chrome` would have handed the agent your real logins).
+`skill import` (local dirs and local `git+` sources alike), and
+`start --profile <dir>` (pointing a session at `~/.config/google-chrome` — or a
+Flatpak/Snap/Vivaldi profile — would have handed the agent your real logins).
 vibatchium's own default outputs (screenshots cache, explore output,
-checkpoints) aren't caller paths and are never checked; ordinary paths behave
-exactly as before.
+checkpoints) aren't caller paths and are never checked.
 
-Also: `skill import` now skips notes that are symlinked out of the import
-source (a cloned repo could carry `x.md -> ~/.ssh/…`), and its `git clone`
-passes `--` so a `git+--upload-pack=…` source is a bad URL, not a git option.
+Also: `proxy set --path` no longer echoes the file in its parse error (it made
+the verb a read oracle for exactly the 0600 files worth stealing); `skill
+import` skips notes that are symlinked out of the import source (a cloned repo
+could carry `x.md -> ~/.ssh/…`), and its `git clone` passes `--` so a
+`git+--upload-pack=…` source is a bad URL, not a git option.
 
 ### fetch: the TLS lane now says what the browser says — or says that it can't
 

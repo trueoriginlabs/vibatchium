@@ -1371,7 +1371,7 @@ def register_extra(daemon) -> None:
         path = args["path"]
         # Fail at start, not after a whole capture; har_stop re-checks because
         # the target can change (a symlink planted) while recording.
-        fspolicy.check_write(path, verb="har_start")
+        real_path = fspolicy.check_write(path, verb="har_start")
         content = args.get("content", "embed")  # embed | attach | omit
         url_filter = args.get("url_filter")     # glob
 
@@ -1392,6 +1392,9 @@ def register_extra(daemon) -> None:
         har_state = {
             "recording": True,
             "path": path,
+            # resolved now (against this call's cwd); har_stop re-checks and
+            # writes THIS, so a relative path can't land somewhere else later.
+            "real_path": real_path,
             "url_filter": url_filter,
             "entries": [],
             "started_at": time.time(),
@@ -1508,7 +1511,8 @@ def register_extra(daemon) -> None:
         # + cookie. Same threat as a session cookie jar — 0600 always.
         from .paths import secure_write as _sw
         try:
-            real = fspolicy.check_write(har_state["path"], verb="har_stop")
+            real = fspolicy.check_write(
+                har_state.get("real_path") or har_state["path"], verb="har_stop")
         except fspolicy.FileAccessDenied:
             # listeners are already detached — don't leave a zombie "recording"
             s._har_state = {"recording": False, "path": har_state["path"]}
@@ -2227,6 +2231,7 @@ def register_extra(daemon) -> None:
         }
 
         if custom_url:
+            fspolicy.check_nav_url(custom_url, verb="fingerprint")
             url = custom_url
             extract_js = custom_extract or "() => ({raw: document.title})"
         else:

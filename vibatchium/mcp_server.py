@@ -1437,6 +1437,18 @@ def _apply_mcp_start_posture(cmd: str, args: dict) -> dict:
     return args
 
 
+def _attach_fs_scope(args: dict) -> dict:
+    """0.19.4: confine this agent's caller paths. Strips any caller-supplied
+    scope (an injected agent must not widen its own roots) and attaches the
+    one computed from THIS process — its cwd (the agent's project dir) and
+    VIBATCHIUM_FILE_ROOTS (`*` opts out). The daemon only reads the top-level
+    key, so a copy nested elsewhere in the arguments is inert."""
+    from . import fspolicy
+    args.pop(fspolicy.SCOPE_ARG, None)
+    args[fspolicy.SCOPE_ARG] = fspolicy.agent_scope()
+    return args
+
+
 @server.call_tool()
 async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.Content] | types.CallToolResult:
     entry = _TOOL_BY_NAME.get(name)
@@ -1476,6 +1488,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.Content]
         return _err(violation)
 
     args = _apply_mcp_start_posture(cmd, args)
+    args = _attach_fs_scope(args)
 
     # Extract the optional session arg — passed to daemon_call as session=
     # rather than threaded through args (the daemon's dispatcher consumes

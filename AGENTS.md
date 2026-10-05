@@ -540,24 +540,58 @@ Every path you hand the daemon — `upload` files, `pdf` / `screenshot --path` /
 `console dump` / `storage export` / `screenshot --annotate` outputs, the
 `storage restore` / `proxy set --path` / `skill import` inputs, and
 `start --profile <abs-dir>` — is checked in the daemon (so CLI, MCP, REST and
-SDK all get it) after `~` expansion and **symlink resolution**:
+SDK all get it) after `~` expansion and **symlink resolution**. So is every
+navigation URL (`go`, `explore`, `storage restore` origins, `checkpoint load`
+tabs, `fingerprint --url`): a `file:` URL is a read of that path (a directory
+URL is a listing of it, so the dir itself is checked), and `view-source:`,
+`chrome:`, `devtools:`, `filesystem:`, `javascript:` and other non-web schemes
+are refused. `http(s)`, `data:`, `blob:` and `about:blank` pass.
 
-- **Always refused:** `~/.ssh`, `~/.gnupg`, `~/.aws`, `~/.config/gcloud`,
-  `~/.kube`, `~/.docker/config.json`, `~/.netrc`, `~/.pgpass`,
-  `~/.git-credentials`, `~/.config/vibatchium` (vault + profiles), real-browser
-  profiles (`~/.config/google-chrome`, `~/.mozilla`, …), keyrings, `/proc`,
-  `/sys`, `/dev`, `/etc/shadow`, `/etc/sudoers*`. Writes are also refused for
-  shell rc files, `~/.config/autostart`, `~/.config/systemd`, `~/.local/bin`,
-  agent configs (`~/.claude`, …), cron spools and system dirs. Not overridable.
-- **Opt-in strict mode:** `VIBATCHIUM_FILE_ROOTS=/tmp/vb:/home/me/Downloads`
-  (`os.pathsep`-separated, set in the **daemon's** env) confines every caller
-  path to those roots; the deny list still wins inside them.
+- **Always refused, on every surface (not overridable):**
+  - *read or write* — `~/.ssh`, `~/.gnupg`, `~/.aws`, `~/.config/gcloud`,
+    `~/.kube`, `~/.docker/config.json`, `~/.netrc`, `~/.pgpass`,
+    `~/.git-credentials`, `~/.cargo/credentials*`, `~/.config/rclone`,
+    `~/.Xauthority`, `~/.claude`, `~/.claude.json`, `~/.codex`, shell/REPL
+    histories, `~/.config/vibatchium` (vault + profiles), real-browser profiles
+    (Chrome/Chromium/Brave/Edge/Vivaldi/Opera under `~/.config`, `~/.mozilla`,
+    Flatpak `~/.var/app`, Snap `~/snap/{chromium,firefox,brave}`), keyrings,
+    `/proc`, `/sys`, `/dev`, `/etc/shadow`, `/etc/sudoers*`.
+  - *write* — shell rc files (incl. `~/.bashrc.d`), editor/tool configs that
+    run code (`~/.vimrc`, `~/.vim`, `~/.config/nvim`, `~/.tmux.conf`,
+    `~/.emacs*`, `~/.config/pip`, `~/.config/git`, `~/.gitconfig`), autostart
+    and systemd user units (`~/.config/{autostart,systemd}`,
+    `~/.local/share/{systemd,applications}`, and their relocated
+    `$XDG_CONFIG_HOME` / `$XDG_DATA_HOME` twins), `~/.local/bin`, `~/bin`, cron
+    spools, system dirs, vibatchium's runtime dir (socket, pidfile, caches —
+    only its `screenshots/` and `explores/` subdirs are writable) and state dir.
+  - *write, anywhere on disk* — any path through a `.git`, `.claude`,
+    `.vscode` or `.idea` dir, `.mcp.json` / `.envrc` files, `site-packages` /
+    `dist-packages`, `*.pth` files and `.venv*/bin`. (Content of a Claude Code
+    agent worktree, `<repo>/.claude/worktrees/<name>/…`, is an ordinary
+    checkout and stays writable; its own `.claude/` doesn't.)
+  - Matching is case-insensitive: `~/.SSH/id_ed25519` is refused too.
+- **Agent surfaces are confined to roots by default.** Calls through `vb mcp`
+  (and a `--caps`-restricted `vb rest`) may only touch: the MCP server's cwd
+  (your project dir — skipped if it is `/` or your whole `$HOME`), `/tmp`,
+  `$TMPDIR`, `~/Downloads`, and vibatchium's screenshot/explore output dirs.
+  Relative paths resolve against that cwd. To change it, set
+  `VIBATCHIUM_FILE_ROOTS` **in the MCP server's env** — a path list replaces
+  the defaults, `VIBATCHIUM_FILE_ROOTS=*` opts out (deny list still applies).
+  The surface attaches this as an internal `_fs_scope` arg on every daemon call
+  and strips any copy the caller sends, so an agent can't widen its own roots.
+  CLI and SDK calls carry no scope: bots writing into their own project dirs
+  are unaffected.
+- **Daemon-wide strict mode:** `VIBATCHIUM_FILE_ROOTS=/tmp/vb:/home/me/Downloads`
+  in the **daemon's** env confines every caller, CLI included (`*` or empty =
+  off). It stacks with an agent surface's roots: a path must clear both.
 
 A refusal is `FileAccessDenied: file access denied: <verb> <read|write> of …`
-naming the protected location — not a bug; pick a normal working path. Relative
-paths resolve against the daemon's cwd over MCP/REST (the CLI absolutizes
-against yours). vibatchium's own default outputs (screenshots cache, explore
-output, checkpoints) aren't caller paths and are never checked.
+(or `navigation refused: …`) naming the protected location or the roots — not a
+bug; pick a normal working path. Over the CLI, relative paths are absolutized
+against your cwd; over MCP, against the MCP server's. vibatchium's own default
+outputs (screenshots cache, explore output, checkpoints) aren't caller paths and
+are never checked. `proxy set --path` never echoes the file's contents in an
+error.
 
 ## Env overrides
 
@@ -582,7 +616,7 @@ VIBATCHIUM_DISK_CACHE_MB=256    # per-session Chrome disk-cache ceiling (0 = let
 VIBATCHIUM_LOG_FILE=<path>      # full daemon-log path (default: a persistent state dir, see below)
 VIBATCHIUM_LOG_MAX_BYTES=10485760 # rotate the daemon log past this size (0 = never rotate)
 VIBATCHIUM_LOG_BACKUPS=5        # how many rotated daemon-log backups to keep
-VIBATCHIUM_FILE_ROOTS=<a>:<b>   # strict mode: caller-supplied paths must resolve inside these roots (see "File access")
+VIBATCHIUM_FILE_ROOTS=<a>:<b>   # daemon env: every caller path must resolve inside these roots; MCP server env: replaces the agent default roots, `*` opts out (see "File access")
 ```
 
 > **The daemon log is persistent (0.9.2).** It lives at

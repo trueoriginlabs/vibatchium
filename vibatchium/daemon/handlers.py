@@ -1211,10 +1211,22 @@ def register_all(daemon) -> None:
         """
         from ..proxy import save_session_proxy, parse as _parse, load_proxy_file
         from .registry import current_session_ctx as _ctx
+        from ..proxy import ProxyParseError
         url = args.get("url")
         path = args.get("path")
         if path:
             url = load_proxy_file(fspolicy.check_read(path, verb="proxy_set"))
+            # 0.19.4: never echo a FILE's contents back. ProxyParseError (and
+            # urlparse's own errors) quote the offending URL, which made this
+            # verb a read oracle for any 0600 file — exactly the secret ones.
+            try:
+                if not url:
+                    raise ProxyParseError("empty")
+                _parse(url)
+            except Exception:  # noqa: BLE001
+                raise ProxyParseError(
+                    f"proxy file {path!r} did not contain a valid proxy URL "
+                    f"(contents not shown)") from None
         if not url:
             raise ValueError("proxy_set requires url= or path=")
         # Validate before persisting (raises ProxyParseError on bad URL)
@@ -1569,6 +1581,10 @@ def register_all(daemon) -> None:
                 except Exception:  # noqa: BLE001
                     pass
             # Navigate the first tab
+            # A checkpoint file is data; its tab URLs get the same navigation
+            # policy as `go` (refused up front, before any tab is touched).
+            for tab in tabs:
+                fspolicy.check_nav_url(tab.get("url"), verb="checkpoint_load")
             first = s.context.pages[0] if s.context.pages else await s.context.new_page()
             s.page = first
             try:
@@ -2072,6 +2088,8 @@ def register_all(daemon) -> None:
         url = args.get("url")
         if not isinstance(url, str) or not url:
             raise ValueError("explore requires `url`")
+        # Refuse before spending a session; the inner `go` re-checks.
+        fspolicy.check_nav_url(url, verb="explore")
         keep_open = bool(args.get("keep_open", False))
         # 0.7.0: text-first. A screenshot is a FALLBACK, not the default — the
         # common "look at this page" call returns text only (fast + cheap, no
@@ -2258,6 +2276,10 @@ def register_all(daemon) -> None:
         to disable and require explicit `start` first.
         """
         from . import backends as _backends
+        # 0.19.4: a file: URL is a disk read (and a directory URL a listing) —
+        # judge it like any caller path; refuse view-source:/chrome:/… outright.
+        # Before the auto-start, so a refused URL never costs a Chrome.
+        fspolicy.check_nav_url(args.get("url"), verb="go")
         # Wave 7.7.5: auto-start if no session present
         name = current_session_ctx.get()
         if (d.registry.get(name) is None
@@ -3089,6 +3111,9 @@ def register_all(daemon) -> None:
         # Restore-in-place when current URL is one of the origins
         in_place = any(original_url.startswith(u) for u in origin_urls if u)
 
+        # Origins come from caller-supplied state: each one is navigated to.
+        for origin in origins:
+            fspolicy.check_nav_url(origin.get("origin"), verb="storage_restore")
         if origins and not in_place:
             page = s.page
             for origin in origins:

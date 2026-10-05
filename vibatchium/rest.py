@@ -380,6 +380,15 @@ def build_app(*, require_auth: bool = True, token: str | None = None,
             violation = agent_surface_violation(cmd, call_args)
             if violation:
                 raise HTTPException(status_code=403, detail=violation)
+        # 0.19.4: the file-access scope is set by the surface, never the
+        # client. A caps-restricted shim confines caller paths like MCP does
+        # (its own cwd + VIBATCHIUM_FILE_ROOTS); an unrestricted one is
+        # local-code-equivalent and attaches none.
+        from . import fspolicy
+        call_args = dict(call_args)
+        call_args.pop(fspolicy.SCOPE_ARG, None)
+        if _allowed is not None:
+            call_args[fspolicy.SCOPE_ARG] = fspolicy.agent_scope()
         # Spawn daemon if not running (mirror MCP behavior)
         if not daemon_is_running():
             spawn_daemon()
