@@ -35,6 +35,7 @@ Acceptance:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import math
 import random
 
@@ -195,8 +196,17 @@ async def humanized_click(page, x: float, y: float, *,
     # Pre-click hover
     await asyncio.sleep(random.uniform(0.05, 0.15))
     await page.mouse.down(button=button)
-    await asyncio.sleep(sample_dwell_ms() / 1000)
-    await page.mouse.up(button=button)
+    released = False
+    try:
+        await asyncio.sleep(sample_dwell_ms() / 1000)
+        await page.mouse.up(button=button)
+        released = True
+    finally:
+        if not released:
+            # Cancelled (or failed) mid-dwell: never leave the button held —
+            # every later pointer move would become a drag / text selection.
+            with contextlib.suppress(Exception):
+                await page.mouse.up(button=button)
     return (x, y)
 
 

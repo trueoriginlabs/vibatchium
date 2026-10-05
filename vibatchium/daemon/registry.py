@@ -974,6 +974,9 @@ class SessionRegistry:
             sess.nav_allowlist = old.nav_allowlist
             await ensure_nav_guard(sess)
         entry.session = sess
+        # A `mouse down` held on the dead browser is not held on the new one:
+        # drop the flag, or ambient would refuse to move for the session's life.
+        entry.flags.pop("_buttons_down", None)
         # 0.16.0: drop idle-freeze state — the recorded renderers died with the
         # old context (lift() would starttime-skip them anyway, but a relaunched
         # session must never START in a half-frozen bookkeeping state).

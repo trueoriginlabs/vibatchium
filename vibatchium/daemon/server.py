@@ -775,6 +775,8 @@ class Daemon:
                     entry.last_recovered_at = time.time()
                     entry.snapshot = None
                     entry.prev_snapshot = None
+                    # the fresh page holds no button (see registry.relaunch)
+                    entry.flags.pop("_buttons_down", None)
                 except Exception:  # noqa: BLE001
                     await self.registry.relaunch(name)  # bumps its own counter
                 # Idempotency gate: only re-run side-effect-free verbs.

@@ -740,6 +740,64 @@ def test_mcp_schema_offers_no_seed():
     assert "horizon_s" in schema["properties"]
 
 
+class _ButtonPage:
+    def __init__(self):
+        self.ev = []
+        page = self
+
+        class M:
+            async def move(self, x, y, steps=1):
+                page.ev.append("move")
+
+            async def down(self, button="left"):
+                page.ev.append("down")
+
+            async def up(self, button="left"):
+                page.ev.append("up")
+
+        self.mouse = M()
+
+
+async def test_humanized_click_never_leaves_the_button_held(monkeypatch):
+    from vibatchium import humanize
+    page = _ButtonPage()
+    await humanize.humanized_click(page, 50, 50, cursor_pos=(10, 10))
+    assert page.ev.count("down") == 1 and page.ev.count("up") == 1
+    assert page.ev[-2:] == ["down", "up"]          # default path unchanged
+
+    monkeypatch.setattr(humanize, "sample_dwell_ms", lambda: 5000)
+    page = _ButtonPage()
+    t = asyncio.create_task(humanize.humanized_click(page, 50, 50,
+                                                     cursor_pos=(10, 10)))
+    while "down" not in page.ev:
+        await asyncio.sleep(0.01)
+    t.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await t
+    assert page.ev[-2:] == ["down", "up"], "cancelled mid-dwell with the button held"
+
+
+async def test_relaunch_and_revive_drop_a_stale_button_flag(monkeypatch):
+    from vibatchium.daemon import backends as _backends
+    from vibatchium.daemon.registry import SessionRegistry
+    reg = SessionRegistry()
+    old = types.SimpleNamespace(mode="launch", headless=True, nav_allowlist=None)
+    e = SessionEntry(name="s", profile_dir=Path("/tmp/vbtest-ambient"), session=old)
+    e.flags["_buttons_down"] = True
+    reg._entries["s"] = e
+
+    async def _noop(*a, **k):
+        return None
+
+    async def _fresh(*a, **k):
+        return types.SimpleNamespace(mode="launch", headless=True, nav_allowlist=None)
+
+    monkeypatch.setattr(_backends, "close", _noop)
+    monkeypatch.setattr(reg, "_launch_for", _fresh)
+    await reg.relaunch("s")
+    assert "_buttons_down" not in e.flags
+
+
 def test_default_off_and_in_the_humanize_bucket():
     from vibatchium.caps import CAP_BUCKETS
     from vibatchium.mcp_server import TOOLS
