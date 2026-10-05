@@ -470,7 +470,7 @@ $VB --session work humanize ambient on   # opt-in: idle pointer drifts + rare re
 $VB --session work gpu set --on  # real GPU WebGL via a DRM render node instead of SwiftShader; --node intel|nvidia de-twins accounts (headless-only, applies on next start)
 $VB oracle run                   # grade the BEHAVIOURAL axis (trajectory/dwell/cadence/scroll) humanize off-vs-on
 $VB oracle ambient               # pointer events per page view / per idle gap, ambient off-vs-on, + a no-click/no-hover safety audit
-$VB --session work persona set   # stable per-identity screen/window (+ balanced GPU node) — default headless sessions all report 800x600; applies next start
+$VB --session work persona set   # stable per-identity screen/window (+ balanced GPU node) — default headless sessions all report 800x600; applies next start (or self-heal relaunch)
 $VB fleet-check --spawn 4 --before-after   # twin score across sessions on this box, before vs after personas
 $VB evals run --min-score 80     # fingerprint scoreboard matrix per backend — CI regression gate
 $VB bench run --live --targets-file t.json   # cold pass-rate against real Cloudflare/DataDome/PerimeterX walls
@@ -521,6 +521,8 @@ Three things that will otherwise cost you an afternoon:
 
 - It applies on a **cold** start only. `start --scale 2` on a running session
   persists the choice and returns `scale_pending` — close and start to apply.
+  (Or the next self-heal relaunch applies it — see *Persisted launch postures*
+  below.)
 - `max_screenshot_px` is denominated in **device** pixels, so at 2× a tall page
   truncates at half the CSS height it used to. That's arithmetic, not a bug.
 - Patchright only. The nodriver backend connects over CDP to a context it didn't
@@ -565,6 +567,18 @@ and start to apply.
   Chromium/CfT build is a different fingerprint; don't point one at a wall to
   "try something". Patchright only: nodriver refuses a session pin and skips the
   env default (`browser_binary_ignored: true`).
+
+### Persisted launch postures — when a change takes effect
+
+`gpu set` / `start --gpu`, `start --scale`, `start --browser-binary` and
+`persona set` all write a file and never touch a live browser. A change on a
+**running** session applies at its next cold launch — and a **self-heal
+relaunch counts**: the relaunch re-reads every posture from disk (that is what
+keeps a crashed session on the same binary, GPU and screen). So a posture you
+changed mid-session can switch in at an unplanned moment, after a renderer
+crash. If that matters, `vb session close <name>` and `start` right after the
+change rather than leaving it pending. `persona set --profile <dir>` targets a
+session that runs on a custom `start --profile <dir>`.
 
 ## Watch or hand off — liveview
 
