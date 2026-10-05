@@ -1625,27 +1625,45 @@ def register_all(daemon) -> None:
 
     # ─── 0.20.0: persona (per-identity screen/window/GPU-node de-twin) ──
 
-    def _persona_pdir(d):
+    def _persona_pdir(d, args):
+        """The profile dir a persona verb configures: an explicit ``profile``
+        (resolved exactly like `start --profile`), else the RUNNING session's
+        actual profile dir (which a `start --profile <dir>` may have pointed
+        anywhere), else the session's managed dir."""
         from .registry import current_session_ctx as _ctx
         from .paths import session_dir as _sd
         sname = _ctx.get()
         entry = d.registry.get(sname)
+        raw = args.get("profile")
+        if raw:
+            p = Path(raw)
+            fspolicy.check_profile_dir(
+                p if p.is_absolute() else PROFILES_DIR / raw,
+                managed_root=PROFILES_DIR)
+            pdir = p if p.is_absolute() else PROFILES_DIR / raw
+            if entry is not None and os.path.realpath(entry.profile_dir) != \
+                    os.path.realpath(pdir):
+                entry = None      # a different profile: not this live browser
+            return sname, entry, pdir
         return sname, entry, (entry.profile_dir if entry else _sd(sname))
 
     @daemon.handler("persona_set")
     async def _persona_set(d, args):
         """Turn the persona posture on (creating the profile's persona ONCE) or
         off. `reroll` draws a fresh persona — a device change for a logged-in
-        account, so only on purpose. Takes effect on the next `start`."""
+        account, so only on purpose. Takes effect on the next `start` (or the
+        next self-heal relaunch of a running session). `profile` targets a
+        `start --profile <dir>` profile when the session isn't running."""
         from ..persona import ensure_session_persona, save_session_persona
-        sname, entry, pdir = _persona_pdir(d)
+        sname, entry, pdir = _persona_pdir(d, args)
         on = bool(args.get("on", True))
         if not on:
             save_session_persona(pdir, None)
             return {"set": True, "on": False, "session": sname,
+                    "profile": str(pdir),
                     "note": "takes effect on next `start` (close session first if running)"}
         p = ensure_session_persona(pdir, reroll=bool(args.get("reroll")))
-        out = {"set": True, "on": True, "session": sname,
+        out = {"set": True, "on": True, "session": sname, "profile": str(pdir),
                "persona": {"screen": "x".join(map(str, p["screen"])),
                            "work_area": p["work_area"], "shell": p["shell"],
                            "window": "x".join(map(str, p["window"])),
@@ -1659,9 +1677,10 @@ def register_all(daemon) -> None:
     @daemon.handler("persona_info")
     async def _persona_info(d, args):
         from ..persona import load_session_persona
-        sname, entry, pdir = _persona_pdir(d)
+        sname, entry, pdir = _persona_pdir(d, args)
         p = load_session_persona(pdir)
-        out = {"session": sname, "configured": p is not None, "persona": p}
+        out = {"session": sname, "profile": str(pdir),
+               "configured": p is not None, "persona": p}
         if entry is not None:
             out["launched_persona"] = getattr(entry.session, "persona", None) is not None
         return out

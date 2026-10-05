@@ -3519,17 +3519,29 @@ def persona():
 @click.option("--reroll", is_flag=True,
               help="Draw a NEW persona. A screen change is a device change for a "
                    "logged-in account — only do this on purpose.")
+@click.option("--profile", "profile", default=None,
+              help="The profile the session is started with (`start --profile "
+                   "<dir|name>`), when it isn't running. A running session's "
+                   "own profile is used automatically.")
 @click.pass_context
-def persona_set(ctx, on, reroll):
-    """Create (once) and enable, or remove, this session's persona."""
-    _emit(call("persona_set", {"on": on, "reroll": reroll}), ctx.obj["json"])
+def persona_set(ctx, on, reroll, profile):
+    """Create (once) and enable, or remove, this session's persona. Applies at
+    the next `start` — or at the next self-heal relaunch if the session is
+    running."""
+    args = {"on": on, "reroll": reroll}
+    if profile:
+        args["profile"] = profile
+    _emit(call("persona_set", args), ctx.obj["json"])
 
 
 @persona.command("info")
+@click.option("--profile", "profile", default=None,
+              help="As for `persona set`.")
 @click.pass_context
-def persona_info(ctx):
+def persona_info(ctx, profile):
     """Show this session's persisted persona and whether the live browser has it."""
-    _emit(call("persona_info"), ctx.obj["json"])
+    _emit(call("persona_info", {"profile": profile} if profile else {}),
+          ctx.obj["json"])
 
 
 @cli.command("fleet-check")

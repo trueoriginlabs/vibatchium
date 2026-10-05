@@ -526,3 +526,48 @@ def test_fleet_check_live_two_sessions():
         for n in res.get("sessions", []):
             assert not (PROFILES_DIR / n).exists(), f"leaked profile {n}"
 
+
+# ─── persona verbs target the session's REAL profile dir ────────────────
+
+
+def _daemon_with_session(monkeypatch, profile_dir):
+    monkeypatch.setenv("VIBATCHIUM_PLUGINS", "0")
+    from vibatchium.daemon.registry import SessionEntry
+    from vibatchium.daemon.server import Daemon
+    d = Daemon()
+    if profile_dir is not None:
+        sess = SimpleNamespace(mode="launch", headless=True, persona=None)
+        d.registry._entries["pw"] = SessionEntry(name="pw", profile_dir=profile_dir,
+                                                 session=sess)
+    return d
+
+
+async def test_persona_set_follows_a_running_custom_profile(tmp_path, monkeypatch):
+    from vibatchium import gpu
+    monkeypatch.setattr(gpu, "available_gpu_nodes", lambda: [])
+    custom = tmp_path / "custom-prof"
+    d = _daemon_with_session(monkeypatch, custom)
+    out = await d.dispatch({"id": "1", "cmd": "persona_set",
+                            "args": {"_session": "pw", "on": True}})
+    assert out["ok"], out
+    assert out["result"]["profile"] == str(custom)
+    assert persona.load_session_persona(custom) is not None
+    info = await d.dispatch({"id": "2", "cmd": "persona_info",
+                             "args": {"_session": "pw"}})
+    assert info["result"]["configured"] is True
+
+
+async def test_persona_set_profile_arg_for_a_stopped_session(tmp_path, monkeypatch):
+    from vibatchium import gpu
+    monkeypatch.setattr(gpu, "available_gpu_nodes", lambda: [])
+    custom = tmp_path / "later"
+    d = _daemon_with_session(monkeypatch, None)
+    out = await d.dispatch({"id": "1", "cmd": "persona_set",
+                            "args": {"_session": "pw", "on": True,
+                                     "profile": str(custom)}})
+    assert out["ok"], out
+    assert persona.load_session_persona(custom) is not None
+    off = await d.dispatch({"id": "2", "cmd": "persona_set",
+                            "args": {"_session": "pw", "on": False,
+                                     "profile": str(custom)}})
+    assert off["ok"] and persona.load_session_persona(custom) is None
