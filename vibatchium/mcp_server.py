@@ -530,7 +530,9 @@ TOOLS: list[tuple[str, str, dict, str, Any]] = [
      "Cookies flow browser→fetch ONE-WAY (response Set-Cookie is NOT written "
      "back). Needs `pip install vibatchium[fetch]`; gated behind the `fetch` cap "
      "(off by default). Internal/loopback/link-local targets are refused unless "
-     "allow_internal=true (SSRF guard).",
+     "allow_internal=true (SSRF guard). A `tls_coherence` field appears when "
+     "the live Chrome is newer than any preset can forge (a JA3-scoring wall "
+     "can tell) — prefer `go` for such targets.",
      {"type": "object", "properties": {
          "url": _str("Target URL (http/https) — required."),
          "method": _str("HTTP method (default GET)."),

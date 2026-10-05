@@ -114,6 +114,16 @@ def _guarded_locator(d, surface, target):
 #: point of these lanes, so "direct" has to be stated explicitly, not implied.
 _DIRECT_PROXIES = {"http": "", "https": ""}
 
+#: One round-trip for the identity `fetch` presents: the UA plus the low-entropy
+#: client hints the browser itself sends (`userAgentData` is secure-context
+#: only, so it can be null on an http:// or about:blank page).
+_FETCH_IDENTITY_JS = (
+    "({ua: navigator.userAgent, uad: navigator.userAgentData ? "
+    "{brands: navigator.userAgentData.brands.map(b => ({brand: b.brand, version: b.version})), "
+    "mobile: navigator.userAgentData.mobile, platform: navigator.userAgentData.platform} "
+    ": null})"
+)
+
 
 def register_extra(daemon) -> None:
     # ─── find (semantic locators) ─────────────────────────────────────────
@@ -952,6 +962,7 @@ def register_extra(daemon) -> None:
         from .browser import coherent_headless_ua
 
         ua_override = args.get("user_agent")
+        hint_headers: dict = {}
         if s is None:
             # SESSIONLESS LANE (0.12.0): no live session to reuse identity from
             # (the cookie-wanting case already raised above). An anonymous,
@@ -980,7 +991,14 @@ def register_extra(daemon) -> None:
                 ua = ua_override
             else:
                 try:
-                    ua = await s.page.evaluate("navigator.userAgent")
+                    ident = await s.page.evaluate(_FETCH_IDENTITY_JS)
+                    ua = ident.get("ua") if isinstance(ident, dict) else None
+                    if not ua:
+                        raise ValueError("no navigator.userAgent")
+                    # Only paired with the page's own UA: an explicit
+                    # --user-agent describes some other browser, and the live
+                    # page's hints would contradict it just as the preset's do.
+                    hint_headers = _f.client_hint_headers(ident.get("uad"))
                 except Exception:  # noqa: BLE001
                     ua = await coherent_headless_ua(s.pw)
             # An explicit --proxy overrides the session's own, so a caller can
@@ -997,6 +1015,9 @@ def register_extra(daemon) -> None:
         headers = {}
         if ua:
             headers["User-Agent"] = ua
+        # The live page's Sec-CH-UA values replace the preset's (which name the
+        # preset's own Chrome major and macOS); caller headers still win.
+        headers.update(hint_headers)
         if isinstance(args.get("headers"), dict):
             headers.update(args["headers"])
         method = str(args.get("method", "GET")).upper()
@@ -1062,6 +1083,16 @@ def register_extra(daemon) -> None:
         out["body" if is_text else "body_b64"] = body
         if truncated:
             out["truncated"] = True
+        # Non-breaking addition: present only when the ClientHello we can forge
+        # is meaningfully older than the browser the session claims to be.
+        try:
+            from curl_cffi.requests.impersonate import DEFAULT_CHROME as _latest
+        except Exception:  # noqa: BLE001 — older/newer layout → table default
+            _latest = None
+        coherence = _f.tls_coherence(ua, impersonate, _latest)
+        if coherence:
+            coherence["client_hints"] = "session" if hint_headers else "preset"
+            out["tls_coherence"] = coherence
         return out
 
     # ─── SERP discovery lane ─────────────────────────────────────────────

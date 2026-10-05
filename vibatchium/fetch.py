@@ -23,25 +23,51 @@ from __future__ import annotations
 
 import base64
 import ipaddress
+import logging
 import re
 import socket
 from urllib.parse import quote, urlsplit, urlunsplit
+
+log = logging.getLogger("vibatchium.fetch")
 
 # curl_cffi-supported Chrome impersonation targets, ascending. Picked to match
 # the live Chrome major as closely as possible; if the live Chrome is newer than
 # any known token we fall back to the ``"chrome"`` alias (curl_cffi keeps it
 # pointed at its newest Chrome target), so coherence degrades gracefully rather
 # than pinning a stale fingerprint.
+#
+# Kept in step with the desktop-Chrome members of curl_cffi's ``BrowserType``
+# enum for the floor in pyproject (0.16.3: chrome99 … chrome150). There is no
+# free chrome152+ preset yet — see ``tls_coherence``.
 _CHROME_TARGETS: list[tuple[int, str]] = [
     (99, "chrome99"), (100, "chrome100"), (101, "chrome101"), (104, "chrome104"),
     (107, "chrome107"), (110, "chrome110"), (116, "chrome116"), (119, "chrome119"),
     (120, "chrome120"), (123, "chrome123"), (124, "chrome124"), (131, "chrome131"),
     (133, "chrome133a"), (136, "chrome136"), (142, "chrome142"), (145, "chrome145"),
-    (146, "chrome146"),
+    (146, "chrome146"), (150, "chrome150"),
 ]
 _LATEST_ALIAS = "chrome"
 
 _CHROME_MAJOR_RE = re.compile(r"Chrome/(\d+)")
+_TOKEN_MAJOR_RE = re.compile(r"^chrome(\d+)[a-z]?$")
+
+# Chrome 152 added the TLS ``trust_anchors`` ClientHello extension. curl_cffi
+# 0.16.3 can *send* it, but only via impersonate.pro or hand-set curlopts — no
+# free preset carries it. So a 152+ browser fetched through any free preset
+# presents a ClientHello missing an extension the real browser sends.
+TRUST_ANCHORS_MAJOR = 152
+# How far the live Chrome may run ahead of the impersonated preset before we
+# say so. One major is routine release lag; TLS rarely moves per release.
+_COHERENCE_GAP = 1
+_COHERENCE_LOGGED: set[tuple[int, str]] = set()
+
+
+def chrome_major(ua: str | None) -> int | None:
+    """The Chrome major version in a UA string, or None if it isn't Chrome."""
+    if not ua:
+        return None
+    m = _CHROME_MAJOR_RE.search(ua)
+    return int(m.group(1)) if m else None
 
 
 def pick_impersonate(ua: str | None, override: str | None = None) -> str:
@@ -54,12 +80,9 @@ def pick_impersonate(ua: str | None, override: str | None = None) -> str:
     """
     if override:
         return override
-    if not ua:
+    major = chrome_major(ua)
+    if major is None:
         return _LATEST_ALIAS
-    m = _CHROME_MAJOR_RE.search(ua)
-    if not m:
-        return _LATEST_ALIAS
-    major = int(m.group(1))
     if major >= _CHROME_TARGETS[-1][0]:
         return _LATEST_ALIAS
     best = _CHROME_TARGETS[0][1]
@@ -69,6 +92,91 @@ def pick_impersonate(ua: str | None, override: str | None = None) -> str:
         else:
             break
     return best
+
+
+def _token_major(token: str | None) -> int | None:
+    m = _TOKEN_MAJOR_RE.match(token or "")
+    return int(m.group(1)) if m else None
+
+
+def tls_coherence(ua: str | None, impersonate: str,
+                  latest: str | None = None) -> dict | None:
+    """Describe a TLS-fingerprint gap between the live Chrome and the preset.
+
+    Returns ``{ua_major, impersonate, gap, note}`` when the browser whose
+    cookies/UA we're presenting is newer than the ClientHello we can forge —
+    by more than ``_COHERENCE_GAP`` majors, or across the Chrome 152
+    ``trust_anchors`` boundary — else None. ``latest`` is what the installed
+    curl_cffi resolves the ``"chrome"`` alias to (``DEFAULT_CHROME``); without
+    it the alias is assumed to mean the newest entry in ``_CHROME_TARGETS``.
+
+    Non-Chrome UAs and non-Chrome presets return None: there is no version
+    relationship to compare. Logs once per (ua_major, preset) per process.
+    """
+    ua_major = chrome_major(ua)
+    if ua_major is None:
+        return None
+    resolved = impersonate
+    if impersonate == _LATEST_ALIAS:
+        resolved = latest or _CHROME_TARGETS[-1][1]
+    preset_major = _token_major(resolved)
+    if preset_major is None:
+        return None
+    gap = ua_major - preset_major
+    missing_trust_anchors = preset_major < TRUST_ANCHORS_MAJOR <= ua_major
+    if gap <= _COHERENCE_GAP and not missing_trust_anchors:
+        return None
+    parts = [f"session UA is Chrome {ua_major} but the newest TLS preset "
+             f"available is {resolved} ({gap} major{'s' if gap != 1 else ''} behind)"]
+    if missing_trust_anchors:
+        parts.append(f"Chrome {TRUST_ANCHORS_MAJOR}+ sends a TLS trust_anchors "
+                     "extension no free curl_cffi preset reproduces, so the "
+                     "ClientHello will not match the browser's")
+    parts.append("a JA3/JA4-scoring wall can see the mismatch; use the browser "
+                 "(`go`) for those targets")
+    note = "; ".join(parts)
+    key = (ua_major, resolved)
+    if key not in _COHERENCE_LOGGED:
+        _COHERENCE_LOGGED.add(key)
+        log.warning("fetch TLS coherence: %s", note)
+    return {"ua_major": ua_major, "impersonate": resolved, "gap": gap, "note": note}
+
+
+def _sf_string(s: str) -> str:
+    """Serialize ``s`` as an RFC 8941 structured-field string."""
+    return '"' + str(s).replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def client_hint_headers(uad: dict | None) -> dict:
+    """Build the low-entropy ``Sec-CH-UA*`` request headers from a page's
+    ``navigator.userAgentData`` (``{brands, mobile, platform}``).
+
+    curl_cffi's preset stamps its OWN client hints — chrome150 sends
+    ``sec-ch-ua: …v="150"`` and ``sec-ch-ua-platform: "macOS"`` — even when the
+    User-Agent is overridden to the session's Linux Chrome 153. The browser on
+    the same cookies sends v="153" / "Linux", so a server comparing the two sees
+    the platform flip between requests. Taking the values from the live page
+    makes the fetch lane say what the browser says. Brand order is preserved:
+    Chrome serializes the header from the same list ``brands`` exposes.
+
+    Returns {} when ``uad`` is missing or malformed (``userAgentData`` only
+    exists in secure contexts) — the caller then keeps the preset's hints.
+    """
+    if not isinstance(uad, dict):
+        return {}
+    brands = uad.get("brands")
+    if not isinstance(brands, list) or not brands:
+        return {}
+    items = []
+    for b in brands:
+        if not isinstance(b, dict) or not b.get("brand") or b.get("version") is None:
+            return {}
+        items.append(f"{_sf_string(b['brand'])};v={_sf_string(b['version'])}")
+    out = {"sec-ch-ua": ", ".join(items),
+           "sec-ch-ua-mobile": "?1" if uad.get("mobile") else "?0"}
+    if uad.get("platform"):
+        out["sec-ch-ua-platform"] = _sf_string(uad["platform"])
+    return out
 
 
 def proxy_cfg_to_curl(cfg: dict | None) -> dict | None:

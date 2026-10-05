@@ -32,6 +32,115 @@ def test_pick_impersonate_exact_known_major():
     assert fetch.pick_impersonate("X Chrome/131.0.0.0 Y") == "chrome131"
 
 
+def test_pick_impersonate_uses_chrome150_between_146_and_150():
+    # 0.16.x added chrome150; a 148 browser must not be rounded down to 146.
+    assert fetch.pick_impersonate("X Chrome/148.0.0.0 Y") == "chrome146"
+    assert fetch.pick_impersonate("X Chrome/149.0.0.0 Y") == "chrome146"
+    assert fetch.pick_impersonate("X Chrome/150.0.0.0 Y") == "chrome"
+    assert ("chrome150" in dict(fetch._CHROME_TARGETS).values())
+
+
+def test_chrome_targets_match_installed_curl_cffi():
+    """Every token in the table must be a real preset in the installed build,
+    and every desktop-Chrome preset the build ships should be in the table —
+    otherwise a curl_cffi bump silently leaves the newest preset unused."""
+    import pytest
+    imp = pytest.importorskip("curl_cffi.requests.impersonate")
+    shipped = {b.value for b in imp.BrowserType
+               if b.value.startswith("chrome") and "android" not in b.value}
+    table = {tok for _, tok in fetch._CHROME_TARGETS}
+    assert table <= shipped, f"unknown tokens: {table - shipped}"
+    assert shipped <= table, f"presets missing from _CHROME_TARGETS: {shipped - table}"
+    # the alias we fall back to must resolve to the newest entry in the table
+    assert imp.DEFAULT_CHROME == fetch._CHROME_TARGETS[-1][1]
+
+
+# ─── tls_coherence ────────────────────────────────────────────────────────
+_UA153 = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+          "(KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36")
+
+
+def test_tls_coherence_flags_ua_ahead_of_newest_preset():
+    c = fetch.tls_coherence(_UA153, "chrome", latest="chrome150")
+    assert c is not None
+    assert c["ua_major"] == 153
+    assert c["impersonate"] == "chrome150"      # the alias, resolved
+    assert c["gap"] == 3
+    assert "trust_anchors" in c["note"]
+
+
+def test_tls_coherence_alias_defaults_to_table_head_without_latest():
+    c = fetch.tls_coherence(_UA153, "chrome")
+    assert c["impersonate"] == fetch._CHROME_TARGETS[-1][1]
+
+
+def test_tls_coherence_silent_within_one_major():
+    assert fetch.tls_coherence("X Chrome/151.0 Y", "chrome", latest="chrome150") is None
+    assert fetch.tls_coherence("X Chrome/150.0 Y", "chrome", latest="chrome150") is None
+    assert fetch.tls_coherence("X Chrome/136.0 Y", "chrome136") is None
+
+
+def test_tls_coherence_trust_anchors_boundary_flags_even_a_one_major_gap():
+    # A hypothetical chrome151 preset vs a 152 browser: gap 1, but 152 added
+    # an extension the preset lacks.
+    c = fetch.tls_coherence("X Chrome/152.0 Y", "chrome151")
+    assert c is not None and c["gap"] == 1 and "trust_anchors" in c["note"]
+    # ...and a preset that already carries it is fine.
+    assert fetch.tls_coherence("X Chrome/153.0 Y", "chrome152") is None
+
+
+def test_tls_coherence_gap_without_trust_anchors():
+    c = fetch.tls_coherence("X Chrome/149.0 Y", "chrome146")
+    assert c is not None and c["gap"] == 3 and "trust_anchors" not in c["note"]
+
+
+def test_tls_coherence_ignores_non_chrome():
+    assert fetch.tls_coherence("Mozilla/5.0 Firefox/140.0", "chrome") is None
+    assert fetch.tls_coherence(None, "chrome") is None
+    assert fetch.tls_coherence(_UA153, "safari260") is None
+
+
+def test_tls_coherence_logs_once(caplog):
+    import logging
+    fetch._COHERENCE_LOGGED.discard((160, "chrome150"))
+    ua = "X Chrome/160.0 Y"
+    with caplog.at_level(logging.WARNING, logger="vibatchium.fetch"):
+        fetch.tls_coherence(ua, "chrome", latest="chrome150")
+        fetch.tls_coherence(ua, "chrome", latest="chrome150")
+    assert sum("TLS coherence" in r.getMessage() for r in caplog.records) == 1
+
+
+# ─── client_hint_headers ──────────────────────────────────────────────────
+def test_client_hint_headers_from_user_agent_data():
+    uad = {"brands": [{"brand": "Google Chrome", "version": "153"},
+                      {"brand": "Not_A Brand", "version": "8"},
+                      {"brand": "Chromium", "version": "153"}],
+           "mobile": False, "platform": "Linux"}
+    h = fetch.client_hint_headers(uad)
+    # byte-for-byte what Chrome 153 itself sent for this userAgentData
+    assert h == {
+        "sec-ch-ua": '"Google Chrome";v="153", "Not_A Brand";v="8", "Chromium";v="153"',
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": '"Linux"',
+    }
+
+
+def test_client_hint_headers_escapes_and_mobile():
+    h = fetch.client_hint_headers({"brands": [{"brand": 'A"B\\C', "version": "1"}],
+                                   "mobile": True, "platform": ""})
+    assert h["sec-ch-ua"] == '"A\\"B\\\\C";v="1"'
+    assert h["sec-ch-ua-mobile"] == "?1"
+    assert "sec-ch-ua-platform" not in h
+
+
+def test_client_hint_headers_missing_or_malformed_is_empty():
+    assert fetch.client_hint_headers(None) == {}
+    assert fetch.client_hint_headers({}) == {}
+    assert fetch.client_hint_headers({"brands": []}) == {}
+    assert fetch.client_hint_headers({"brands": [{"brand": "X"}]}) == {}
+    assert fetch.client_hint_headers({"brands": "nope"}) == {}
+
+
 # ─── proxy_cfg_to_curl ────────────────────────────────────────────────────
 def test_proxy_cfg_with_auth_embeds_userinfo():
     out = fetch.proxy_cfg_to_curl({"server": "http://h:8080", "username": "u", "password": "p"})
@@ -160,3 +269,62 @@ def test_fetch_verb_end_to_end(local_server):
     assert r["impersonate"].startswith("chrome")
     assert "one-way" in r["cookie_sync"]          # unidirectional caveat surfaced
     assert "The Main Title" in r.get("body", "")  # body returned as text
+
+
+# ─── LIVE: the fetch lane presents the browser's own client hints ──────────
+def test_fetch_verb_sends_session_client_hints(local_server):
+    """curl_cffi's preset stamps its own Sec-CH-UA (its Chrome major, macOS).
+    With a live session the fetch lane must send what the browser sends, so the
+    platform and version don't flip between browser and fetch requests on the
+    same cookies. Also checks `tls_coherence` agrees with the pure helper."""
+    import http.server
+    import socketserver
+    import threading
+
+    import pytest
+    pytest.importorskip("curl_cffi")
+    from vibatchium.client import call
+
+    seen: dict = {}
+
+    class Echo(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            seen.update({k.lower(): v for k, v in self.headers.items()})
+            self.send_response(200)
+            self.send_header("Content-Length", "2")
+            self.end_headers()
+            self.wfile.write(b"ok")
+
+        def log_message(self, *a):
+            pass
+
+    srv = socketserver.TCPServer(("127.0.0.1", 0), Echo)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        # 127.0.0.1 is a secure context, so userAgentData exists on this page.
+        call("go", {"url": f"{local_server}/article.html", "wait_until": "load"})
+        ident = call("eval", {"expr": (
+            "({ua: navigator.userAgent, "
+            "brands: navigator.userAgentData.brands.map(b => ({brand: b.brand, version: b.version})), "
+            "platform: navigator.userAgentData.platform})")})["value"]
+        port = srv.server_address[1]
+        r = call("fetch", {"url": f"http://127.0.0.1:{port}/", "allow_internal": True})
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+    assert r["status"] == 200
+    assert seen["user-agent"] == ident["ua"]
+    expected = fetch.client_hint_headers(
+        {"brands": ident["brands"], "mobile": False, "platform": ident["platform"]})
+    assert seen["sec-ch-ua"] == expected["sec-ch-ua"]
+    assert seen["sec-ch-ua-platform"] == expected["sec-ch-ua-platform"]
+
+    want = fetch.tls_coherence(ident["ua"], r["impersonate"])
+    if want is None:
+        assert "tls_coherence" not in r
+    else:
+        tc = r["tls_coherence"]
+        assert tc["ua_major"] == want["ua_major"]
+        assert tc["gap"] == want["gap"]
+        assert tc["client_hints"] == "session"
