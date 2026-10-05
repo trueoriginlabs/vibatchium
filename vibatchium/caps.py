@@ -93,6 +93,44 @@ CAP_BUCKETS: dict[str, set[str]] = {
     "plugins":  set(),
 }
 
+# The `min` profile — for MCP clients that load EVERY tool schema up front on
+# every turn (no tool search / deferred loading). There, each tool is context
+# the model pays for whether it calls it or not, so `lean`'s ~86 tools are a tax.
+# This is the smallest set that still finishes the common job: read a walled
+# page, drive a short form/search flow, confirm it landed, clean up. Each verb
+# has to earn its slot:
+#
+#   explore        one call: stealth session → navigate → text. The 80% case.
+#   go             navigate a stateful session (auto-starts it — no `start`).
+#   extract        LLM-ready Markdown of the current page; supersedes `text`.
+#   screenshot     the fallback when extract flags structure_loss (tiles=true),
+#                  and the only way to SEE a page.
+#   act            interact by intent without knowing a selector.
+#   map            @eN refs — the deterministic targets when act's lexical match
+#                  misses (`executed: 0`).
+#   click, fill    act's deterministic twins, driven by map refs or @label:/
+#                  @text: locators. fill (not type) — it clears first and is the
+#                  vault-safe path.
+#   press          submit a search box / form with Enter; act can't reliably
+#                  pick a key.
+#   expect         one-call post-action check (element state / text / URL /
+#                  challenge wall) — stands in for wait_* + url + text.
+#   session_close  release a stateful session's Chrome. `go` auto-starts one,
+#                  so without this an agent leaks Chromes into a shared
+#                  daemon's MAX_SESSIONS budget.
+#   (+ status, ALWAYS_EXPOSED.)
+#
+# Left out on purpose: start (go auto-starts), observe (act's dry run), text/
+# html (extract), type (fill), wait_* (expect), back/reload (go), tabs, frames,
+# and every opt-in lane. Anything else is a `--caps min,<bucket>` away.
+MIN_VERBS: frozenset[str] = frozenset({
+    "explore", "go", "extract", "screenshot", "act", "map", "click", "fill",
+    "press", "expect", "session_close",
+})
+# A bucket as well as a profile, so it composes with the others like any
+# bucket does (`--caps min,search`) and the per-goal caps check can use it.
+CAP_BUCKETS["min"] = set(MIN_VERBS)
+
 # Permitted regardless of the cap filter — necessities for an agent that needs
 # to know what to do when nothing else matches.
 ALWAYS_EXPOSED: set[str] = {"status"}
@@ -106,6 +144,7 @@ ALWAYS_EXPOSED: set[str] = {"status"}
 # `vb mcp` default cannot drift from what setup installs.
 LEAN_CAPS = "core,nav,content,input,element,agent,vision,session,pages"
 CAP_PROFILES: dict[str, set[str] | None] = {
+    "min":  {"min"},    # 12 tools, for clients with no tool search — see MIN_VERBS
     "lean": set(LEAN_CAPS.split(",")),
     "full": None,   # explicit no-filter (every verb) — alias of `all`
 }
@@ -124,7 +163,7 @@ def resolve_caps(caps_spec: str | None) -> set[str] | None:
     parts = {p.strip().lower() for p in caps_spec.split(",") if p.strip()}
     if not parts or "all" in parts:
         return None
-    # Expand named profiles (lean/full) into buckets; 'full' (like 'all') is a
+    # Expand named profiles (min/lean/full) into buckets; 'full' (like 'all') is a
     # no-filter sentinel. Profiles may be mixed with bare bucket names.
     expanded: set[str] = set()
     for p in parts:

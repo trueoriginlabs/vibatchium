@@ -802,6 +802,18 @@ VIBATCHIUM_FILE_ROOTS=<a>:<b>   # daemon env: every caller path must resolve ins
 
 **MCP tool surface (0.8.0).** `vb mcp` exposes the **lean** profile (86 verbs — the 80%-case: browse, extract, interact, screenshot, tabs, multi-session, the agent loop incl. `explore`/`expect`) by default, not all 162. Pass `vb mcp --caps=full` (or `all`) for everything, or a custom bucket CSV. The long tail (network, devtools incl. `console_*`, secrets, safety, liveview, goals, storage, **and plugin `x.*` verbs**) is one re-registration away — note the lean default also hides dotted plugin verbs, so pass `--caps=full` or `--caps=lean,plugins` if an agent needs them over MCP.
 
+**`--caps min` — for clients without tool search.** Claude Code defers MCP tools
+behind tool search, so `lean` costs it little. A client that loads every schema
+on every turn pays for all 86 — about 71 KB, ~17.7k tokens of `tools/list`
+(`full`: 162 tools, ~130 KB, ~32.6k). `vb mcp --caps min` (or `vb setup --caps
+min`) exposes 12 tools in ~15 KB, ~3.8k tokens: `explore`, `go`, `extract`,
+`screenshot`, `act`, `map`, `click`, `fill`, `press`, `expect`, `session_close`
+and the always-on `status`. That covers reading a walled page and a short
+form or search flow. `go` auto-starts the session, `expect` does the waiting, and
+`session_close` gives the Chrome back. Each verb's reason is in `caps.py`.
+`min` composes like a bucket (`--caps min,search`), works on a `--caps`
+REST shim too, and is a subset of `lean`.
+
 ## Plugins — extend the verb surface
 
 Third-party packages and local dirs can register new dotted verbs (`x.search`,

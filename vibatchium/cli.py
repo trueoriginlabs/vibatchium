@@ -1138,7 +1138,8 @@ def verify_url_cli(ctx, url, url_flag, check_http, timeout_ms):
                    "cap buckets; overwrites a hand-edited --caps).")
 @click.option("--caps", "caps", default=None,
               help="Cap buckets for the MCP server (default: the lean profile). "
-                   "e.g. `lean,search` to expose `vb search` as a tool, or `all`.")
+                   "e.g. `lean,search` to expose `vb search` as a tool, `min` "
+                   "(12 tools) for a client with no tool search, or `all`.")
 @click.pass_context
 def setup(ctx, agents, check, no_docs, force, caps):
     """Wire vibatchium into installed agent CLIs (Codex, Claude Code, Cursor).
@@ -3584,7 +3585,9 @@ def fingerprint(ctx, target, url, extract, settle_ms):
 @click.option("--caps", default=None,
               help="Comma-separated capability list to expose. Default: the "
                    "`lean` profile (~80-verb 80%-case surface) — pass `--caps=full` "
-                   "(or `all`) to expose every tool. Buckets: core,session,nav,"
+                   "(or `all`) to expose every tool, or `--caps=min` for the "
+                   "12-tool surface (clients that load every schema up front, "
+                   "no tool search). Buckets: core,session,nav,"
                    "content,input,element,pages,storage,network,dialogs,overrides,"
                    "vision,devtools,agent,… Example: `--caps=core,nav,input,agent`.")
 @click.option("--isolated", is_flag=True,

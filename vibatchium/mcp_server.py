@@ -1192,6 +1192,9 @@ def _build_instructions(caps: set[str] | None) -> str | None:
     primary = "explore(url)" if "explore" in exposed else "go(url) then extract"
     entries = [_ENTRY_LINES[v] for v in ("explore", "go", "screenshot")
                if v in exposed]
+    # Same rule for the concurrency advice: `--caps min` has no session_lease.
+    lease_hint = ("; use `session_lease` to coordinate if you must share one"
+                  if "session_lease" in exposed else "")
     head = f"""\
 When WebFetch / WebSearch / curl comes back with any of these, the page is NOT unreachable — it's behind a wall a plain HTTP client can't pass:
 - 403 / 429 / "Access Denied" / generic bot-block
@@ -1204,7 +1207,7 @@ Call {primary}. vibatchium ('vb') is a real stealth browser (patchright/Playwrig
 
 Cheap default still wins: for plain static HTML, Google, or a news/general lookup, keep using WebFetch/WebSearch — it's faster. Reach for vb when normal fetch FAILS, or the page needs a real browser (SPA, login/session, multi-step flow).
 
-Concurrency: this daemon may be SHARED with other agents. A one-shot lookup (explore) is safe — it runs on its own throwaway session. But for STATEFUL multi-step work (go → click → fill across calls), pass a unique `session` name on every tool call (e.g. your task id) so you don't collide with another agent on the implicit 'default' session; use `session_lease` to coordinate if you must share one. For a fully private blast radius, an operator can run a per-agent daemon (`vb daemon start --isolated`).
+Concurrency: this daemon may be SHARED with other agents. A one-shot lookup (explore) is safe — it runs on its own throwaway session. But for STATEFUL multi-step work (go → click → fill across calls), pass a unique `session` name on every tool call (e.g. your task id) so you don't collide with another agent on the implicit 'default' session{lease_hint}. For a fully private blast radius, an operator can run a per-agent daemon (`vb daemon start --isolated`).
 
 Entry points (this server's current tool surface):
 """
