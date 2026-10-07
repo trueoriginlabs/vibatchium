@@ -4,7 +4,7 @@ All notable changes to vibatchium are documented here. Versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Until 1.0,
 minor bumps may include breaking changes; we'll always call them out here.
 
-## [0.20.0] — 2026-10-06
+## [0.20.0] — 2026-10-07
 
 A fleet of logged-in identities on one box is the thing vibatchium is for, and
 a fleet on one box is also the easiest thing to fingerprint: every session
