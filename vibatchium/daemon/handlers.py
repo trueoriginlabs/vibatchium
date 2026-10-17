@@ -25,7 +25,8 @@ from .paths import (
     list_session_names, secure_mkdir, secure_write, session_dir,
     set_active_session_name, validate_name, validate_session_ref,
 )
-from .registry import current_session_ctx, get_max_ephemeral, SessionLimitError
+from .registry import (current_session_ctx, get_max_ephemeral, SessionLimitError,
+                       session_explicit_ctx)
 
 
 def _package_root() -> str:
@@ -2378,27 +2379,7 @@ def register_all(daemon) -> None:
                     body["screenshot_error"] = f"{type(exc).__name__}: {exc}"
             return body
 
-        # BACKWARD-COMPAT: an explicit `--session` pins the legacy path verbatim
-        # — explore runs on, and (unless keep_open) closes, the NAMED session,
-        # exactly what the existing explore tests assert. Only the no-pin case
-        # gets the off-budget ephemeral lane.
-        explicit = current_session_ctx.get() != DEFAULT_SESSION_NAME
-        if explicit:
-            # explore is UNLOCKED, so dispatch's lease gate never ran. Enforce it
-            # here on the explicit-session path: a non-holder must not navigate or
-            # tear down a leased session via explore. (The no-pin lane below mints
-            # its own never-leased session, so it needs no gate.)
-            _pin = current_session_ctx.get()
-            log.info("explore on pinned session=%s (on-budget; omit the session "
-                     "for the off-budget ephemeral lane)", _pin)
-            _pe = d.registry.get(_pin)
-            if _pe is not None:
-                _active = _pe.lease_active()
-                if _active is not None:
-                    _ok, _reason = _lease.check_access(
-                        _active, _lease.holder_token_from_args(args), _pin)
-                    if not _ok:
-                        raise RuntimeError(_reason)
+        async def _pinned_body():
             out = await _run_body()
             out["closed"] = False
             # 0.18.13: say which lane ran. Pinning a session on explore is a
@@ -2420,6 +2401,47 @@ def register_all(daemon) -> None:
                     pass
             out["elapsed_ms"] = int((_time.time() - t0) * 1000)
             return out
+
+        # BACKWARD-COMPAT: an explicit `--session` pins the legacy path verbatim
+        # — explore runs on, and (unless keep_open) closes, the NAMED session,
+        # exactly what the existing explore tests assert. Only the no-pin case
+        # gets the off-budget ephemeral lane.
+        #
+        # "Explicit" means THIS call named it. It used to be `name != default`,
+        # so a persisted `session use X` silently pinned every caller's
+        # explore to X: four agents' one-shot lookups shared one page, read
+        # each other's results and closed the browser under each other.
+        # `default` is never pinned, named or not: explore must not navigate
+        # and close the session every bare CLI verb lands on.
+        explicit = (session_explicit_ctx.get()
+                    and current_session_ctx.get() != DEFAULT_SESSION_NAME)
+        if explicit:
+            # explore is UNLOCKED, so dispatch's lease gate never ran. Enforce it
+            # here on the explicit-session path: a non-holder must not navigate or
+            # tear down a leased session via explore. (The no-pin lane below mints
+            # its own never-leased session, so it needs no gate.)
+            _pin = current_session_ctx.get()
+            log.info("explore on pinned session=%s (on-budget; omit the session "
+                     "for the off-budget ephemeral lane)", _pin)
+            def _lease_gate():
+                _pe = d.registry.get(_pin)
+                if _pe is not None:
+                    _active = _pe.lease_active()
+                    if _active is not None:
+                        _ok, _reason = _lease.check_access(
+                            _active, _lease.holder_token_from_args(args), _pin)
+                        if not _ok:
+                            raise RuntimeError(_reason)
+            # Gate before queueing (a refused caller shouldn't wait its turn)
+            # and again once it's our turn: a lease taken while we queued
+            # must still stop us navigating and closing the session.
+            _lease_gate()
+            # Hold the per-name explore turn across go → text → stop so a
+            # concurrent pinned explore can't navigate this page between our
+            # goto and our read, or close it mid-read.
+            async with d.registry.explore_turn(_pin):
+                _lease_gate()
+                return await _pinned_body()
 
         # OFF-BUDGET LANE (0.7.0): no pinned session → mint a transient,
         # uniquely-named ephemeral session so one-shot exploration never

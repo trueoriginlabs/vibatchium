@@ -109,6 +109,13 @@ async def _maybe_autoinstall_chrome(exc: BaseException) -> bool:
 current_session_ctx: ContextVar[str] = ContextVar(
     "vibatchium_current_session", default=DEFAULT_SESSION_NAME
 )
+# True only when THIS call named its session (`_session` / --session /
+# VIBATCHIUM_SESSION / the MCP `session` arg). False when the dispatcher fell
+# back to the persisted active-session file. The two used to be told apart by
+# `name != "default"`, which reads a `vb session use X` from weeks ago as a pin.
+session_explicit_ctx: ContextVar[bool] = ContextVar(
+    "vibatchium_session_explicit", default=False
+)
 
 
 def get_max_sessions() -> int:
@@ -390,6 +397,10 @@ class SessionRegistry:
         # session names (`_ex-<pid>-<seq>`). Single-process daemon → a plain
         # increment is race-free.
         self._ephemeral_seq = 0
+        # Pinned explores on one session name run one at a time (see
+        # explore_turn). name → [lock, holders+waiters]; an entry is dropped
+        # when its count reaches 0, so per-URL session names don't pile up.
+        self._explore_locks: dict[str, list] = {}
 
     async def _ensure_pw(self) -> Playwright:
         if self._pw is None:
@@ -571,6 +582,23 @@ class SessionRegistry:
         daemon. Single-process → the increment is race-free."""
         self._ephemeral_seq += 1
         return f"_ex-{os.getpid()}-{self._ephemeral_seq}"
+
+    @contextlib.asynccontextmanager
+    async def explore_turn(self, name: str):
+        """Serializes pinned explores on `name`. A pinned explore is
+        go → text → stop on a SHARED page and explore is an unlocked verb, so
+        two at once interleave: B's goto lands between A's goto and A's text
+        (A gets B's page) and A's stop closes the browser under B. Only
+        explore-vs-explore — other verbs on the session don't take this."""
+        slot = self._explore_locks.setdefault(name, [asyncio.Lock(), 0])
+        slot[1] += 1
+        try:
+            async with slot[0]:
+                yield
+        finally:
+            slot[1] -= 1
+            if slot[1] == 0:
+                self._explore_locks.pop(name, None)
 
     def warming_names(self) -> set[str]:
         """Names with a parked or in-flight pre-warm Chrome. These are NOT in
