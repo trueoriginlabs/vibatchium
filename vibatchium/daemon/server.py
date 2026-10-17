@@ -43,7 +43,8 @@ from .paths import (
 )
 from . import ambient as _ambient
 from . import freeze as _freeze
-from .registry import SessionEntry, SessionRegistry, current_session_ctx
+from .registry import (SessionEntry, SessionRegistry, current_session_ctx,
+                       session_explicit_ctx)
 
 log = logging.getLogger("vibatchium.server")
 
@@ -547,6 +548,7 @@ class Daemon:
         # Push the selected session into the contextvar so handlers (via the
         # session-routed properties above) operate on the right SessionEntry.
         tok = current_session_ctx.set(session_name)
+        explicit_tok = session_explicit_ctx.set(bool(explicit_session))
         fs_tok = _fspolicy.push_scope(fs_scope) if fs_scope is not None else None
         try:
             if lock_class == "registry":
@@ -711,6 +713,7 @@ class Daemon:
                 self._ambient.reap()
             if fs_tok is not None:
                 _fspolicy.pop_scope(fs_tok)
+            session_explicit_ctx.reset(explicit_tok)
             current_session_ctx.reset(tok)
 
     async def _run_session_verb_with_recovery(self, cmd, args, entry, name):

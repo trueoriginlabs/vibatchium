@@ -4,6 +4,33 @@ All notable changes to vibatchium are documented here. Versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Until 1.0,
 minor bumps may include breaking changes; we'll always call them out here.
 
+## [Unreleased]
+
+### fix: one-shot `explore` calls could read each other's pages
+
+`explore` without `--session` is meant to run on its own throwaway session.
+It decided that by checking `session != "default"`, so once anyone had run
+`vb session use X`, X counted as a pin. On a box whose active-session file
+named a session, every agent's one-shot explore went to that one session.
+explore takes no session lock, so concurrent calls interleaved: one caller's
+`goto` landed between another's `goto` and its text read (a lookup returned
+someone else's page), and each caller's auto-close shut the browser under the
+rest (`net::ERR_ABORTED`, `Target page … has been closed`).
+
+- Only a session named by the call itself (`--session`, `VIBATCHIUM_SESSION`,
+  the MCP `session` arg) pins explore now. The active-session file doesn't.
+  **Behaviour change:** after `vb session use work`, a bare `vb explore` used
+  to run with work's cookies (and then close work). It now gets a fresh
+  profile, so a logged-in page may come back walled. Pass `--session work`.
+  `VIBATCHIUM_SESSION` in an MCP server's env still counts as naming one, so
+  every agent on that server pins to it (now one at a time).
+- Pinned explores on the same session name run one at a time, and the lease
+  check runs again when a queued explore's turn comes. This is explore vs
+  explore only: a `go`/`click` from another caller on the same session can
+  still interleave with an explore, as on any shared session — use a lease.
+  Queued explores each cold-start Chrome, so a long queue on one name can
+  outlast the client's 120s timeout.
+
 ## [0.20.0] — 2026-10-07
 
 A fleet of logged-in identities on one box is the thing vibatchium is for, and

@@ -295,3 +295,89 @@ def test_mcp_explore_description_off_budget():
     desc = explore[1]
     assert "ONE-CALL" in desc                                # existing assert preserved
     assert "ephemeral" in desc.lower() or "off-budget" in desc.lower()
+
+
+# ─── LIVE: concurrent explores never read each other's pages ─────────────
+def _page(who: str) -> str:
+    # A data: URL per caller so each page's text names exactly one person.
+    return f"data:text/html,<title>{who}</title><p>profile page of {who}</p>"
+
+
+def test_active_session_file_does_not_pin_explore():
+    """A persisted `session use X` is not a pin. It used to be (the check was
+    `name != default`), so every agent's no-session explore ran on X: four
+    researchers shared one page and one read another's lookup."""
+    name = "vbtest-explore-active"
+    try:
+        call("session_new", {"name": name})
+        call("session_use", {"name": name})
+        r = call("explore", {"url": _page("michael"), "skip_verify": True})
+        assert r["lane"] == "ephemeral"
+        assert r["session"].startswith("_ex-")
+        assert "michael" in r["text"]
+        running = {s["name"] for s in call("session_list")["sessions"] if s["running"]}
+        assert name not in running                       # active session untouched
+    finally:
+        _make_default_active()
+        try:
+            call("session_delete", {"name": name})
+        except DaemonError:
+            pass
+
+
+def _explore_all(people, session=None):
+    from concurrent.futures import ThreadPoolExecutor
+
+    def one(who):
+        return who, call("explore", {"url": _page(who), "skip_verify": True},
+                         session=session)
+    with ThreadPoolExecutor(len(people)) as pool:
+        return list(pool.map(one, people))
+
+
+def test_concurrent_unpinned_explores_are_isolated():
+    _make_default_active()
+    people = ["michael", "roman", "olena", "dmytro"]
+    for who, r in _explore_all(people):
+        assert r["lane"] == "ephemeral"
+        assert f"profile page of {who}" in r["text"], (who, r["text"][:200])
+        others = [p for p in people if p != who]
+        assert not any(o in r["text"] for o in others), (who, r["text"][:200])
+    assert len({r["session"] for _, r in _explore_all(people)}) == len(people)
+
+
+def test_concurrent_pinned_explores_do_not_cross_read():
+    """Explicitly pinning one session from several callers at once must not
+    hand one caller another's page or close the browser mid-read. Pinned
+    explores on a name now run one at a time."""
+    name = "vbtest-explore-shared-pin"
+    people = ["michael", "roman", "olena", "dmytro"]
+    try:
+        for who, r in _explore_all(people, session=name):
+            assert r["lane"] == "pinned"
+            assert f"profile page of {who}" in r["text"], (who, r["text"][:200])
+            assert r["closed"] is True
+    finally:
+        for verb in ("session_close", "session_delete"):
+            try:
+                call(verb, {"name": name})
+            except DaemonError:
+                pass
+
+
+def test_explore_turn_serializes_and_forgets_names():
+    reg = SessionRegistry()
+    order = []
+
+    async def turn(tag, hold):
+        async with reg.explore_turn("x"):
+            order.append(f"{tag}-in")
+            await asyncio.sleep(hold)
+            order.append(f"{tag}-out")
+
+    async def go():
+        await asyncio.gather(turn("a", 0.05), turn("b", 0))
+        assert reg._explore_locks == {}          # no lock left per name
+
+    asyncio.run(go())
+    assert order == ["a-in", "a-out", "b-in", "b-out"]
