@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -31,6 +32,42 @@ def _emit(result, json_mode: bool, fallback_key: str | None = None):
         click.echo(json.dumps(result))
         return
     click.echo(result)
+
+
+class _DashArgs(click.Command):
+    """Lets negative numbers and dash-leading text through as arguments:
+    `mouse wheel 0 -300`, `geolocation -33.87 151.21`, `fill '#t' '-10 deaths'`.
+    Plain click reads them as options (and splits `-10 deaths` into one-letter
+    flags, `-h` among them), so the command never runs. Here only this
+    command's own options parse as options; a `--name` token that isn't one
+    still errors, so a mistyped flag is never typed into the page as text."""
+
+    def parse_args(self, ctx, args):
+        opts: dict = {name: None for name in ctx.help_option_names}   # None = a flag
+        for p in self.params:
+            if isinstance(p, click.Option):
+                takes = 0 if (p.is_flag or p.count) else p.nargs
+                for name in (*p.opts, *p.secondary_opts):
+                    opts[name] = takes or None
+        options, values = [], []
+        i = 0
+        while i < len(args):
+            a = args[i]
+            if a == "--":
+                values.extend(args[i + 1:])
+                break
+            name = a.split("=", 1)[0]
+            if name in opts:
+                options.append(a)
+                if opts[name] and "=" not in a:
+                    options.extend(args[i + 1:i + 1 + opts[name]])
+                    i += opts[name]
+            elif re.fullmatch(r"--[A-Za-z][\w-]*", name):
+                raise click.NoSuchOption(name, ctx=ctx)
+            else:
+                values.append(a)
+            i += 1
+        return super().parse_args(ctx, [*options, "--", *values])
 
 
 def _coerce(value, typ: str | None):
@@ -1682,7 +1719,7 @@ def search(ctx, query, max_results, engine, site, urls_only, impersonate,
                f"in {result.get('elapsed_ms')}ms")
 
 
-@cli.command(name="eval")
+@cli.command(name="eval", cls=_DashArgs)
 @click.argument("expr", required=False)
 @click.option("--stdin", is_flag=True, help="Read expression from stdin.")
 @click.option("--timeout-ms", type=int, default=30000, show_default=True,
@@ -1941,7 +1978,7 @@ def click_cmd(ctx, target, timeout_ms, index, auto_dismiss_banners):
     _emit(call("click", args), ctx.obj["json"], "clicked")
 
 
-@cli.command()
+@cli.command(cls=_DashArgs)
 @click.argument("target")
 @click.argument("text_arg", metavar="TEXT", required=False)
 @click.option("--timeout", "timeout_ms", default=30_000, type=int)
@@ -1985,7 +2022,7 @@ def fill(ctx, target, text_arg, timeout_ms, index, use_secret, allow_cross_origi
     _emit(call("fill", args), ctx.obj["json"], "filled")
 
 
-@cli.command(name="type")
+@cli.command(name="type", cls=_DashArgs)
 @click.argument("target")
 @click.argument("text_arg", metavar="TEXT")
 @click.option("--delay", "delay_ms", default=0, type=int, help="Per-keystroke delay (ms).")
@@ -2262,7 +2299,7 @@ def mouse():
     """Mouse control (click / move / down / up / dblclick / wheel)."""
 
 
-@mouse.command("click")
+@mouse.command("click", cls=_DashArgs)
 @click.argument("x", type=float)
 @click.argument("y", type=float)
 @click.option("--button", default="left", type=click.Choice(["left", "right", "middle"]))
@@ -2271,7 +2308,7 @@ def mouse_click(ctx, x, y, button):
     _emit(call("mouse", {"action": "click", "x": x, "y": y, "button": button}), ctx.obj["json"])
 
 
-@mouse.command("dblclick")
+@mouse.command("dblclick", cls=_DashArgs)
 @click.argument("x", type=float)
 @click.argument("y", type=float)
 @click.pass_context
@@ -2279,7 +2316,7 @@ def mouse_dblclick(ctx, x, y):
     _emit(call("mouse", {"action": "dblclick", "x": x, "y": y}), ctx.obj["json"])
 
 
-@mouse.command("move")
+@mouse.command("move", cls=_DashArgs)
 @click.argument("x", type=float)
 @click.argument("y", type=float)
 @click.option("--steps", default=1, type=int)
@@ -2302,7 +2339,7 @@ def mouse_up(ctx, button):
     _emit(call("mouse", {"action": "up", "button": button}), ctx.obj["json"])
 
 
-@mouse.command("wheel")
+@mouse.command("wheel", cls=_DashArgs)
 @click.argument("dx", type=float)
 @click.argument("dy", type=float)
 @click.pass_context
@@ -2411,7 +2448,7 @@ def highlight(ctx, target, ms):
 
 # ─── geolocation / media ─────────────────────────────────────────────────
 
-@cli.command()
+@cli.command(cls=_DashArgs)
 @click.argument("lat", type=float, required=False)
 @click.argument("lng", type=float, required=False)
 @click.option("--accuracy", default=10, type=float)

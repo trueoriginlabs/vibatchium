@@ -6,6 +6,22 @@ minor bumps may include breaking changes; we'll always call them out here.
 
 ## [Unreleased]
 
+### fix: negative numbers and dash-leading text no longer fail as options
+
+click read any argument starting with `-` as an option, so these never reached
+the daemon: `vb mouse wheel 0 -300` (scroll up), `vb mouse move -5 10`,
+`vb geolocation -33.87 151.21` (every southern-hemisphere latitude),
+`vb fill '#t' '-10 deaths'`, `vb type '#t' -x`, `vb eval -1`. Each exited 2
+with "No such option". A caller that ignored exit codes never knew: clipper's
+upward scrolls had never worked. Text starting with `-h` was worse: click
+split it into one-letter flags, found `-h`, printed help and exited 0.
+
+- `mouse click|dblclick|move|wheel`, `geolocation`, `fill`, `type` and `eval`
+  now treat only their own options as options. Any other token is an
+  argument, in order, so `--` is no longer needed (it still works).
+- A `--name` token that isn't one of the command's options still errors, so a
+  mistyped flag (`--delya 40`) is never typed into the page as text.
+
 ### fix: one-shot `explore` calls could read each other's pages
 
 `explore` without `--session` is meant to run on its own throwaway session.
