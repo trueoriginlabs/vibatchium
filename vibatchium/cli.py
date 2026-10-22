@@ -2313,13 +2313,52 @@ def mouse_wheel(ctx, dx, dy):
 # ─── upload / dialog / download ──────────────────────────────────────────
 
 @cli.command()
-@click.argument("target")
-@click.argument("files", nargs=-1, required=True, type=click.Path(exists=True))
+@click.argument("target", required=False)
+@click.argument("files", nargs=-1, type=click.Path(exists=True))
+@click.option("--next", "arm_next", is_flag=True,
+              help="Arm the NEXT native file chooser with the given files (no TARGET), "
+                   "then click the upload button with any verb.")
+@click.option("--timeout", "timeout_s", default=30.0, type=float, show_default=True,
+              help="With --next: seconds before the arm expires.")
+@click.option("--status", "show_status", is_flag=True,
+              help="Report whether the armed chooser was filled.")
+@click.option("--wait", "wait_s", default=3.0, type=float, show_default=True,
+              help="With --status: wait this long for an armed chooser to settle.")
+@click.option("--native", type=click.Choice(["on", "off"]), default=None,
+              help="on: let Chrome show its own file dialog (hand-driven windows). "
+                   "off: intercept again (default: unarmed choosers are swallowed).")
 @click.pass_context
-def upload(ctx, target, files):
-    """Set files on an input[type=file] element."""
-    _emit(call("upload", {"target": target, "files": [str(Path(f).resolve()) for f in files]}),
-          ctx.obj["json"])
+def upload(ctx, target, files, arm_next, timeout_s, show_status, wait_s, native):
+    """Set files on an input[type=file] element.
+
+    Upload buttons with no input in the DOM open a native file dialog instead.
+    vb intercepts those: arm, click, check.
+
+        vb upload --next ./clip.mp4
+        vb mouse click 412 541
+        vb upload --status          # {"consumed": true, ...}
+    """
+    if sum(map(bool, (arm_next, show_status, native))) > 1:
+        raise click.UsageError("use one of --next, --status, --native")
+    if show_status:
+        _emit(call("upload_status", {"wait_s": wait_s}), ctx.obj["json"])
+    elif native:
+        _emit(call("upload_native", {"state": native}), ctx.obj["json"])
+    elif arm_next:
+        paths = ((target,) if target else ()) + files
+        if not paths:
+            raise click.UsageError("--next needs at least one file")
+        missing = [f for f in paths if not Path(f).exists()]
+        if missing:
+            raise click.UsageError(f"no such file: {', '.join(missing)}")
+        _emit(call("upload_next", {"files": [str(Path(f).resolve()) for f in paths],
+                                   "timeout_s": timeout_s}), ctx.obj["json"])
+    else:
+        if not target or not files:
+            raise click.UsageError("usage: vb upload TARGET FILES... (or --next FILES...)")
+        _emit(call("upload", {"target": target,
+                              "files": [str(Path(f).resolve()) for f in files]}),
+              ctx.obj["json"])
 
 
 @cli.command()

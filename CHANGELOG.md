@@ -31,6 +31,36 @@ rest (`net::ERR_ABORTED`, `Target page … has been closed`).
   Queued explores each cold-start Chrome, so a long queue on one name can
   outlast the client's 120s timeout.
 
+### feat: `vb upload --next` fills native file choosers
+
+`vb upload TARGET FILES` needs an `<input type=file>` in the DOM. Upload
+buttons that click a detached input open Chrome's native "Open file" dialog
+instead, which nothing could fill: Meta Business Suite's reel composer blocked
+Instagram Reels scheduling this way. In a headed window the dialog also sat on
+the operator's screen until closed by hand.
+
+- Every launched session (self-heal relaunches and pre-warms included) listens
+  for file choosers on every page, popups and new tabs too. That turns on CDP
+  `Page.setInterceptFileChooserDialog`, so the native dialog never opens.
+- `vb upload --next FILES [--timeout 30]` arms the next chooser, one shot.
+  Paths pass the same `fspolicy.check_upload` as `upload`, at arm time. The arm
+  expires, so a chooser the page opens later can't get stale files. Several
+  files into a single-file chooser is refused, not truncated.
+- `vb upload --status [--wait 3]` reports `consumed`, the last outcome
+  (`expired`, `error`, `multiple`) and how many unarmed choosers were
+  swallowed. It waits for an armed chooser to settle, since the click returns
+  before the chooser event arrives.
+- **Behaviour change:** an unarmed chooser is swallowed. `vb upload --native
+  on` gives a hand-driven window Chrome's own dialog back (`off`, or the next
+  arm, restores interception; a self-heal relaunch resets it). Attach sessions
+  intercept only after an `upload --next`.
+- New verbs `upload_next`, `upload_status`, `upload_native` (MCP tools in the
+  `input` bucket, so in `lean`).
+
+Verified in headless patchright with a detached input clicked by
+`mouse click x y`, humanized and not: armed, unarmed, expiry, multiple, a
+second tab, the `.env` deny rule and agent-surface roots.
+
 ## [0.20.0] — 2026-10-07
 
 A fleet of logged-in identities on one box is the thing vibatchium is for, and

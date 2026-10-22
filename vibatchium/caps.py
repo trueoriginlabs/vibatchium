@@ -28,6 +28,7 @@ CAP_BUCKETS: dict[str, set[str]] = {
                  "value", "content", "count", "find"},
     "input":    {"click", "fill", "type", "hover", "press", "keys",
                  "check", "uncheck", "scroll", "is_state", "mouse", "upload",
+                 "upload_next", "upload_status", "upload_native",
                  "dblclick", "focus", "select",
                  "humanize_on", "humanize_off", "humanize_status",
                  "humanize_ambient"},
