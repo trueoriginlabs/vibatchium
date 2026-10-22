@@ -52,7 +52,7 @@ purpose.
 | Browser | stock Chrome | own Chromium build | stock Chromium | Chrome for Testing default | stock Chrome |
 | Stealth layer | CDP-level (Patchright) | **engine-level (87 C++ patches)** | CDP-level ("6-layer"), no `Runtime.enable` | none in core; via cloud providers | none |
 | Published stealth score | not yet | 30/30 on its own detector list | **68/80 Stealth Bench V1 (self-run)** | — | — |
-| MCP startup cost in Claude Code¹ | ~2.7k tokens (87 tools, 5 always loaded) | n/a | ~3.4k tokens (5 tools) | not measured | not measured |
+| MCP startup cost in Claude Code¹ | ~2.7k tokens (90 tools, 5 always loaded) | n/a | ~3.4k tokens (5 tools) | not measured | not measured |
 | Platforms | Linux (macOS: CI probe, unsupported) | Linux · macOS · Windows | Linux · macOS · Windows | all | all |
 
 <sub>¹ bytes/4 of `tools/list` plus server instructions, measured over stdio. Clients without tool search load every tool: `vb mcp --caps min` is 12 tools, ~3.8k tokens. bladebro's own README says ~1.9k.</sub>
@@ -611,7 +611,7 @@ Restart the agent session afterwards: the MCP tool list is read once, at start.
 
 | Mode | Surface | Auth |
 |---|---|---|
-| `vb mcp` | stdio JSON-RPC; defaults to the **lean** 87-verb profile (`--caps min` = 12 tools for clients without tool search; `--caps=full`/`all` = 163; `--caps=...` for a custom bucket set) | n/a (stdio) |
+| `vb mcp` | stdio JSON-RPC; defaults to the **lean** 90-verb profile (`--caps min` = 12 tools for clients without tool search; `--caps=full`/`all` = 166; `--caps=...` for a custom bucket set) | n/a (stdio) |
 | `vb serve` | FastAPI on `127.0.0.1:8000`; every verb at `POST /v1/<verb>`; WebSocket live-view at `/v1/stream/<session>` | bearer token (`~/.cache/vibatchium/rest-token`, mode 0600) |
 
 **REST capability gating**: `vb serve --caps=core,nav,input,vision` restricts the HTTP surface the same way `mcp --caps` does. Without it, REST grants local-code-equivalent access (eval + secret_* + file-writing verbs all exposed) — safe for localhost dev, **not** for hosted/multi-tenant.

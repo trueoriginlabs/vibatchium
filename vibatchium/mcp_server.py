@@ -452,6 +452,31 @@ TOOLS: list[tuple[str, str, dict, str, Any]] = [
                      "files": {"type": "array", "items": {"type": "string"}}},
       "required": ["target", "files"]},
      "upload", None),
+    ("upload_next",
+     "Arm the NEXT native file chooser with files, for upload buttons that have no "
+     "input[type=file] in the DOM. Then click the button (any verb). One shot; expires "
+     "after timeout_s. Check with upload_status.",
+     {"type": "object",
+      "properties": {"files": {"type": "array", "items": {"type": "string"}},
+                     "timeout_s": {"type": "number",
+                                   "description": "Arm lifetime in seconds (default 30)."}},
+      "required": ["files"]},
+     "upload_next", None),
+    ("upload_status",
+     "Whether the armed file chooser was filled (consumed), plus how many unarmed "
+     "choosers were swallowed.",
+     {"type": "object",
+      "properties": {"wait_s": {"type": "number",
+                                "description": "Wait up to this long for an armed "
+                                               "chooser to settle (default 0)."}}},
+     "upload_status", None),
+    ("upload_native",
+     "on: let Chrome show its native file dialog (hand-driven windows). off: intercept "
+     "choosers again (the default: unarmed choosers are swallowed).",
+     {"type": "object",
+      "properties": {"state": {"type": "string", "enum": ["on", "off"]}},
+      "required": ["state"]},
+     "upload_native", None),
     ("dialog_policy", "Set how the next alert/confirm/prompt is handled.",
      {"type": "object",
       "properties": {"action": _str("accept|dismiss"),
