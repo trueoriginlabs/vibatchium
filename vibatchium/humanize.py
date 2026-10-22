@@ -1,7 +1,7 @@
 """Wave 6.2b — humanization budget.
 
 Bezier mouse trajectories, gaussian-sampled dwell times, sinusoidal scroll
-inertia. Opt-in per session via `vb humanize on`. Off by default
+inertia (or a replay of the operator's recorded swipes, when installed). Opt-in per session via `vb humanize on`. Off by default
 because:
   1. Bad humanization is worse than none (perfectly-symmetric Bezier curves
      are more detectable than a straight line).
@@ -38,6 +38,7 @@ import asyncio
 import contextlib
 import math
 import random
+import statistics
 
 
 def humanized_path(
@@ -210,11 +211,132 @@ async def humanized_click(page, x: float, y: float, *,
     return (x, y)
 
 
+# ─── recorded swipe seeds (vb oracle ingest --gestures) ───────────────────
+#
+# The sin curve above matches no real device: a wheel sends whole ~100-120px
+# notches at uneven 30-100ms gaps, a trackpad one push and a ~1s fade of tiny
+# deltas. When the operator has recorded their own swipes, humanized_scroll
+# replays one of those instead. The library is personal data: it lives in the
+# config dir (or wherever VIBATCHIUM_GESTURES points, in the daemon's env),
+# never in the repo.
+
+_gesture_cache: dict = {}
+
+
+def gesture_library_path():
+    """Where the daemon looks for the seed library."""
+    import os
+    from pathlib import Path
+    env = os.environ.get("VIBATCHIUM_GESTURES")
+    if env:
+        return Path(env).expanduser()
+    from .daemon.paths import CONFIG_DIR
+    return CONFIG_DIR / "gestures.json"
+
+
+def load_gesture_library(path=None) -> dict[str, list[dict]] | None:
+    """The replayable gestures per device (`wheel` / `trackpad`), keeping only
+    devices with at least 3, or None when there is no usable library (missing,
+    unreadable, or too few gestures). Re-read only when the file's mtime changes."""
+    import json
+    p = path or gesture_library_path()
+    try:
+        mtime = p.stat().st_mtime
+    except OSError:
+        return None
+    hit = _gesture_cache.get(str(p))
+    if hit and hit[0] == mtime:
+        return hit[1]
+    try:
+        lib = json.loads(p.read_text(encoding="utf-8"))
+        by_device: dict[str, list[dict]] = {}
+        for g in lib.get("gestures") or []:
+            if (g.get("kind") in ("wheel", "trackpad") and g.get("t") and g.get("dy")
+                    and len(g["t"]) == len(g["dy"]) and sum(g["dy"]) > 0):
+                by_device.setdefault(g["kind"], []).append(g)
+    except (ValueError, OSError, AttributeError, TypeError):
+        by_device = {}
+    out = {k: v for k, v in by_device.items() if len(v) >= 3} or None
+    _gesture_cache[str(p)] = (mtime, out)
+    return out
+
+
+def scroll_device_for(devices, *, pinned: str | None = None,
+                      key: str | None = None) -> str:
+    """The one device a session scrolls with. A person doesn't switch between
+    wheel and trackpad from one flick to the next, so a session never mixes
+    them: `pinned` (humanize on --scroll-device) if the library has it, else a
+    stable pick from the session name, so an account keeps its device across
+    runs and restarts."""
+    import hashlib
+    kinds = sorted(devices)
+    if pinned in kinds:
+        return pinned
+    if not key:
+        return kinds[0]
+    return kinds[int(hashlib.sha256(key.encode()).hexdigest(), 16) % len(kinds)]
+
+
+def gesture_schedule(gestures: list[dict], total_dy: float, *,
+                     rng: random.Random | None = None
+                     ) -> list[tuple[float, float]]:
+    """Pick a recorded gesture near `total_dy` and return its (t_ms, dy) events,
+    t relative to the first. Pure + deterministic with a seeded `rng`.
+
+    A wheel gesture keeps its notch deltas: scaling 120 to 131 would itself be a
+    tell, so the distance is met by choosing (then trimming or extending) a
+    gesture with about |total_dy| / notch events, and the total lands on a whole
+    notch. A trackpad gesture is continuous, so it is scaled to the exact
+    distance. Timing gets an overall ±10% stretch and ±5% per gap."""
+    r = rng or random
+    target = abs(total_dy)
+    sign = 1.0 if total_dy >= 0 else -1.0
+    if gestures[0]["kind"] == "wheel":
+        notch = statistics.median(d for g in gestures for d in g["dy"])
+        n = max(1, round(target / notch))
+        ranked = sorted(gestures, key=lambda g: (abs(len(g["dy"]) - n), r.random()))
+        g = r.choice(ranked[:3])
+        ts, dys = list(g["t"]), list(g["dy"])
+        own_gaps = [ts[i + 1] - ts[i] for i in range(len(ts) - 1)] or [60.0]
+        while len(dys) < n:
+            ts.append(ts[-1] + r.choice(own_gaps))
+            dys.append(dys[-1])
+        ts, dys = ts[:n], dys[:n]
+    else:
+        ranked = sorted(gestures, key=lambda g: (
+            abs(math.log(max(target, 1.0) / sum(g["dy"]))), r.random()))
+        g = r.choice(ranked[:3])
+        ts = list(g["t"])
+        scale = target / sum(g["dy"])
+        dys = [d * scale for d in g["dy"]]
+    stretch = r.uniform(0.9, 1.1)
+    out, t = [], 0.0
+    for i, d in enumerate(dys):
+        if i:
+            t += (ts[i] - ts[i - 1]) * stretch * r.uniform(0.95, 1.05)
+        out.append((round(t, 2), round(sign * d, 3)))
+    return out
+
+
 async def humanized_scroll(page, dx: float, dy: float, *,
-                            duration_ms: float = 300) -> None:
-    """Send multiple scroll-wheel events that follow a sin curve — looks like
-    a real mouse-wheel flick, not a single jump."""
+                            duration_ms: float = 300,
+                            device: str | None = None,
+                            device_key: str | None = None) -> None:
+    """Send multiple scroll-wheel events — a replay of one of the operator's
+    recorded swipes when a gesture library is installed, else a sin curve.
+    `device` / `device_key` choose the session's device (scroll_device_for)."""
     if dx == 0 and dy == 0:
+        return
+    library = load_gesture_library() if dy else None
+    if library:
+        kind = scroll_device_for(library, pinned=device, key=device_key)
+        sched = gesture_schedule(library[kind], dy)
+        loop = asyncio.get_running_loop()
+        t0 = loop.time()
+        for t_ms, step_dy in sched:
+            # absolute deadlines, so CDP round-trip time doesn't stretch the gesture
+            await asyncio.sleep(max(0.0, t0 + t_ms / 1000 - loop.time()))
+            await page.mouse.wheel(dx / len(sched), step_dy)
         return
     steps = sinusoidal_scroll(dy, duration_ms=duration_ms) if dy else [(duration_ms, 0)]
     for dt_ms, step_dy in steps:

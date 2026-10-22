@@ -122,7 +122,8 @@ _INSTRUMENT_JS = r"""(() => {
   addEventListener('mouseup', du('mup'), opt);
   addEventListener('keydown', e => push({type: 'key', t: now(), ets: e.timeStamp}), opt);
   addEventListener('wheel', e => push(
-    {type: 'wheel', t: now(), dx: e.deltaX, dy: e.deltaY, ets: e.timeStamp}), opt);
+    {type: 'wheel', t: now(), dx: e.deltaX, dy: e.deltaY, dm: e.deltaMode,
+     ets: e.timeStamp}), opt);
   window.__vbo = B;
   return {installed: true};
 })()"""
@@ -243,13 +244,17 @@ def _interkey_features(events: list[dict]) -> dict:
 
 
 def _scroll_features(events: list[dict]) -> dict:
-    """Wheel-tick count + delta shape for one scroll gesture."""
+    """Wheel-tick count + delta shape + timing for one scroll gesture."""
     wheels = [e for e in events if e.get("type") == "wheel"]
     deltas = [abs(e.get("dy") or 0) for e in wheels]   # null-safe: dy may be absent OR null
+    ts = [e["t"] for e in wheels]
+    gaps = [ts[i + 1] - ts[i] for i in range(len(ts) - 1)]
     return {
         "scroll_steps": len(wheels),
         "scroll_dy_total": round(sum(deltas), 2) if deltas else None,
         "scroll_dy_max_step": round(max(deltas), 2) if deltas else None,
+        "scroll_duration_ms": round(ts[-1] - ts[0], 3) if len(ts) >= 2 else None,
+        "scroll_gap_ms_median": round(statistics.median(gaps), 3) if gaps else None,
     }
 
 
@@ -345,6 +350,22 @@ HUMAN_BASELINE: dict[str, dict] = {
         "kind": "score", "lo": 2, "hi": None,
         "human": "a wheel flick emits several ticks; a jump is one",
         "source": "mouse-wheel notch cadence"},
+    # The swipe shape. No literature band separates these: a trackpad fling ticks
+    # at ~16ms like the old sin curve, a wheel at 30-100ms, so a default band would
+    # pass whatever humanize emits. They are REPORTED until a recorded swipe baseline
+    # exists; then `recorded_kind` promotes them to scored against that operator.
+    "scroll_duration_ms": {
+        "kind": "report", "recorded_kind": "score", "lo": None, "hi": None,
+        "human": "one swipe's first-to-last wheel event (wheel ~0.1-0.3s, trackpad fling ~1s)",
+        "source": "device dependent — banded only from a recorded swipe baseline"},
+    "scroll_gap_ms_median": {
+        "kind": "report", "recorded_kind": "score", "lo": None, "hi": None,
+        "human": "wheel notches 30-100ms apart; trackpad momentum ~16ms",
+        "source": "device dependent — banded only from a recorded swipe baseline"},
+    "scroll_dy_max_step": {
+        "kind": "report", "recorded_kind": "score", "lo": None, "hi": None,
+        "human": "a wheel notch is a fixed quantum (often 100-120px); a trackpad peaks lower",
+        "source": "device dependent — banded only from a recorded swipe baseline"},
     "raw_pointer_events": {
         "kind": "gap", "lo": 1, "hi": None,
         "human": "real hardware fires pointerrawupdate; CDP synthetic input fires none",
@@ -392,13 +413,14 @@ def load_baseline(path: str | Path | None = None) -> dict:
     if not isinstance(recorded, dict):
         return base
     for feat, samples in recorded.items():
-        if (feat not in base or base[feat]["kind"] != "score"
-                or not isinstance(samples, list)):
+        if (feat not in base or not isinstance(samples, list)
+                or "score" not in (base[feat]["kind"], base[feat].get("recorded_kind"))):
             continue
         vals = sorted(float(s) for s in samples
                       if isinstance(s, (int, float)) and not isinstance(s, bool))
         if len(vals) < 5:
             continue
+        base[feat]["kind"] = "score"
         # Interpolated p5/p95 — NOT the old floor-truncated index int(0.05*(n-1)),
         # which pinned p5 to the MINIMUM sample for every n<=20 (the recorder's range).
         cuts = statistics.quantiles(vals, n=20, method="inclusive")
@@ -412,6 +434,15 @@ def load_baseline(path: str | Path | None = None) -> dict:
         base[feat]["lo"], base[feat]["hi"] = lo, hi
         base[feat]["source"] = f"recorded operator baseline (n={len(vals)}, interp p5-p95)"
     base["__source__"] = {"kind": "meta", "recorded": str(p)}
+    swipe_totals = [float(v) for v in recorded.get("scroll_dy_total") or []
+                    if isinstance(v, (int, float)) and not isinstance(v, bool)]
+    if swipe_totals:
+        # run_oracle wheels this distance so the ON pass is one swipe of the
+        # operator's own size, comparable with the recorded per-swipe bands.
+        base["__source__"]["scroll_dy_median"] = statistics.median(swipe_totals)
+        meta = recorded.get("_meta")
+        if isinstance(meta, dict) and meta.get("swipe_device") in SWIPE_DEVICES:
+            base["__source__"]["swipe_device"] = meta["swipe_device"]
     return base
 
 
@@ -466,14 +497,17 @@ def score_features(features: dict, baseline: dict | None = None) -> dict:
 
 
 def _run_one(client_call: Callable[..., Any], session: str, humanize: bool,
-             *, type_sample: str, scroll_dy: int, baseline: dict | None = None) -> dict:
+             *, type_sample: str, scroll_dy: int, baseline: dict | None = None,
+             scroll_device: str | None = None) -> dict:
     """One measurement pass in an already-started session: (re)build + instrument
     the page, run click → type → scroll, drain, extract, score."""
     client_call("go", {"url": "about:blank"}, session=session)
     targets = client_call("eval", {"expr": _BUILD_PAGE_JS}, session=session)["value"]
     client_call("eval", {"expr": _INSTRUMENT_JS}, session=session)
     if humanize:
-        client_call("humanize_on", session=session)
+        client_call("humanize_on",
+                    {"scroll_device": scroll_device} if scroll_device else {},
+                    session=session)
     else:
         client_call("humanize_off", session=session)
 
@@ -495,11 +529,18 @@ def _run_one(client_call: Callable[..., Any], session: str, humanize: bool,
 
 
 def run_oracle(client_call: Callable[..., Any], *, headless: bool = True,
-               type_sample: str = TYPE_SAMPLE, scroll_dy: int = 700,
+               type_sample: str = TYPE_SAMPLE, scroll_dy: int | None = None,
                baseline: dict | None = None) -> list[dict]:
     """Drive the gesture set with humanize OFF then ON in a single throwaway
     ephemeral session (same environment both passes — controls for it), returning
-    two records. Cleans the session up even on error, like `run_bench`."""
+    two records. Cleans the session up even on error, like `run_bench`.
+
+    `scroll_dy` defaults to the recorded operator's median swipe when the baseline
+    has one, else 700px. The ON pass replays the device the swipe bands came from."""
+    src = (baseline or {}).get("__source__") or {}
+    if scroll_dy is None:
+        scroll_dy = int(round(src.get("scroll_dy_median") or 700))
+    scroll_device = src.get("swipe_device")
     sname = f"vibatchium_oracle_{uuid.uuid4().hex[:8]}"
     rows: list[dict] = []
     try:
@@ -509,7 +550,7 @@ def run_oracle(client_call: Callable[..., Any], *, headless: bool = True,
             t0 = time.time()
             rec = _run_one(client_call, sname, humanize,
                            type_sample=type_sample, scroll_dy=scroll_dy,
-                           baseline=baseline)
+                           baseline=baseline, scroll_device=scroll_device)
             rec["elapsed_ms"] = int((time.time() - t0) * 1000)
             rows.append(rec)
     finally:
@@ -647,28 +688,145 @@ _TRIAL_KIND_FEATURES = {
     "click": ["n_moves", "straightness", "dwell_ms_mean", "move_dt_cv",
               "decel_ratio", "peak_speed_px_ms", "coalesced_max", "raw_pointer_events"],
     "type": ["interkey_ms_mean", "interkey_ms_stdev"],
-    "scroll": ["scroll_steps"],
+    # A 'scroll' trial is a whole scroll-to-Continue run, many flicks long. The
+    # runner grades ONE `mouse wheel` call, so the scroll bands come from 'swipe'
+    # trials (one sample per gesture, see aggregate_trials) and the scroll phase
+    # feeds nothing.
+    "scroll": [],
 }
+_SWIPE_FEATURES = ["scroll_steps", "scroll_dy_total", "scroll_dy_max_step",
+                   "scroll_duration_ms", "scroll_gap_ms_median"]
+
+# A wheel silence longer than this ends a gesture. Wheel notches inside one flick
+# are 30-100ms apart and trackpad momentum ticks ~16ms, so 300ms separates
+# deliberate swipes without cutting a fling's tail.
+SWIPE_SPLIT_MS = 300.0
 
 
-def aggregate_trials(trials: list[dict]) -> dict:
+def split_wheel_bursts(events: list[dict], split_ms: float = SWIPE_SPLIT_MS
+                       ) -> list[list[dict]]:
+    """The wheel events of a buffer, cut into gestures at every silence >
+    `split_ms`. Non-wheel events are dropped. Pure."""
+    wheels = sorted((e for e in events
+                     if isinstance(e, dict) and e.get("type") == "wheel"
+                     and isinstance(e.get("t"), (int, float))
+                     and not isinstance(e.get("t"), bool)),
+                    key=lambda e: e["t"])
+    bursts: list[list[dict]] = []
+    for e in wheels:
+        if bursts and e["t"] - bursts[-1][-1]["t"] <= split_ms:
+            bursts[-1].append(e)
+        else:
+            bursts.append([e])
+    return bursts
+
+
+def _down_swipe(burst: list[dict]) -> bool:
+    """A forward (downward), pixel-mode gesture — the only kind we seed from.
+    Line/page deltaMode (Firefox) has no fixed pixel size to replay over CDP."""
+    return (all((e.get("dm") or 0) == 0 for e in burst)
+            and sum(e.get("dy") or 0 for e in burst) > 0)
+
+
+def classify_gesture(dys: list[float]) -> str:
+    """'wheel' when every nonzero delta is a whole multiple of one notch quantum
+    (>= 40px), else 'trackpad' (continuous deltas, momentum tail)."""
+    mags = [abs(d) for d in dys if d]
+    if not mags:
+        return "trackpad"
+    q = min(mags)
+    if q >= 40 and all(abs(m / q - round(m / q)) < 0.02 for m in mags):
+        return "wheel"
+    return "trackpad"
+
+
+SWIPE_DEVICES = ("wheel", "trackpad")
+
+
+def _swipe_bursts(trials: list[dict]):
+    """(device, burst) for every forward swipe in the 'swipe' trials, plus the
+    count of bursts skipped (upward or line-mode) and of labels the delta shape
+    disagrees with. The recorder labels each block with the device the operator
+    was asked to use; the label wins, the classifier only covers unlabelled
+    trials."""
+    out, skipped, mismatched = [], 0, 0
+    for tr in trials:
+        if not isinstance(tr, dict) or tr.get("kind") != "swipe":
+            continue
+        label = tr.get("device") if tr.get("device") in SWIPE_DEVICES else None
+        for burst in split_wheel_bursts(tr.get("events") or []):
+            if not _down_swipe(burst):
+                skipped += 1
+                continue
+            shape = classify_gesture([e.get("dy") or 0 for e in burst])
+            if label and label != shape:
+                mismatched += 1
+            out.append((label or shape, burst))
+    return out, skipped, mismatched
+
+
+def majority_device(trials: list[dict]) -> str | None:
+    devices = [d for d, _ in _swipe_bursts(trials)[0]]
+    return max(SWIPE_DEVICES, key=devices.count) if devices else None
+
+
+def build_gesture_library(trials: list[dict], *, source: str | None = None) -> dict:
+    """Seed gestures from the recorded 'swipe' trials, for humanize to replay.
+
+    Each gesture keeps its timing relative to its first event and its per-event
+    dy, so a wheel stays quantized and a trackpad keeps its fade-out. Both
+    devices are kept; humanize gives each session one of them, since a person
+    doesn't switch device between two flicks. Pure."""
+    bursts, skipped, mismatched = _swipe_bursts(trials)
+    gestures = []
+    for device, burst in bursts:
+        t0 = burst[0]["t"]
+        gestures.append({
+            "kind": device,
+            "t": [round(e["t"] - t0, 2) for e in burst],
+            "dy": [round(float(e.get("dy") or 0), 3) for e in burst],
+        })
+    return {"version": 2, "source": source, "n": len(gestures),
+            "devices": {d: sum(g["kind"] == d for g in gestures) for d in SWIPE_DEVICES},
+            "skipped": skipped, "mismatched": mismatched, "gestures": gestures}
+
+
+def aggregate_trials(trials: list[dict], *, swipe_device: str | None = None) -> dict:
     """Run `extract_features` over each recorded trial and collect per-feature sample
     lists, keyed by feature. The result is exactly the `{feature: [samples]}` shape
     `load_baseline()` overlays as p5–p95 bands. Pure. A `_meta` key records trial
-    counts (ignored by `load_baseline`, which only touches known score features)."""
+    counts (ignored by `load_baseline`, which only touches known score features).
+
+    The swipe bands come from ONE device (`swipe_device`, default the one with
+    more swipes): a wheel and a trackpad share no shape, and a band spanning both
+    would pass either."""
     samples: dict[str, list] = {}
     counts: dict[str, int] = {}
+    swipe_device = swipe_device or majority_device(trials)
+    # one sample per gesture, measured exactly as the runner measures its single
+    # wheel call
+    for device, burst in _swipe_bursts(trials)[0]:
+        if device != swipe_device:
+            continue
+        feats = _scroll_features(burst)
+        for feat in _SWIPE_FEATURES:
+            if feats.get(feat) is not None:
+                samples.setdefault(feat, []).append(feats[feat])
     for tr in trials:
         if not isinstance(tr, dict):
             continue
         kind = tr.get("kind")
         counts[kind] = counts.get(kind, 0) + 1
+        if kind == "swipe":
+            continue
         feats = extract_features(tr)
         for feat in _TRIAL_KIND_FEATURES.get(kind, []):
             val = feats.get(feat)
             if val is not None:
                 samples.setdefault(feat, []).append(val)
     samples["_meta"] = {"trial_counts": counts, "n_trials": len(trials)}
+    if "scroll_steps" in samples:
+        samples["_meta"]["swipe_device"] = swipe_device
     return samples
 
 
@@ -693,6 +851,13 @@ _RECORD_PAGE_TEMPLATE = r"""<!doctype html>
   .filler { height: 240vh; display: flex; align-items: flex-end; }
   button { font-size: 16px; padding: 11px 20px; cursor: pointer; }
   code { background: rgba(128,128,128,.2); padding: 2px 6px; border-radius: 5px; }
+  #swipepanel { display: none; position: fixed; inset: 46px 0 0 0; overflow: hidden; }
+  #swipehint { position: absolute; inset: 8px 16px auto 16px; z-index: 2; font-size: 14px; }
+  #card { position: absolute; inset: 44px 12% 16px 12%; border-radius: 18px;
+          display: flex; flex-direction: column; align-items: center; justify-content: center;
+          color: #fff; font-size: 22px; text-align: center; padding: 24px;
+          transition: transform .35s ease-out, opacity .35s ease-out; }
+  #card b { font-size: 54px; }
 </style></head>
 <body>
 <div id="hud">vb oracle · mouse baseline recorder — <span id="status">loading…</span></div>
@@ -708,10 +873,16 @@ _RECORD_PAGE_TEMPLATE = r"""<!doctype html>
        just scroll the way you normally would; don't race it.</p>
     <div class="filler"><button id="contBtn">Continue</button></div>
   </div>
+  <div id="swipepanel">
+    <div id="swipehint">Swipe to the next card whenever you're ready, the way you'd
+      flick a feed. One flick per card. Use <b id="swipedev"></b> for this block.
+      Use Chrome: Firefox reports the wheel in lines, which can't be replayed.</div>
+    <div id="card"></div>
+  </div>
   <div id="donepanel" class="panel">
     <h2>Done — thank you.</h2>
     <p>Download the recording, then from the repo run:</p>
-    <p><code>vb oracle ingest oracle-trials.json -o baseline.json</code><br>
+    <p><code>vb oracle ingest oracle-trials.json -o baseline.json --gestures gestures.json</code><br>
        <code>vb oracle run --baseline baseline.json</code></p>
     <button id="dl">Download oracle-trials.json</button>
   </div>
@@ -722,7 +893,8 @@ _RECORD_PAGE_TEMPLATE = r"""<!doctype html>
 <script>__INSTRUMENT__</script>
 <script>
 (() => {
-  const N_CLICKS = __N_CLICKS__, N_TYPE = __N_TYPE__, N_SCROLL = __N_SCROLL__;
+  const N_CLICKS = __N_CLICKS__, N_TYPE = __N_TYPE__, N_SCROLL = __N_SCROLL__,
+        N_SWIPE = __N_SWIPE__, SWIPE_DEVICES = __SWIPE_DEVICES__;
   const TRIALS = [];
   window.__vboTrials = TRIALS;
   window.__vboExport = () => JSON.stringify({trials: TRIALS, ua: navigator.userAgent});
@@ -730,8 +902,8 @@ _RECORD_PAGE_TEMPLATE = r"""<!doctype html>
   const status = $('status');
   const drain = () => { const d = (window.__vbo || []).slice();
                         if (window.__vbo) window.__vbo.length = 0; return d; };
-  const push = (kind) => {
-    TRIALS.push({kind, events: drain()});
+  const push = (kind, extra) => {
+    TRIALS.push(Object.assign({kind, events: drain()}, extra || {}));
     const ex = document.getElementById('vbo-export');  // cross-world DOM mirror
     if (ex) ex.value = window.__vboExport();
   };
@@ -759,6 +931,7 @@ _RECORD_PAGE_TEMPLATE = r"""<!doctype html>
   const setStatus = (label, n, total) =>
     status.innerHTML = label + ' <b>' + n + '/' + total + '</b>';
   const startClicks = () => {
+    if (N_CLICKS <= 0) return startType();
     setStatus('Click the blue dot each time it moves.', 0, N_CLICKS);
     target.style.display = 'block';
     drain(); place();
@@ -773,6 +946,7 @@ _RECORD_PAGE_TEMPLATE = r"""<!doctype html>
   // phase 2 — typing (inter-key cadence)
   let typed = 0;
   const startType = () => {
+    if (N_TYPE <= 0) return startScroll();
     $('typepanel').style.display = 'block';
     const tin = $('tin'), phrase = $('phrase');
     const next = () => { phrase.textContent = PHRASES[typed % PHRASES.length];
@@ -807,15 +981,76 @@ _RECORD_PAGE_TEMPLATE = r"""<!doctype html>
   const filler = document.querySelector('.filler');
   const randDist = () => { filler.style.height = (140 + Math.floor(Math.random() * 260)) + 'vh'; };
   const startScroll = () => {
+    if (N_SCROLL <= 0) return startSwipe();
     $('scrollpanel').style.display = 'block';
     setStatus('Scroll down + click Continue.', 0, N_SCROLL);
     randDist(); scrollTo(0, 0); drain();
     $('contBtn').addEventListener('click', () => {
       push('scroll'); scrolls++;
       setStatus('Scroll down + click Continue.', scrolls, N_SCROLL);
-      if (scrolls >= N_SCROLL) { $('scrollpanel').style.display = 'none'; finish(); }
+      if (scrolls >= N_SCROLL) { $('scrollpanel').style.display = 'none'; startSwipe(); }
       else { randDist(); scrollTo(0, 0); drain(); }
     });
+  };
+
+  // phase 4 — swipe (one wheel gesture per card, like a video feed)
+  // The feed moves on the first downward wheel event and then ignores the wheel
+  // until it has been silent for SPLIT_MS, so each flick, momentum tail and all,
+  // lands in exactly one trial. The page never scrolls; the card swaps instead.
+  // One block of N_SWIPE per device, each trial labelled with its block's device.
+  const DEVICE_NAMES = {wheel: 'your MOUSE WHEEL', trackpad: 'your TRACKPAD'};
+  let swipes = 0, locked = false, quiet = null, swiping = false, block = 0;
+  const swipeLabel = () => 'Swipe with ' + DEVICE_NAMES[SWIPE_DEVICES[block]] + '.';
+  const SPLIT_MS = __SPLIT_MS__;
+  const CAPTIONS = ['a cat knocks a cup off the table', 'street food at 2am',
+    'someone parallel parks first try', 'a dog meets snow', 'tiny kitchen, big meal',
+    'the bus driver waves back', 'rain on a tin roof', 'a skateboard trick, almost',
+    'grandma learns a dance', 'sunset from a ferry', 'a very long receipt',
+    'a magician gets caught'];
+  const card = $('card');
+  const drawCard = () => {
+    card.style.transition = 'none';
+    card.style.transform = 'translateY(40px)'; card.style.opacity = '0';
+    card.style.background = 'hsl(' + Math.floor(Math.random() * 360) + ' 55% 38%)';
+    card.innerHTML = '<b>' + (swipes + 1) + '</b>' +
+      CAPTIONS[Math.floor(Math.random() * CAPTIONS.length)];
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      card.style.transition = ''; card.style.transform = ''; card.style.opacity = '1';
+    }));
+  };
+  const onQuiet = () => {
+    quiet = null;
+    if (!locked) { drain(); return; }      // upward / stray wheel: not a swipe
+    locked = false;
+    push('swipe', {device: SWIPE_DEVICES[block]}); swipes++;
+    if (swipes >= N_SWIPE) {
+      block++; swipes = 0;
+      if (block >= SWIPE_DEVICES.length) {
+        swiping = false; $('swipepanel').style.display = 'none'; return finish();
+      }
+      $('swipedev').textContent = DEVICE_NAMES[SWIPE_DEVICES[block]];
+    }
+    setStatus(swipeLabel(), swipes, N_SWIPE);
+    drawCard();
+  };
+  addEventListener('wheel', (e) => {
+    if (!swiping) return;
+    e.preventDefault();
+    if (!locked && e.deltaY > 0) {
+      locked = true;
+      card.style.transform = 'translateY(-110%)'; card.style.opacity = '0';
+    }
+    clearTimeout(quiet);
+    quiet = setTimeout(onQuiet, SPLIT_MS);
+  }, {passive: false});
+  const startSwipe = () => {
+    if (N_SWIPE <= 0 || !SWIPE_DEVICES.length) return finish();
+    swiping = true;
+    scrollTo(0, 0);
+    $('swipepanel').style.display = 'block';
+    $('swipedev').textContent = DEVICE_NAMES[SWIPE_DEVICES[0]];
+    setStatus(swipeLabel(), 0, N_SWIPE);
+    drain(); drawCard();
   };
 
   const finish = () => {
@@ -834,14 +1069,21 @@ _RECORD_PAGE_TEMPLATE = r"""<!doctype html>
 </body></html>"""
 
 
-def record_page_html(*, n_clicks: int = 20, n_type: int = 8, n_scroll: int = 8) -> str:
+def record_page_html(*, n_clicks: int = 20, n_type: int = 8, n_scroll: int = 8,
+                     n_swipe: int = 30,
+                     swipe_devices: tuple[str, ...] = SWIPE_DEVICES) -> str:
     """The self-contained recorder page, with the SAME capture instrumentation the
-    live runner uses (single event schema) and the trial counts baked in."""
+    live runner uses (single event schema) and the trial counts baked in. A count
+    of 0 skips that phase. `n_swipe` is per device, one block each."""
+    devices = [d for d in swipe_devices if d in SWIPE_DEVICES]
     return (_RECORD_PAGE_TEMPLATE
             .replace("__INSTRUMENT__", _INSTRUMENT_JS)
             .replace("__N_CLICKS__", str(int(n_clicks)))
             .replace("__N_TYPE__", str(int(n_type)))
-            .replace("__N_SCROLL__", str(int(n_scroll))))
+            .replace("__N_SCROLL__", str(int(n_scroll)))
+            .replace("__N_SWIPE__", str(int(n_swipe)))
+            .replace("__SWIPE_DEVICES__", _json.dumps(devices))
+            .replace("__SPLIT_MS__", str(int(SWIPE_SPLIT_MS))))
 
 
 def write_record_page(path: str | Path, **counts: int) -> Path:

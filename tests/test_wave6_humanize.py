@@ -409,3 +409,93 @@ def test_budgeted_type_delays_bounds_long_text():
     for n in (5000, 20000):
         d = budgeted_type_delays(n, seed=1)
         assert len(d) == n and sum(d) <= 20000, f"n={n} sum={sum(d)}"
+
+
+# ─── recorded swipe seeds ────────────────────────────────────────────────────
+
+import json as _json
+import random as _random
+
+from vibatchium import humanize as _hz
+
+_WHEEL = [{"kind": "wheel", "t": [0, 48, 130], "dy": [120, 120, 120]},
+          {"kind": "wheel", "t": [0], "dy": [120]},
+          {"kind": "wheel", "t": [0, 70], "dy": [120, 120]},
+          {"kind": "wheel", "t": [0, 35, 90, 160, 210], "dy": [120] * 5}]
+_PAD = [{"kind": "trackpad", "t": [i * 16 for i in range(6)],
+         "dy": [40.0, 25.0, 12.0, 6.0, 2.5, 1.0]} for _ in range(3)]
+
+
+def test_gesture_schedule_wheel_keeps_notches():
+    for dy, n in ((360, 3), (120, 1), (50, 1), (840, 7)):
+        sched = _hz.gesture_schedule(_WHEEL, dy, rng=_random.Random(dy))
+        assert len(sched) == n
+        assert all(d == 120 for _, d in sched)                 # never rescaled
+        ts = [t for t, _ in sched]
+        assert ts[0] == 0 and ts == sorted(ts)
+
+
+def test_gesture_schedule_trackpad_scales_to_distance_and_sign():
+    sched = _hz.gesture_schedule(_PAD, -500, rng=_random.Random(1))
+    assert abs(sum(d for _, d in sched) + 500) < 0.05
+    assert all(d < 0 for _, d in sched)
+    # timing is the recording's, stretched by at most ~15%
+    assert 80 * 0.85 <= sched[-1][0] <= 80 * 1.16
+
+
+def test_load_gesture_library_per_device_and_threshold(tmp_path):
+    f = tmp_path / "g.json"
+    f.write_text(_json.dumps({"gestures": _WHEEL + _PAD + _PAD[:1]}))
+    got = _hz.load_gesture_library(f)
+    assert sorted(got) == ["trackpad", "wheel"]
+    assert len(got["wheel"]) == 4 and len(got["trackpad"]) == 4
+    f.write_text(_json.dumps({"gestures": _WHEEL + _PAD[:2]}))
+    import os
+    os.utime(f, (2, 2))
+    assert sorted(_hz.load_gesture_library(f)) == ["wheel"]   # 2 trackpad: dropped
+    f.write_text(_json.dumps({"gestures": _WHEEL[:2]}))
+    os.utime(f, (1, 1))                                        # force a re-read
+    assert _hz.load_gesture_library(f) is None                 # < 3 gestures
+    assert _hz.load_gesture_library(tmp_path / "missing.json") is None
+    (tmp_path / "bad.json").write_text("{nope")
+    assert _hz.load_gesture_library(tmp_path / "bad.json") is None
+
+
+class _WheelPage:
+    def __init__(self):
+        self.mouse = self
+        self.wheels = []
+
+    async def wheel(self, dx, dy):
+        self.wheels.append((dx, dy))
+
+
+def test_scroll_device_is_one_per_session_and_stable():
+    both = {"wheel": _WHEEL, "trackpad": _PAD}
+    picks = {k: _hz.scroll_device_for(both, key=k) for k in
+             (f"acct-{i}" for i in range(40))}
+    assert set(picks.values()) == {"wheel", "trackpad"}       # names spread out
+    assert all(_hz.scroll_device_for(both, key=k) == v for k, v in picks.items())
+    assert _hz.scroll_device_for(both, pinned="trackpad", key="acct-0") == "trackpad"
+    # a pin the library can't serve falls back to what it has
+    assert _hz.scroll_device_for({"wheel": _WHEEL}, pinned="trackpad") == "wheel"
+
+
+async def test_humanized_scroll_replays_installed_library(tmp_path, monkeypatch):
+    f = tmp_path / "gestures.json"
+    f.write_text(_json.dumps({"gestures": _WHEEL + _PAD}))
+    monkeypatch.setenv("VIBATCHIUM_GESTURES", str(f))
+    page = _WheelPage()
+    await _hz.humanized_scroll(page, 0, 240, device="wheel")
+    assert [d for _, d in page.wheels] == [120, 120]
+    page = _WheelPage()
+    await _hz.humanized_scroll(page, 0, 240, device="trackpad")
+    assert len(page.wheels) == 6 and abs(sum(d for _, d in page.wheels) - 240) < 0.05
+
+
+async def test_humanized_scroll_falls_back_to_sin_curve(tmp_path, monkeypatch):
+    monkeypatch.setenv("VIBATCHIUM_GESTURES", str(tmp_path / "none.json"))
+    page = _WheelPage()
+    await _hz.humanized_scroll(page, 0, 300, duration_ms=160)
+    assert len(page.wheels) == 10
+    assert abs(sum(d for _, d in page.wheels) - 300) < 1e-6

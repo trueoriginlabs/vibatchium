@@ -3188,24 +3188,36 @@ def oracle_ambient(headless, idle_s, gaps, seed, out_path, as_json):
 @click.option("--type-lines", "type_lines", default=8, type=int,
               help="typing trials to record")
 @click.option("--scrolls", default=8, type=int, help="scroll trials to record")
-def oracle_record(out_path, clicks, type_lines, scrolls):
+@click.option("--swipes", default=30, type=int,
+              help="feed-swipe gestures to record PER DEVICE (the seeds humanize replays)")
+@click.option("--swipe-devices", default="wheel,trackpad",
+              help="devices to record swipes with, one block each, in this order")
+def oracle_record(out_path, clicks, type_lines, scrolls, swipes, swipe_devices):
     """Write the human mouse-baseline recorder page.
 
     The baseline can't come through the daemon — CDP input is what we measure
     against. Open the page in YOUR browser with a real mouse, do the guided tasks,
     download oracle-trials.json, then `vb oracle ingest` it into a baseline.
+    A count of 0 skips that phase: `--clicks 0 --type-lines 0 --scrolls 0`
+    records swipes only.
     """
     from . import oracle as _oracle
 
+    devices = tuple(d.strip() for d in swipe_devices.split(",") if d.strip())
+    bad = [d for d in devices if d not in _oracle.SWIPE_DEVICES]
+    if bad:
+        raise click.UsageError(f"unknown swipe device(s) {bad}; use wheel,trackpad")
     p = _oracle.write_record_page(out_path, n_clicks=clicks, n_type=type_lines,
-                                  n_scroll=scrolls)
+                                  n_scroll=scrolls, n_swipe=swipes,
+                                  swipe_devices=devices)
     click.echo(f"wrote {p}", err=True)
     click.echo(
         f"Open it in your real browser (real mouse — not the daemon):\n"
         f"  file://{p.resolve()}\n"
-        f"Do the {clicks} click / {type_lines} type / {scrolls} scroll tasks, download "
+        f"Do the {clicks} click / {type_lines} type / {scrolls} scroll tasks and "
+        f"{swipes} swipes each with {' then '.join(devices)}, download "
         f"oracle-trials.json, then:\n"
-        f"  vb oracle ingest oracle-trials.json -o baseline.json\n"
+        f"  vb oracle ingest oracle-trials.json -o baseline.json --gestures gestures.json\n"
         f"  vb oracle run --baseline baseline.json")
 
 
@@ -3213,7 +3225,16 @@ def oracle_record(out_path, clicks, type_lines, scrolls):
 @click.argument("trials_file", type=click.Path(exists=True))
 @click.option("-o", "--out", "out_path", default="baseline.json", type=click.Path(),
               help="Where to write the {feature: [samples]} baseline JSON.")
-def oracle_ingest(trials_file, out_path):
+@click.option("--gestures", "gestures_path", default=None, type=click.Path(),
+              help="Also write the recorded swipes as a seed-gesture library here.")
+@click.option("--install", is_flag=True,
+              help="Also install the swipes as the daemon's seed library "
+                   "(~/.config/vibatchium/gestures.json): every humanized wheel "
+                   "on this box then replays them.")
+@click.option("--swipe-device", type=click.Choice(["wheel", "trackpad"]), default=None,
+              help="Which device's swipes set the scroll bands (default: the one "
+                   "with more swipes). `oracle run` replays the same device.")
+def oracle_ingest(trials_file, out_path, gestures_path, install, swipe_device):
     """Aggregate a recorded oracle-trials.json into a baseline for `--baseline`."""
     from . import oracle as _oracle
     from pathlib import Path as _P
@@ -3225,12 +3246,14 @@ def oracle_ingest(trials_file, out_path):
     trials = raw.get("trials", raw) if isinstance(raw, dict) else raw
     if not isinstance(trials, list) or not trials:
         raise click.UsageError(f"{trials_file} has no trials")
-    samples = _oracle.aggregate_trials(trials)
+    samples = _oracle.aggregate_trials(trials, swipe_device=swipe_device)
     _P(out_path).write_text(json.dumps(samples, indent=2), encoding="utf-8")
     counts = samples.get("_meta", {}).get("trial_counts", {})
     feat_lines = [f"{k} (n={len(v)})" for k, v in sorted(samples.items())
                   if not k.startswith("_") and isinstance(v, list)]
     click.echo(f"wrote {out_path} from trials {counts}", err=True)
+    if samples.get("_meta", {}).get("swipe_device"):
+        click.echo(f"  scroll bands from {samples['_meta']['swipe_device']} swipes", err=True)
     for line in feat_lines:
         click.echo(f"  {line}", err=True)
     thin = [line for k, v in samples.items() if isinstance(v, list) and len(v) < 5
@@ -3238,6 +3261,31 @@ def oracle_ingest(trials_file, out_path):
     if thin:
         click.echo(f"note: {', '.join(thin)} have <5 samples — those keep the "
                    f"literature band (load_baseline needs ≥5 to overlay).", err=True)
+    if gestures_path or install:
+        lib = _oracle.build_gesture_library(trials, source=str(trials_file))
+        if lib["n"] < 3:
+            raise click.UsageError(
+                f"{trials_file} has {lib['n']} usable swipes; a seed library needs "
+                f"≥3 (record with --swipes, in Chrome)")
+        text = json.dumps(lib)
+        targets = [_P(gestures_path)] if gestures_path else []
+        if install:
+            from .humanize import gesture_library_path
+            targets.append(gesture_library_path())
+        for t in targets:
+            t.write_text(text, encoding="utf-8")
+            t.chmod(0o600)
+            click.echo(f"wrote {t}: {lib['n']} swipes {lib['devices']}, "
+                       f"{lib['skipped']} skipped (upward or line-mode)", err=True)
+        thin = [d for d, n in lib["devices"].items() if 0 < n < 3]
+        if thin:
+            click.echo(f"note: {', '.join(thin)} has <3 swipes and won't be replayed",
+                       err=True)
+        if lib["mismatched"]:
+            click.echo(f"note: {lib['mismatched']} swipes don't look like their block's "
+                       f"device (a wheel swipe with fractional deltas, or the reverse). "
+                       f"The block label was kept; check you used the device asked for.",
+                       err=True)
 
 
 # ─── Wave 6.2b: humanization ─────────────────────────────────────────────
@@ -3256,9 +3304,13 @@ def humanize():
 
 
 @humanize.command("on")
+@click.option("--scroll-device", type=click.Choice(["wheel", "trackpad"]), default=None,
+              help="Pin which recorded swipes this session replays (default: a "
+                   "stable pick from the session name). Needs a swipe library.")
 @click.pass_context
-def humanize_on(ctx):
-    _emit(call("humanize_on"), ctx.obj["json"])
+def humanize_on(ctx, scroll_device):
+    _emit(call("humanize_on", {"scroll_device": scroll_device} if scroll_device else {}),
+          ctx.obj["json"])
 
 
 @humanize.command("off")

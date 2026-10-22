@@ -740,8 +740,14 @@ TOOLS: list[tuple[str, str, dict, str, Any]] = [
      "fingerprint", None),
     # ─── Wave 6.2b: humanize per-session toggle ──────────────────────
     ("humanize_on",
-     "Enable humanlike mouse (Bezier paths, gaussian dwell, sin scroll) for current session.",
-     {"type": "object", "properties": {}}, "humanize_on", None),
+     "Enable humanlike mouse (Bezier paths, gaussian dwell, sin scroll) for current session. "
+     "With a recorded swipe library installed, the wheel replays the operator's swipes "
+     "on one device per session.",
+     {"type": "object", "properties": {
+         "scroll_device": {"type": "string", "enum": ["wheel", "trackpad"],
+                           "description": "Pin the session's swipe device (default: "
+                                          "a stable pick from the session name)."},
+     }}, "humanize_on", None),
     ("humanize_off", "Disable humanize for current session.",
      {"type": "object", "properties": {}}, "humanize_off", None),
     ("humanize_status", "Report whether humanize is on for current session.",
