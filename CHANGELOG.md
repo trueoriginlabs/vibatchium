@@ -6,6 +6,57 @@ minor bumps may include breaking changes; we'll always call them out here.
 
 ## [Unreleased]
 
+### feat: humanized scrolling replays the operator's recorded swipes
+
+`humanize`'s wheel was a sin curve: 18 events 16ms apart with fractional
+deltas. A real mouse wheel sends whole ~100-120px notches at uneven 30-100ms
+gaps, and a trackpad sends one push and a ~1s fade of tiny deltas. The July
+oracle baseline left scrolling out (the fixed-distance confound), so it was the
+one gesture never checked against a person.
+
+- `vb oracle record --swipes N` (default 30 per device) adds a feed page: one
+  card per flick, which moves on the first downward wheel event and waits for
+  300ms of wheel silence, so each trial is exactly one gesture. It runs one
+  labelled block per device, mouse wheel then trackpad (`--swipe-devices`).
+  A count of 0 skips any phase, so `--clicks 0 --type-lines 0 --scrolls 0`
+  records swipes only. The capture now stores `deltaMode`; Firefox's line-mode
+  swipes are skipped.
+- `vb oracle ingest … --gestures PATH` writes the swipes as a seed library, and
+  `--install` puts it at `~/.config/vibatchium/gestures.json` (`0600`, out of
+  git). Both devices are kept. Each swipe takes its block's label; ingest
+  reports swipes whose deltas don't look like that device.
+- **One device per session.** A person switches between mouse and trackpad
+  between sittings, not between two flicks, so a session never mixes them. The
+  session name picks the device (stable across runs and restarts), and
+  `vb humanize on --scroll-device wheel|trackpad` (MCP: `scroll_device`) pins
+  it. `humanize status` reports the device in use.
+- With a library present, `humanized_scroll` (every humanized `mouse wheel`)
+  picks one of the session device's three recorded gestures nearest the
+  requested distance. It
+  stretches the timing ±10% (±5% per gap) and sends each event at its absolute
+  deadline. Wheel deltas are never rescaled, so the distance rounds to a whole
+  notch. A trackpad gesture is scaled to the exact distance. Without a library
+  (or with fewer than 3 gestures) nothing changes. `VIBATCHIUM_GESTURES` in the
+  daemon's env points elsewhere.
+- The oracle gains `scroll_duration_ms`, `scroll_gap_ms_median` and
+  `scroll_dy_max_step`. They are reported only, since no literature band
+  separates a trackpad from the sin curve, and become scored when a recorded
+  swipe baseline has ≥5 samples. The bands come from one device
+  (`ingest --swipe-device`, default the one with more swipes), since a band
+  spanning both would pass either. `oracle run` then wheels the operator's
+  median swipe distance instead of 700px and replays that same device.
+- **Behaviour change:** `scroll` trials no longer feed the `scroll_steps` band.
+  A scroll-to-Continue run is many flicks long, while the runner grades one
+  wheel call, so the band comes from swipes.
+
+Measured on an isolated daemon with stand-in recordings (not yet a real
+one): a wheel library replays as whole 120px notches, and a 16ms trackpad
+fling replays at a 16.7ms median gap, 58-59 events, ~1000ms. Both were 7/7 and
+9/9 in their recorded bands, while humanize off was out of band. A two-block
+recording driven through the page ingested as 6 wheel + 6 trackpad, and the
+pin switched one session's replay between them. This is circular
+by design: it shows the replay survives CDP, not that the source swipes are human.
+
 ### fix: one-shot `explore` calls could read each other's pages
 
 `explore` without `--session` is meant to run on its own throwaway session.

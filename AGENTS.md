@@ -484,6 +484,22 @@ pointer-event stream (`pointerrawupdate`, coalesced samples) is unreachable via
 synthetic CDP input by construction; only attach-mode against a real headful
 Chrome closes it.
 
+**Swipe seeds.** The default humanized wheel is a made-up sin curve that matches
+no real device. Record your own swipes (`vb oracle record --clicks 0 --type-lines
+0 --scrolls 0` gives a swipes-only feed page: a mouse-wheel block then a
+trackpad block; open it in Chrome) and `vb oracle ingest trials.json -o b.json
+--install`: every humanized `mouse wheel` on the box then replays one of your
+swipes. Each session uses one device, picked from its name or pinned with
+`humanize on --scroll-device wheel|trackpad`. A wheel keeps its whole notches,
+so the distance rounds to a notch; a trackpad flick is scaled to the exact
+distance.
+The library is personal data in `~/.config/vibatchium/gestures.json`; point the
+**daemon** at another file with `VIBATCHIUM_GESTURES`. `vb oracle run --baseline
+b.json` then grades one swipe of your median size against your recorded bands.
+That check is circular by design: it shows the replay survives CDP (deltas and
+16ms timing intact), not that the swipes are human. They are, because they are
+yours.
+
 **Ambient** fills the silence *between* verbs — the tell Akamai measured (63.2%
 of agentic requests carried zero mouse events). While a session idles it moves
 the pointer and scrolls, steering clear of anything that *looks* interactive
