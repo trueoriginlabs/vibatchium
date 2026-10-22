@@ -31,11 +31,13 @@ dist/
 htmlcov/
 
 # Behavioural-oracle artifacts (0.18.x): personal baseline/recordings + the
-# generated recorder page. baseline.json / oracle-trials.json contain an
-# operator's mouse+keystroke distribution — never commit them to a public repo.
+# generated recorder page. baseline.json / oracle-trials.json / gestures.json
+# contain an operator's mouse+keystroke+swipe distribution — never commit them
+# to a public repo.
 oracle-record.html
 oracle-trials.json
 baseline.json
+gestures.json
 
 # Logo working files — the shipped badge is assets/vb-logo.png; the 1MB
 # generation variants stay local so `git add -A` cannot sweep 7MB into a

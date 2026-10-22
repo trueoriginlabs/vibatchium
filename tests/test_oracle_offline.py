@@ -388,7 +388,8 @@ def test_aggregate_trials_collects_per_feature_samples():
     assert len(agg["straightness"]) == 6
     assert len(agg["interkey_ms_mean"]) == 6    # one per type trial, not click/scroll
     assert len(agg["interkey_ms_stdev"]) == 6
-    assert len(agg["scroll_steps"]) == 6
+    # a scroll trial is many flicks long; scroll bands come from swipes only
+    assert "scroll_steps" not in agg
     assert agg["_meta"]["trial_counts"] == {"click": 6, "type": 6, "scroll": 6}
     # cross-kind isolation: a click trial contributes no cadence, a type trial no dwell
     assert "interkey_ms_mean" not in oracle.aggregate_trials([_click_trial(0)])
@@ -405,6 +406,134 @@ def test_aggregate_feeds_load_baseline(tmp_path):
     assert "recorded operator baseline" in base["dwell_ms_mean"]["source"]
     # _meta must not crash the overlay or become a phantom feature
     assert "_meta" not in base
+
+
+def _wheel_burst(t0, dys, gap, dm=0):
+    return [{"type": "wheel", "t": t0 + i * gap, "dx": 0, "dy": d, "dm": dm,
+             "ets": t0 + i * gap} for i, d in enumerate(dys)]
+
+
+def _swipe_trial(t0=0.0, dys=(120, 120, 120), gap=55.0, dm=0, device=None):
+    # a stray pointermove rides along, as it does on the real page
+    tr = {"kind": "swipe",
+          "events": [{"type": "pmove", "t": t0, "x": 5, "y": 5}]
+          + _wheel_burst(t0, list(dys), gap, dm)}
+    if device:
+        tr["device"] = device
+    return tr
+
+
+def test_split_wheel_bursts_cuts_at_silence():
+    ev = (_wheel_burst(0, [120, 120], 50) + _wheel_burst(500, [120], 50)
+          + [{"type": "pmove", "t": 20, "x": 1, "y": 1}])
+    bursts = oracle.split_wheel_bursts(ev)
+    assert [len(b) for b in bursts] == [2, 1]
+    # a trackpad fling's 16ms tail stays one gesture
+    assert len(oracle.split_wheel_bursts(_wheel_burst(0, [3.5] * 60, 16))) == 1
+
+
+def test_classify_gesture_wheel_vs_trackpad():
+    assert oracle.classify_gesture([120, 120, 240]) == "wheel"
+    assert oracle.classify_gesture([53, 53]) == "wheel"
+    assert oracle.classify_gesture([40.5, 22.1, 9.3, 2.2, 1.0]) == "trackpad"
+    assert oracle.classify_gesture([12, 12, 12]) == "trackpad"   # too small for a notch
+
+
+def test_swipe_trials_feed_per_gesture_scroll_bands():
+    trials = [_swipe_trial(dys=[120] * (1 + i % 3), gap=40 + i) for i in range(6)]
+    trials.append(_swipe_trial(dys=[-120, -120]))             # upward: not a swipe
+    agg = oracle.aggregate_trials(trials)
+    assert len(agg["scroll_steps"]) == 6
+    assert agg["scroll_dy_max_step"] == [120] * 6
+    assert len(agg["scroll_gap_ms_median"]) == 4              # 1-event swipes have no gap
+    assert agg["_meta"]["trial_counts"] == {"swipe": 7}
+
+
+def test_build_gesture_library_keeps_both_devices_and_skips():
+    trials = [_swipe_trial(dys=[120, 120], gap=60) for _ in range(4)]
+    trials.append(_swipe_trial(dys=[30.2, 11.5, 4.1, 1.2], gap=16))
+    trials.append(_swipe_trial(dys=[-120]))                   # upward
+    trials.append(_swipe_trial(dys=[3, 3], dm=1))             # Firefox line mode
+    lib = oracle.build_gesture_library(trials, source="t.json")
+    assert lib["devices"] == {"wheel": 4, "trackpad": 1}
+    assert lib["n"] == 5 and lib["skipped"] == 2 and lib["mismatched"] == 0
+    g = lib["gestures"][0]
+    assert g == {"kind": "wheel", "t": [0, 60], "dy": [120, 120]}
+
+
+def test_block_label_beats_the_classifier_and_is_counted():
+    # a smooth-scrolling mouse can send fractional deltas; the block says wheel
+    trials = [_swipe_trial(dys=[57.3, 61.0], device="wheel"),
+              _swipe_trial(dys=[120, 120], device="wheel"),
+              _swipe_trial(dys=[20.5, 8.1, 2.0], gap=16, device="trackpad")]
+    lib = oracle.build_gesture_library(trials)
+    assert [g["kind"] for g in lib["gestures"]] == ["wheel", "wheel", "trackpad"]
+    assert lib["mismatched"] == 1
+
+
+def test_swipe_bands_come_from_one_device():
+    wheel = [_swipe_trial(dys=[120] * 2, device="wheel") for _ in range(6)]
+    pad = [_swipe_trial(dys=[20.0, 9.0, 3.0, 1.0], gap=16, device="trackpad")
+           for _ in range(5)]
+    agg = oracle.aggregate_trials(wheel + pad)                # majority: wheel
+    assert agg["scroll_dy_max_step"] == [120] * 6
+    assert agg["_meta"]["swipe_device"] == "wheel"
+    agg = oracle.aggregate_trials(wheel + pad, swipe_device="trackpad")
+    assert agg["scroll_steps"] == [4] * 5
+    assert agg["_meta"]["swipe_device"] == "trackpad"
+
+
+def test_load_baseline_promotes_recorded_swipe_features(tmp_path):
+    lit = oracle.load_baseline()
+    assert lit["scroll_gap_ms_median"]["kind"] == "report"    # no literature band
+    agg = oracle.aggregate_trials(
+        [_swipe_trial(dys=[120] * 3, gap=40 + 5 * i) for i in range(8)])
+    f = tmp_path / "b.json"
+    f.write_text(json.dumps(agg))
+    base = oracle.load_baseline(f)
+    assert base["scroll_gap_ms_median"]["kind"] == "score"
+    assert base["scroll_gap_ms_median"]["lo"] >= 40
+    assert base["__source__"]["scroll_dy_median"] == 360
+    assert base["__source__"]["swipe_device"] == "wheel"
+    scored = oracle.score_features({"scroll_gap_ms_median": 16.0}, base)
+    assert scored["per_feature"]["scroll_gap_ms_median"]["human"] is False
+
+
+def test_run_oracle_wheels_the_recorded_swipe_size():
+    wheels, ons = [], []
+
+    def fake_call(verb, args=None, session=None):
+        if verb == "humanize_on":
+            ons.append(args)
+        if verb == "eval":
+            return {"value": {"btn": {"x": 1, "y": 1}, "input": {"x": 1, "y": 1},
+                              "events": []}}
+        if verb == "mouse" and args["action"] == "wheel":
+            wheels.append(args["dy"])
+        return {}
+
+    base = {**oracle.HUMAN_BASELINE,
+            "__source__": {"kind": "meta", "scroll_dy_median": 240.0,
+                           "swipe_device": "trackpad"}}
+    oracle.run_oracle(fake_call, baseline=base)
+    assert wheels == [240, 240]
+    assert ons == [{"scroll_device": "trackpad"}]   # replays the banded device
+    wheels.clear(), ons.clear()
+    oracle.run_oracle(fake_call)
+    assert wheels == [700, 700]
+    assert ons == [{}]
+
+
+def test_record_page_swipe_phase_and_skips():
+    html = oracle.record_page_html(n_clicks=0, n_type=0, n_scroll=0, n_swipe=12)
+    assert "N_SWIPE = 12" in html and "__N_SWIPE__" not in html
+    assert 'SWIPE_DEVICES = ["wheel", "trackpad"]' in html
+    assert "SPLIT_MS = 300" in html
+    assert "if (N_CLICKS <= 0) return startType();" in html
+    assert "push('swipe', {device: SWIPE_DEVICES[block]})" in html
+    one = oracle.record_page_html(n_swipe=5, swipe_devices=("trackpad",))
+    assert 'SWIPE_DEVICES = ["trackpad"]' in one
+    assert "dm: e.deltaMode" in html                         # line-mode is detectable
 
 
 def test_record_page_is_self_contained_and_instrumented():

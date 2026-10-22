@@ -338,7 +338,10 @@ def register_extra(daemon) -> None:
             dy = float(args.get("dy", 0))
             if humanize:
                 from ..humanize import humanized_scroll
-                await humanized_scroll(s.page, dx, dy)
+                await humanized_scroll(
+                    s.page, dx, dy,
+                    device=entry.flags.get("scroll_device") if entry else None,
+                    device_key=entry.name if entry else None)
             else:
                 await m.wheel(dx, dy)
         else:
@@ -346,6 +349,17 @@ def register_extra(daemon) -> None:
         return {"action": action, "x": x, "y": y, "humanized": humanize}
 
     # ─── Wave 6.2b: humanize per-session toggle ──────────────────────────
+
+    def _scroll_device_status(entry) -> dict:
+        """Which device this session's humanized wheel replays, if a swipe
+        library is installed (None = sin curve)."""
+        from ..humanize import load_gesture_library, scroll_device_for
+        library = load_gesture_library()
+        if not library:
+            return {"scroll_device": None, "scroll_seeds": False}
+        return {"scroll_device": scroll_device_for(
+                    library, pinned=entry.flags.get("scroll_device"), key=entry.name),
+                "scroll_seeds": True}
 
     @daemon.handler("humanize_on")
     async def _humanize_on(d, args):
@@ -356,7 +370,13 @@ def register_extra(daemon) -> None:
                 "humanize requires a running session — start one first"
             )
         entry.flags["humanize"] = True
-        return {"humanize": True, "session": entry.name}
+        device = args.get("scroll_device")
+        if device not in (None, "", "wheel", "trackpad"):
+            raise ValueError("scroll_device must be wheel or trackpad")
+        if device:
+            entry.flags["scroll_device"] = device
+        return {"humanize": True, "session": entry.name,
+                **_scroll_device_status(entry)}
 
     @daemon.handler("humanize_off")
     async def _humanize_off(d, args):
@@ -376,7 +396,7 @@ def register_extra(daemon) -> None:
         if entry is None:
             return {"humanize": False, "note": "no running session"}
         return {"humanize": bool(entry.flags.get("humanize")),
-                "session": entry.name}
+                "session": entry.name, **_scroll_device_status(entry)}
 
     @daemon.handler("humanize_ambient")
     async def _humanize_ambient(d, args):
