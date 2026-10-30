@@ -59,6 +59,46 @@ rest (`net::ERR_ABORTED`, `Target page … has been closed`).
   Queued explores each cold-start Chrome, so a long queue on one name can
   outlast the client's 120s timeout.
 
+### change: prompt-injection classifier v2
+
+The classifier now matches over a normalized copy of the text as well as the
+raw one: NFKC, Cyrillic/Greek look-alikes, invisible characters removed, and
+leetspeak and spaced-out words for the override family. Invisible Unicode is
+judged by what it does: emoji joiners and RTL marks are no longer flagged
+(v1 flagged 476 ordinary emoji tweets high), while word-splitting characters,
+tag-character smuggling, bidi overrides and variation-selector payloads are.
+Base64 payloads are decoded, and new families cover text addressed to an
+agent, exfiltration directives, markdown-image exfiltration, chat-template
+tokens and multilingual overrides. Recall on the public sets went from 1.5–29 %
+to 11–72 %; real tweets flagged high went from 484 to 0. Harness and numbers:
+`bench/injection_eval/`.
+
+An adversarial review of v2 found the following, fixed before release:
+
+- **`explore`, sessionless `fetch` and `search` were still never scanned.** The
+  dispatcher scanned only when the call's session was running afterwards, and
+  explore closes the session it ran on. It now falls back to the mode the
+  session had when the call started, then to the daemon default.
+- **The scan blocked the daemon.** It ran on the event loop, so a big page
+  stalled every other session; it now runs in a worker thread. A run of `!` or
+  `|` took quadratic time (40k characters: 12 s, now 27 ms). One `İ` on a page
+  sent the whole page down a slow path, and folding every Cyrillic look-alike
+  made Russian pages 15x slower than v1. Look-alikes are now folded only in
+  words that touch Latin text (ru.wikipedia: 2.3 s → 0.5 s).
+- **Evasions v1 caught:** an invisible character next to a space
+  (`ignore ​previous instructions`) and a dotless `ı`.
+- **Quoting an attack no longer lowers it to low.** It changed no verdict on
+  129k tweets and cost an attacker two characters.
+- **False positives removed:** soft hyphens in German text, "Edit: ignore the
+  above, …", API docs ("send the access token in the Authorization header"),
+  and badge URLs with a filled-in `?token=`. An exfiltration directive now
+  needs a destination the page's author can read: an address, URL, domain or
+  the agent's reply.
+- **`wrap`/`redact` broke machine-read output:** they now leave `fetch` bodies,
+  URLs and locators unmodified (still flagged), work on a copy instead of
+  rewriting `network_dump`'s stored events, and defang wrapper tags disguised
+  with zero-width or fullwidth characters.
+
 ## [0.20.0] — 2026-10-07
 
 A fleet of logged-in identities on one box is the thing vibatchium is for, and

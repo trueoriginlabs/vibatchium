@@ -576,6 +576,10 @@ class Daemon:
         tok = current_session_ctx.set(session_name)
         explicit_tok = session_explicit_ctx.set(bool(explicit_session))
         fs_tok = _fspolicy.push_scope(fs_scope) if fs_scope is not None else None
+        # The safety mode as the call found it: the mode lives on the session
+        # entry, and a pinned explore stops its session before the scan below.
+        pre_entry = self.registry.peek(session_name)
+        pre_mode = pre_entry.flags.get("safety_mode") if pre_entry is not None else None
         try:
             if lock_class == "registry":
                 # 0.7.0 lease gate: refuse the DISRUPTIVE registry verbs (those
@@ -710,15 +714,22 @@ class Daemon:
                 return {"id": req_id, "ok": False, "recovered": True,
                         "error": result.get("error",
                                             "session recovered after a crash")}
-            # Wave 6.3c: prompt-injection middleware. Off by default; per-session
-            # flag controls activation. Mutates content fields in-place.
+            # Wave 6.3c: prompt-injection middleware. Per-session flag controls
+            # activation. Mutates content fields in-place.
             entry = self.registry.get(session_name)
-            if entry is not None and isinstance(result, dict):
-                from .. import safety as _safety_mod
-                mode = entry.flags.get("safety_mode") or _safety_mod.default_mode()
+            from .. import safety as _safety
+            if isinstance(result, dict) and cmd in _safety.CONTENT_FIELDS:
+                # No entry once the verb returns (explore's one-shot lane, a
+                # pinned explore that stopped its session, a sessionless
+                # fetch or search) means the mode the call started with, else
+                # the daemon default, not "skip": that skip left explore, the
+                # START HERE verb, unscanned.
+                mode = ((entry.flags.get("safety_mode") if entry is not None else None)
+                        or pre_mode or _safety.default_mode())
                 if mode and mode != "off":
-                    from .. import safety as _safety
-                    result = _safety.scan_response(cmd, result, mode)
+                    # Off the event loop: a 3 MB html page takes seconds, and
+                    # every other session's verbs would wait on it.
+                    result = await asyncio.to_thread(_safety.scan_response, cmd, result, mode)
             return {"id": req_id, "ok": True, "result": result}
         except Exception as exc:  # noqa: BLE001
             log.exception("handler %s failed (session=%s)", cmd, session_name)
