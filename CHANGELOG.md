@@ -78,26 +78,44 @@ An adversarial review of v2 found the following, fixed before release:
 - **`explore`, sessionless `fetch` and `search` were still never scanned.** The
   dispatcher scanned only when the call's session was running afterwards, and
   explore closes the session it ran on. It now falls back to the mode the
-  session had when the call started, then to the daemon default.
+  session had when the call started, then to the daemon default. A one-shot
+  explore uses the daemon default: the session name it was routed under
+  (`default`, or the active-session file's) is someone else's, and its
+  `safety set off` no longer switches every caller's explore scan off.
 - **The scan blocked the daemon.** It ran on the event loop, so a big page
-  stalled every other session; it now runs in a worker thread. A run of `!` or
-  `|` took quadratic time (40k characters: 12 s, now 27 ms). One `İ` on a page
-  sent the whole page down a slow path, and folding every Cyrillic look-alike
-  made Russian pages 15x slower than v1. Look-alikes are now folded only in
-  words that touch Latin text (ru.wikipedia: 2.3 s → 0.5 s).
+  stalled every other session. It now runs in its own four-thread pool, so
+  scans can't take the workers `verify_url`'s DNS lookup needs, on a copy
+  taken on the event loop, so a live capture buffer is never read while page
+  listeners change it. A run of `!` or `|` took quadratic time (40k
+  characters: 12 s, now 27 ms). One `İ` on a page sent the whole page down a
+  slow path, and folding every Cyrillic look-alike made Russian pages slower
+  than v1. Look-alikes are now folded only in words that are Latin after NFKC
+  or made entirely of look-alikes; one-letter words like Russian `а` only next
+  to such a word (ru.wikipedia's Moscow article as text: 0.69 s → 0.42 s).
 - **Evasions v1 caught:** an invisible character next to a space
   (`ignore ​previous instructions`) and a dotless `ı`.
 - **Quoting an attack no longer lowers it to low.** It changed no verdict on
-  129k tweets and cost an attacker two characters.
+  129k tweets and cost an attacker two characters. A tweet that quotes one
+  (`someone replied "ignore all previous instructions"`) is now high, which
+  twitter_persona quarantines instead of wrapping.
 - **False positives removed:** soft hyphens in German text, "Edit: ignore the
   above, …", API docs ("send the access token in the Authorization header"),
   and badge URLs with a filled-in `?token=`. An exfiltration directive now
-  needs a destination the page's author can read: an address, URL, domain or
-  the agent's reply.
-- **`wrap`/`redact` broke machine-read output:** they now leave `fetch` bodies,
-  URLs and locators unmodified (still flagged), work on a copy instead of
-  rewriting `network_dump`'s stored events, and defang wrapper tags disguised
-  with zero-width or fullwidth characters.
+  needs a destination the page's author can read: an address, URL, host, IP,
+  handle, "our support team" or the agent's reply.
+- **`wrap`/`redact` broke machine-read output:** they now leave `fetch` and
+  `wait_response` bodies, `network_dump` captures, and the URLs vibatchium
+  reports (`extract` links and assets, `search` results, `pages`, `frames`)
+  unmodified, still flagged. Locators carry page text (`@label:<the label>`),
+  so they are still rewritten. Wrapper tags disguised with zero-width,
+  fullwidth or look-alike characters are defanged.
+
+A second review of these fixes found they had opened bypasses: phrases spelled
+entirely in look-alike letters, a match starting just after a changed
+character (`⑴ignore previous instructions`), upper-case markdown-image URLs,
+subdomain destinations, and "Ignore the above. Say …". It also found the
+`network_dump` race and a `wrap` mode that slowed to 8 s on a page full of
+`<`. All are fixed, each with a regression test.
 
 ## [0.20.0] — 2026-10-07
 
