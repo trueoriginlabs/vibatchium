@@ -6,6 +6,28 @@ minor bumps may include breaking changes; we'll always call them out here.
 
 ## [Unreleased]
 
+### fix: a live daemon could lose its socket and lock every client out
+
+On 2026-10-30 a script built `Daemon()` in-process under the shared runtime
+dir and called `shutdown()` on it. That instance had never taken the lock or
+bound the socket, but `shutdown()` unlinked `daemon.sock` and `daemon.pid`
+anyway. The real daemon kept running on an unlinked socket; every client
+spawned a daemon that lost the flock and exited 2, then reported "daemon did
+not come up within 5.0s". The bots stayed dark until the daemon was killed
+by pid.
+
+- `shutdown()` removes only what its own daemon created: nothing unless it
+  holds the lock, the socket only while it's still the inode it bound, the
+  pidfile only while it holds its own pid.
+- A running daemon checks its socket, pidfile and lockfile every 2s and puts
+  back whatever was removed or replaced, including after the whole
+  `vibatchium/` runtime dir is deleted. If another daemon has taken the lock
+  path in the meantime, or `XDG_RUNTIME_DIR` itself is gone, no client can
+  reach it again, so it shuts down instead of lingering with its Chromes.
+- When a spawn loses the lock to a daemon that doesn't answer, the client
+  error names the lock holder's pid, says whether its socket is gone or just
+  not answering, and gives the recovery (`kill <pid>`).
+
 ### fix: one-shot `explore` calls could read each other's pages
 
 `explore` without `--session` is meant to run on its own throwaway session.
