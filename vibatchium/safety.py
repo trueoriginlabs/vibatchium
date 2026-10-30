@@ -28,6 +28,7 @@ fields to scan.
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 
@@ -111,19 +112,35 @@ CONTENT_FIELDS: dict[str, tuple[str, ...]] = {
 _MAX_SCAN_DEPTH = 6
 
 # Scanned for risk but never rewritten by wrap/redact, because a program reads
-# them: a response body or a capture is parsed (a wrapper's quotes break
-# JSON), and a URL vibatchium reports must still load. Keyed by verb: in
-# `extract_fields` the caller names the keys, so a field called `url` there
-# is page text like any other. Locators (`detect_forms`' `locator`,
-# `observe`'s `_durable`) carry page text too (`@label:<the label>`), so they
-# are rewritten and stop resolving; the risk on the response says why.
-_FLAG_ONLY_FIELDS = frozenset({("fetch", "body"), ("wait_response", "text"), ("network_dump", "events")})
-_FLAG_ONLY_KEYS: dict[str, frozenset[str]] = {
+# them. In these fields a string that parses as a JSON object or array stays
+# as it is (a wrapper's quotes break the JSON); an HTML or text body is page
+# text and is rewritten.
+_JSON_FIELDS = frozenset({("fetch", "body"), ("wait_response", "text"), ("network_dump", "events"),
+                          ("eval", "value"), ("handle_eval", "value")})
+# A URL vibatchium reports must still load: under these keys an http(s) URL
+# stays as it is. Only http(s): Chrome keeps the spaces in a `data:` URL, so
+# one can carry a whole sentence. Keyed by verb: in `extract_fields` the
+# caller names the keys, so a field called `url` there is page text like any
+# other. Locators (`detect_forms`' `locator`, `observe`'s `_durable`) carry
+# page text too (`@label:<the label>`), so they are rewritten and stop
+# resolving; the risk on the response says why.
+_URL_KEYS: dict[str, frozenset[str]] = {
     "extract": frozenset({"url"}),
     "search": frozenset({"url"}),
     "pages": frozenset({"url"}),
     "frames": frozenset({"url"}),
 }
+_LOADABLE_URL = re.compile(r"https?://\S+", re.I)
+
+
+def _is_json(text: str) -> bool:
+    if text.lstrip()[:1] not in ("{", "["):
+        return False
+    try:
+        json.loads(text)
+    except ValueError:
+        return False
+    return True
 
 
 # ─── pattern library ───────────────────────────────────────────────────
@@ -328,8 +345,10 @@ PATTERNS: list[tuple[re.Pattern, str, str]] = [
                 r"(?:this|the)\s+(?:address|url|link|email|endpoint|form|chat|webhook)\s+(?:below|above)\b|"
                 r"this\s+(?:address|url|link|email|endpoint|form|chat|webhook)\b|the\s+following\b|"
                 r"(?:my|our)\s+(?:support|team|admin|server|webhook|endpoint|email|inbox|telegram|discord|"
-                r"wallet|bot|dms?)\b|(?:telegram|discord|pastebin|webhook)\b)|"
-                r"\bin\s+(?:the|your)\s+(?:reply|answer|response|url|next\s+(?:reply|message|post))\b)", re.I),
+                r"wallet|bot|dms?)\b|(?:telegram|discord|pastebin|webhook)\b|"
+                r"the\s+(?:attacker|admin(?:istrator)?|operator|owner|sender|author)\b|[\w-]+\[\.\]\w)|"
+                r"\b(?:in|at\s+the\s+(?:end|start|bottom|top)\s+of)\s+(?:the|your)\s+"
+                r"(?:reply|answer|response|output|message|url|next\s+(?:reply|message|post))\b)", re.I),
      "exfil_directive", "high"),
     # A markdown image whose URL carries a template slot, a parameter named
     # for conversation data, or a short generic parameter left for the model
@@ -339,7 +358,8 @@ PATTERNS: list[tuple[re.Pattern, str, str]] = [
     (re.compile(r"!\[[^\]\n]{0,100}\]\(\s*h[tx]{2}ps?://[^)\s]{1,300}?"
                 r"(?:[{}]|%7[bd]|[?&](?:data|conv|conversation|chat|history|prompt|secret|cookie|session|msg)=|"
                 r"[?&](?:q|d|c|token)=(?:[\[<$]|%[a-z_]+%|\.{2,}|(?-i:[A-Z][A-Z_-]+)(?=[)&\s])|"
-                r"(?:data|summary|info|content|context|text|here|secret|x+)(?=[)&\s])|(?=[)&\s])))", re.I),
+                r"(?:data|summary|info|content|context|text|here|secret|query|input|output|result|response|"
+                r"answer|value|prompt|x+)(?=[)&\s])|(?=[)&\s])))", re.I),
      "markdown_exfil", "high"),
 
     # ─── encoding tricks ───────────────────────────────────────────────
@@ -636,6 +656,8 @@ _INVISIBLE_RE = re.compile("[\u00ad\u034f\u061c\u115f\u1160\u17b4\u17b5\u180e\uf
 # every offset.
 _FOREIGN_WORD = re.compile(r"(?<![^\W\d_])[^\W\d_]*?[^\x00-\x7f][^\W\d_]*")
 _HAS_LATIN = re.compile(r"[A-Za-z]")
+_PREV_LETTER = re.compile(r"[^\W\d_](?=[\W\d_]*$)")
+_NEXT_LETTER = re.compile(r"[^\W\d_]")
 
 
 def _latin_context(text: str) -> set[int]:
@@ -654,14 +676,16 @@ def _latin_context(text: str) -> set[int]:
         w = unicodedata.normalize("NFKC", m.group(0))
         if _HAS_LATIN.search(w):
             keep.update(range(m.start(), m.end()))
-        elif w.translate(_CONFUSABLES).isascii():
+        elif w.translate(_CONFUSABLES).translate(_PREFILTER_FOLD).isascii():
             if m.end() - m.start() == 1:
                 singles.append(m.start())
             else:
                 keep.update(range(m.start(), m.end()))
     for i in singles:
-        near = [*range(max(0, i - 4), i - 1), *range(i + 2, min(len(text), i + 5))]
-        if any(j in keep or text[j].isascii() and text[j].isalpha() for j in near):
+        # The nearest letter on each side, across any spacing or punctuation.
+        near = [m.start() for m in (_PREV_LETTER.search(text, max(0, i - 40), i),
+                                    _NEXT_LETTER.search(text, i + 1, i + 41)) if m]
+        if any(j in keep or text[j].isascii() for j in near):
             keep.add(i)
     return keep
 
@@ -1293,8 +1317,8 @@ def scan_and_apply(text: str, mode: str) -> tuple[str, dict]:
 _RISK_ORDER = {"none": 0, "low": 1, "high": 2}
 
 
-def _scan_value(val, mode: str, depth: int = 0,
-                flag_keys: frozenset[str] = frozenset()) -> tuple[object, str, list[str]]:
+def _scan_value(val, mode: str, depth: int = 0, url_keys: frozenset[str] = frozenset(),
+                keep_json: bool = False) -> tuple[object, str, list[str]]:
     """Recursively scan/mutate the string leaves of a value that may be a str,
     or a dict/list nesting strings (extract_fields' `fields`, detect_forms'
     `forms`, candidates' `candidates`, extract's `links`/`assets`). Strings are
@@ -1303,7 +1327,7 @@ def _scan_value(val, mode: str, depth: int = 0,
     if isinstance(val, str):
         if not val:
             return val, "none", []
-        new_text, meta = scan_and_apply(val, mode)
+        new_text, meta = scan_and_apply(val, "flag-only" if keep_json and _is_json(val) else mode)
         return new_text, meta["prompt_injection_risk"], list(meta.get("signals", []))
     if depth >= _MAX_SCAN_DEPTH:
         return val, "none", []
@@ -1316,8 +1340,9 @@ def _scan_value(val, mode: str, depth: int = 0,
     agg_risk = "none"
     agg_sigs: list[str] = []
     for key, item in pairs:
-        item_mode = "flag-only" if isinstance(val, dict) and key in flag_keys else mode
-        new_item, r, sigs = _scan_value(item, item_mode, depth + 1, flag_keys)
+        item_mode = ("flag-only" if isinstance(val, dict) and key in url_keys and isinstance(item, str)
+                     and _LOADABLE_URL.fullmatch(item) else mode)
+        new_item, r, sigs = _scan_value(item, item_mode, depth + 1, url_keys, keep_json)
         if new_item is not item:
             val[key] = new_item
         if _RISK_ORDER.get(r, 0) > _RISK_ORDER[agg_risk]:
@@ -1354,15 +1379,14 @@ def scan_response(verb: str, result: dict, mode: str) -> dict:
         val = result.get(field)
         if val is None or val == "":
             continue
-        field_mode = "flag-only" if (verb, field) in _FLAG_ONLY_FIELDS else mode
         if use_html_scan:
             if not isinstance(val, str):
                 continue
-            result[field], meta = _scan_and_apply_html(val, field_mode)
+            result[field], meta = _scan_and_apply_html(val, mode)
             risk, sigs = meta["prompt_injection_risk"], meta["signals"]
         else:
-            result[field], risk, sigs = _scan_value(val, field_mode,
-                                                    flag_keys=_FLAG_ONLY_KEYS.get(verb, frozenset()))
+            result[field], risk, sigs = _scan_value(val, mode, url_keys=_URL_KEYS.get(verb, frozenset()),
+                                                    keep_json=(verb, field) in _JSON_FIELDS)
         if _RISK_ORDER.get(risk, 0) > _RISK_ORDER[aggregated_risk]:
             aggregated_risk = risk
         for sig in sigs:

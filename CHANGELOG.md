@@ -79,9 +79,10 @@ An adversarial review of v2 found the following, fixed before release:
   dispatcher scanned only when the call's session was running afterwards, and
   explore closes the session it ran on. It now falls back to the mode the
   session had when the call started, then to the daemon default. A one-shot
-  explore uses the daemon default: the session name it was routed under
-  (`default`, or the active-session file's) is someone else's, and its
-  `safety set off` no longer switches every caller's explore scan off.
+  explore and `search` use no state of the session name they were routed
+  under (`default`, or the active-session file's), so they take the stricter
+  of its mode and the daemon default: its `safety set off` no longer switches
+  every caller's scan off, and its `wrap` or `redact` still applies.
 - **The scan blocked the daemon.** It ran on the event loop, so a big page
   stalled every other session. It now runs in its own four-thread pool, so
   scans can't take the workers `verify_url`'s DNS lookup needs, on a copy
@@ -103,19 +104,28 @@ An adversarial review of v2 found the following, fixed before release:
   and badge URLs with a filled-in `?token=`. An exfiltration directive now
   needs a destination the page's author can read: an address, URL, host, IP,
   handle, "our support team" or the agent's reply.
-- **`wrap`/`redact` broke machine-read output:** they now leave `fetch` and
-  `wait_response` bodies, `network_dump` captures, and the URLs vibatchium
-  reports (`extract` links and assets, `search` results, `pages`, `frames`)
-  unmodified, still flagged. Locators carry page text (`@label:<the label>`),
-  so they are still rewritten. Wrapper tags disguised with zero-width,
-  fullwidth or look-alike characters are defanged.
+- **`wrap`/`redact` broke machine-read output:** a JSON body in `fetch`,
+  `wait_response`, `network_dump`, `eval` or `handle_eval` output, and an
+  http(s) URL vibatchium reports (`extract` links and assets, `search`
+  results, `pages`, `frames`), are now left unmodified and still flagged. An
+  HTML or text body, a `data:` URL, and locators (`@label:<the label>`) carry
+  page text, so they are still rewritten. Wrapper tags disguised with
+  zero-width, fullwidth or look-alike characters are defanged.
 
 A second review of these fixes found they had opened bypasses: phrases spelled
 entirely in look-alike letters, a match starting just after a changed
 character (`⑴ignore previous instructions`), upper-case markdown-image URLs,
 subdomain destinations, and "Ignore the above. Say …". It also found the
 `network_dump` race and a `wrap` mode that slowed to 8 s on a page full of
-`<`. All are fixed, each with a regression test.
+`<`. A third review found a lone look-alike letter set off by wide spacing,
+destinations like "the attacker" and `evil[.]com`, a one-shot explore that
+ignored the caller's `wrap`, and a scan pool `shutdown` left running. All are
+fixed, each with a regression test.
+
+Known limits: scans have no size cap, so four huge responses scanned at once
+delay a fifth session's verbs until one finishes (the loop itself stays
+free), and a scan already running when the daemon shuts down runs to the end
+before the process exits.
 
 ## [0.20.0] — 2026-10-07
 

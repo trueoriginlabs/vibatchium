@@ -731,15 +731,16 @@ class Daemon:
                 # fetch or search) means the mode the call started with, else
                 # the daemon default, not "skip": that skip left explore, the
                 # START HERE verb, unscanned.
-                if cmd == "explore" and result.get("lane") == "ephemeral":
-                    # The one-shot lane ran on a session it minted; the name
-                    # this call was routed under (`default`, or whatever the
-                    # active-session file says) belongs to someone else, and
-                    # its `safety set off` must not switch this scan off.
-                    mode = _safety.default_mode()
+                routed = (entry.flags.get("safety_mode") if entry is not None else None) or pre_mode
+                if cmd == "search" or (cmd == "explore" and result.get("lane") == "ephemeral"):
+                    # These calls use no state of the session they were routed
+                    # under (`default`, or the active-session file's): someone
+                    # else's `safety set off` there must not switch this scan
+                    # off, but a stricter mode set there still applies.
+                    mode = max(routed if routed in _safety.MODES else "off", _safety.default_mode(),
+                               key=_safety.MODES.index)
                 else:
-                    mode = ((entry.flags.get("safety_mode") if entry is not None else None)
-                            or pre_mode or _safety.default_mode())
+                    mode = routed or _safety.default_mode()
                 if mode and mode != "off":
                     # Off the event loop: a 3 MB html page takes seconds, and
                     # every other session's verbs would wait on it. Scan a
@@ -1182,6 +1183,9 @@ class Daemon:
         # Stop ambient tasks before their sessions' pages go away.
         with contextlib.suppress(Exception):
             await self._ambient.shutdown()
+        # Drop queued scans: their replies have nowhere to go. A scan already
+        # running can't be interrupted and finishes on its own.
+        self._scan_pool.shutdown(wait=False, cancel_futures=True)
         with contextlib.suppress(Exception):
             await self.registry.close_all()
         # Remove only what this daemon created. A Daemon that never won the
