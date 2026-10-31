@@ -21,7 +21,9 @@ Sessions are long-lived across many such connections.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import contextlib
+import copy
 import fcntl
 import json
 import logging
@@ -287,6 +289,11 @@ class Daemon:
         self._ambient = _ambient.AmbientManager(self)
         self._handlers: dict[str, Callable[[Daemon, dict], Awaitable[Any]]] = {}
         self._stopping = asyncio.Event()
+        # Prompt-injection scans run here, not in asyncio's default executor:
+        # a dozen big pages scanned at once would take every default worker,
+        # and verify_url's DNS lookup (3 s budget) runs there too.
+        self._scan_pool = concurrent.futures.ThreadPoolExecutor(
+            max_workers=4, thread_name_prefix="vb-scan")
         # 0.9.1 singleton + idle reaper: the held flock fd (None until acquired)
         # and a monotonic activity stamp the reaper uses to decide idleness.
         self._lock_fd: int | None = None
@@ -576,6 +583,10 @@ class Daemon:
         tok = current_session_ctx.set(session_name)
         explicit_tok = session_explicit_ctx.set(bool(explicit_session))
         fs_tok = _fspolicy.push_scope(fs_scope) if fs_scope is not None else None
+        # The safety mode as the call found it: the mode lives on the session
+        # entry, and a pinned explore stops its session before the scan below.
+        pre_entry = self.registry.peek(session_name)
+        pre_mode = pre_entry.flags.get("safety_mode") if pre_entry is not None else None
         try:
             if lock_class == "registry":
                 # 0.7.0 lease gate: refuse the DISRUPTIVE registry verbs (those
@@ -710,15 +721,35 @@ class Daemon:
                 return {"id": req_id, "ok": False, "recovered": True,
                         "error": result.get("error",
                                             "session recovered after a crash")}
-            # Wave 6.3c: prompt-injection middleware. Off by default; per-session
-            # flag controls activation. Mutates content fields in-place.
+            # Wave 6.3c: prompt-injection middleware. Per-session flag controls
+            # activation.
             entry = self.registry.get(session_name)
-            if entry is not None and isinstance(result, dict):
-                from .. import safety as _safety_mod
-                mode = entry.flags.get("safety_mode") or _safety_mod.default_mode()
+            from .. import safety as _safety
+            if isinstance(result, dict) and cmd in _safety.CONTENT_FIELDS:
+                # No entry once the verb returns (explore's one-shot lane, a
+                # pinned explore that stopped its session, a sessionless
+                # fetch or search) means the mode the call started with, else
+                # the daemon default, not "skip": that skip left explore, the
+                # START HERE verb, unscanned.
+                routed = (entry.flags.get("safety_mode") if entry is not None else None) or pre_mode
+                if cmd == "search" or (cmd == "explore" and result.get("lane") == "ephemeral"):
+                    # These calls use no state of the session they were routed
+                    # under (`default`, or the active-session file's): someone
+                    # else's `safety set off` there must not switch this scan
+                    # off, but a stricter mode set there still applies.
+                    mode = max(routed if routed in _safety.MODES else "off", _safety.default_mode(),
+                               key=_safety.MODES.index)
+                else:
+                    mode = routed or _safety.default_mode()
                 if mode and mode != "off":
-                    from .. import safety as _safety
-                    result = _safety.scan_response(cmd, result, mode)
+                    # Off the event loop: a 3 MB html page takes seconds, and
+                    # every other session's verbs would wait on it. Scan a
+                    # copy taken here, on the loop: a handler may return its
+                    # session's live buffer (network_dump's events), which
+                    # page listeners keep changing while the scan runs.
+                    snapshot = copy.deepcopy(result)
+                    result = await asyncio.get_running_loop().run_in_executor(
+                        self._scan_pool, _safety.scan_response, cmd, snapshot, mode)
             return {"id": req_id, "ok": True, "result": result}
         except Exception as exc:  # noqa: BLE001
             log.exception("handler %s failed (session=%s)", cmd, session_name)
@@ -1152,6 +1183,9 @@ class Daemon:
         # Stop ambient tasks before their sessions' pages go away.
         with contextlib.suppress(Exception):
             await self._ambient.shutdown()
+        # Drop queued scans: their replies have nowhere to go. A scan already
+        # running can't be interrupted and finishes on its own.
+        self._scan_pool.shutdown(wait=False, cancel_futures=True)
         with contextlib.suppress(Exception):
             await self.registry.close_all()
         # Remove only what this daemon created. A Daemon that never won the
