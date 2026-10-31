@@ -11,7 +11,7 @@ import time
 import uuid
 from typing import Any
 
-from .daemon.paths import SOCK_PATH
+from .daemon.paths import LOCK_PATH, SOCK_PATH
 
 
 class DaemonNotRunning(RuntimeError):
@@ -104,7 +104,43 @@ def spawn_daemon(wait: float = 5.0) -> None:
         # daemon already holding the lock — that's success, not failure. Keep
         # polling until the incumbent's socket answers (or the deadline).
         time.sleep(0.1)
+    if proc.poll() == 2:
+        # Our spawn lost the flock, so a daemon holds it — but never answered.
+        pid = _lock_holder_pid()
+        if pid is not None:
+            if not SOCK_PATH.exists():
+                state = (f"but {SOCK_PATH} is gone, so it is running and "
+                         f"unreachable")
+            else:
+                state = f"but does not answer on {SOCK_PATH} (busy or wedged)"
+            raise DaemonError(
+                f"daemon pid {pid} holds {LOCK_PATH} {state}. Recover with "
+                f"`kill {pid}` (it closes its sessions and exits); the next "
+                f"call starts a fresh daemon. If other clients share this "
+                f"daemon, tell them first.")
     raise DaemonError(f"daemon did not come up within {wait}s")
+
+
+def _lock_holder_pid() -> int | None:
+    """The pid a daemon wrote into LOCK_PATH, if that process is still a
+    running vibatchium daemon."""
+    try:
+        pid = int(LOCK_PATH.read_text().strip())
+    except (OSError, ValueError):
+        return None
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as fh:
+            cmdline = fh.read()
+    except FileNotFoundError:
+        # No /proc (macOS), or the pid is gone: ask ps.
+        try:
+            cmdline = subprocess.run(["ps", "-p", str(pid), "-o", "command="],
+                                     capture_output=True, timeout=5).stdout
+        except (OSError, subprocess.SubprocessError):
+            return None
+    except OSError:
+        return None
+    return pid if b"vibatchium.daemon.server" in cmdline else None
 
 
 def call(cmd: str, args: dict[str, Any] | None = None, *,

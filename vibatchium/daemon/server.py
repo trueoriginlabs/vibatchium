@@ -138,6 +138,25 @@ def _pidfile_daemon_alive() -> bool:
         return True            # pid is alive but cmdline unreadable — be safe
 
 
+# How often a running daemon checks that its socket, pidfile and lockfile are
+# still the ones it created (Daemon._check_paths). Below the client's 5s spawn
+# wait, so a client that finds the socket missing gets it back before it gives up.
+_PATH_WATCH_INTERVAL = 2.0
+
+# How long shutdown waits for open client connections to finish before it
+# closes the sessions anyway.
+_CLOSE_GRACE = 5.0
+
+
+def _path_id(path: Any) -> tuple[int, int] | None:
+    """(st_dev, st_ino) of PATH, or None if it doesn't exist."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return (st.st_dev, st.st_ino)
+
+
 class Daemon:
     # Verbs whose handlers DON'T acquire a per-session lock. These either
     # block on external events (waits) and need to coexist with the action
@@ -272,6 +291,13 @@ class Daemon:
         # and a monotonic activity stamp the reaper uses to decide idleness.
         self._lock_fd: int | None = None
         self._last_activity: float = time.monotonic()
+        # The listening server and the (dev, inode) of the socket file it
+        # created. shutdown() removes SOCK_PATH only while it is still that
+        # inode, and _check_paths rebinds when it isn't.
+        self._server: asyncio.AbstractServer | None = None
+        self._sock_id: tuple[int, int] | None = None
+        self._foreign_sock_id: tuple[int, int] | None = None
+        self._unbindable_sock_id: tuple[int, int] | None = None
         # 0.19.1: WALL-CLOCK boot stamp (not monotonic — it crosses the socket
         # to a different process, which has its own monotonic origin). This is
         # the only reliable staleness signal for an EDITABLE install: a
@@ -854,6 +880,110 @@ class Daemon:
             # persistent empty lockfile (pidfile model) keeps flock single-inode;
             # _acquire_singleton_lock O_CREAT-reuses it and rewrites the pid.
 
+    async def _bind_socket(self) -> None:
+        """Listen on SOCK_PATH, remember the inode we created and write the
+        pidfile. Called at startup, and by _check_paths when the path is lost."""
+        server = await asyncio.start_unix_server(self.handle_conn, path=str(SOCK_PATH))
+        os.chmod(SOCK_PATH, 0o600)
+        self._sock_id = _path_id(SOCK_PATH)
+        self._foreign_sock_id = None
+        self._unbindable_sock_id = None
+        PID_PATH.write_text(str(os.getpid()))
+        old, self._server = self._server, server
+        if old is not None:
+            # Stop listening on the lost inode. asyncio's cleanup is
+            # inode-checked, so this can't unlink the socket we just bound;
+            # connections already accepted on it keep running.
+            old.close()
+
+    async def _socket_answers(self) -> bool:
+        try:
+            _, w = await asyncio.wait_for(
+                asyncio.open_unix_connection(str(SOCK_PATH)), timeout=2.0)
+        except TimeoutError:
+            return True        # slow, not dead: don't take over a live listener
+        except OSError:
+            return False
+        w.close()
+        with contextlib.suppress(Exception):
+            await w.wait_closed()
+        return True
+
+    async def _check_paths(self) -> None:
+        """Keep this daemon reachable. Its socket, pidfile and lockfile can be
+        removed or replaced while it runs (a script calling another Daemon's
+        shutdown(), an rm of the runtime dir); a daemon that doesn't notice keeps
+        running with every client locked out (2026-10-30). We hold the lock, so
+        we put back what is missing. If another daemon has taken the lock path,
+        or the runtime dir itself is gone, no client can reach us again: stop
+        instead of lingering with our Chromes."""
+        if self._stopping.is_set() or self._lock_fd is None:
+            return
+        cache_dir = SOCK_PATH.parent
+        if not cache_dir.parent.is_dir():
+            log.error("runtime dir %s is gone — shutting down", cache_dir.parent)
+            self._stopping.set()
+            return
+        if not cache_dir.is_dir():
+            cache_dir.mkdir(exist_ok=True)
+            with contextlib.suppress(OSError):
+                os.chmod(cache_dir, 0o700)
+        st = os.fstat(self._lock_fd)
+        if _path_id(LOCK_PATH) != (st.st_dev, st.st_ino):
+            held = self._lock_fd
+            self._lock_fd = None
+            try:
+                acquired = self._acquire_singleton_lock()
+            except OSError:
+                # The new lockfile couldn't even be opened (EACCES, EMFILE):
+                # keep the lock we hold and try again on the next tick.
+                self._lock_fd = held
+                raise
+            if not acquired:
+                self._lock_fd = held
+                log.error("%s is now held by another daemon — this one is "
+                          "unreachable, shutting down", LOCK_PATH)
+                self._stopping.set()
+                return
+            with contextlib.suppress(OSError):
+                os.close(held)
+            log.warning("lockfile %s was removed or replaced — re-acquired", LOCK_PATH)
+        sid = _path_id(SOCK_PATH)
+        if sid != self._sock_id:
+            if sid is not None and await self._socket_answers():
+                if sid != self._foreign_sock_id:
+                    log.error("%s is served by another process — not taking it "
+                              "over; clients no longer reach this daemon", SOCK_PATH)
+                    self._foreign_sock_id = sid
+                return
+            if sid is not None and sid == self._unbindable_sock_id:
+                return         # already reported; wait for the path to change
+            log.warning("socket %s was %s — rebinding", SOCK_PATH,
+                        "removed" if sid is None else "replaced")
+            try:
+                await self._bind_socket()
+            except OSError as exc:
+                # e.g. a regular file or a directory at the path: asyncio only
+                # replaces a stale socket. Say so once, not every tick.
+                self._unbindable_sock_id = sid
+                log.error("cannot rebind %s (%s) — clients can't reach this "
+                          "daemon until that path is removed", SOCK_PATH, exc)
+            return
+        try:
+            ours = PID_PATH.read_text().strip() == str(os.getpid())
+        except OSError:
+            ours = False
+        if not ours:
+            PID_PATH.write_text(str(os.getpid()))
+
+    async def _path_watchdog(self) -> None:
+        while not self._stopping.is_set():
+            await asyncio.sleep(_PATH_WATCH_INTERVAL)
+            try:
+                await self._check_paths()
+            except Exception:  # noqa: BLE001 — never kill the loop
+                log.exception("path watchdog: check failed")
+
     async def _idle_reaper(self) -> None:
         """0.9.1 (opt-in): self-shutdown after VIBATCHIUM_DAEMON_IDLE_TIMEOUT
         seconds with ZERO sessions/warm. Disabled by default (0/unset) so the
@@ -968,9 +1098,7 @@ class Daemon:
                 sys.exit(2)
             SOCK_PATH.unlink(missing_ok=True)
 
-        server = await asyncio.start_unix_server(self.handle_conn, path=str(SOCK_PATH))
-        os.chmod(SOCK_PATH, 0o600)
-        PID_PATH.write_text(str(os.getpid()))
+        await self._bind_socket()
 
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGTERM, signal.SIGINT):
@@ -982,26 +1110,32 @@ class Daemon:
         # Non-blocking from the user's perspective; happens before first conn.
         await self.registry.warmup()
 
-        async with server:
-            stopper = asyncio.create_task(self._stopping.wait())
-            serving = asyncio.create_task(server.serve_forever())
-            # The reaper runs alongside but is NOT itself a completion trigger:
-            # when it decides to reap it sets `_stopping`, which `stopper`
-            # observes. (A disabled reaper returns immediately — that must NOT
-            # end the daemon, so it's kept out of the wait set.)
-            reaper = asyncio.create_task(self._idle_reaper())
-            # 0.16.0: idle-freeze poll loop — same out-of-wait-set contract
-            # as the reaper (returns immediately when disabled).
-            freezer = asyncio.create_task(self._idle_freezer())
-            try:
-                await asyncio.wait(
-                    {stopper, serving}, return_when=asyncio.FIRST_COMPLETED
-                )
-            finally:
-                for t in (stopper, serving, reaper, freezer):
-                    t.cancel()
-                    with contextlib.suppress(asyncio.CancelledError, Exception):
-                        await t
+        # The server is already accepting (start_serving). There's no
+        # serve_forever() task: _check_paths may replace self._server, and
+        # closing the old one would end serve_forever and with it the daemon.
+        stopper = asyncio.create_task(self._stopping.wait())
+        # The reaper runs alongside but is NOT itself a completion trigger:
+        # when it decides to reap it sets `_stopping`, which `stopper`
+        # observes. (A disabled reaper returns immediately — that must NOT
+        # end the daemon, so it's kept out of the wait set.)
+        reaper = asyncio.create_task(self._idle_reaper())
+        # 0.16.0: idle-freeze poll loop — same out-of-wait-set contract
+        # as the reaper (returns immediately when disabled).
+        freezer = asyncio.create_task(self._idle_freezer())
+        watchdog = asyncio.create_task(self._path_watchdog())
+        try:
+            await stopper
+        finally:
+            for t in (stopper, reaper, freezer, watchdog):
+                t.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await t
+            self._server.close()
+            # On 3.12+ wait_closed() waits for every accepted connection, so one
+            # stalled client would hold the daemon (and its Chromes) open
+            # forever. Give in-flight replies a grace period, then shut down.
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(self._server.wait_closed(), _CLOSE_GRACE)
 
         await self.shutdown()
 
@@ -1020,10 +1154,16 @@ class Daemon:
             await self._ambient.shutdown()
         with contextlib.suppress(Exception):
             await self.registry.close_all()
-        with contextlib.suppress(Exception):
-            SOCK_PATH.unlink()
-        with contextlib.suppress(Exception):
-            PID_PATH.unlink()
+        # Remove only what this daemon created. A Daemon that never won the
+        # lock (built in-process by a script, 2026-10-30) owns neither path,
+        # and the socket we bound may since have been replaced by another's.
+        if self._lock_fd is not None:
+            if self._sock_id is not None and _path_id(SOCK_PATH) == self._sock_id:
+                with contextlib.suppress(OSError):
+                    SOCK_PATH.unlink()
+            with contextlib.suppress(OSError):
+                if PID_PATH.read_text().strip() == str(os.getpid()):
+                    PID_PATH.unlink()
         # 0.9.1: release the flock LAST (after sock/pid are gone) so the next
         # daemon takes over cleanly. The lockfile itself is intentionally never
         # unlinked — flock is inode-bound, so a stable path keeps it the
