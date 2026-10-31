@@ -20,13 +20,19 @@ by pid.
   holds the lock, the socket only while it's still the inode it bound, the
   pidfile only while it holds its own pid.
 - A running daemon checks its socket, pidfile and lockfile every 2s and puts
-  back whatever was removed or replaced, including after the whole
-  `vibatchium/` runtime dir is deleted. If another daemon has taken the lock
-  path in the meantime, or `XDG_RUNTIME_DIR` itself is gone, no client can
-  reach it again, so it shuts down instead of lingering with its Chromes.
+  back whatever was removed or replaced by a dead socket. If the whole
+  `vibatchium/` runtime dir is deleted it puts that back too, unless a client
+  spawned a daemon first, which with active clients is the usual case: then
+  the old daemon sees that it lost the lock and shuts down, and its sessions
+  are lost. It also shuts down if `XDG_RUNTIME_DIR` itself is gone. A path it
+  can't rebind (a regular file, or another process listening) is logged once.
+- Shutdown waits at most 5s for open client connections. On Python 3.12+ one
+  stalled connection used to keep a stopped daemon and its Chromes alive
+  indefinitely.
 - When a spawn loses the lock to a daemon that doesn't answer, the client
   error names the lock holder's pid, says whether its socket is gone or just
-  not answering, and gives the recovery (`kill <pid>`).
+  not answering, and gives the recovery (`kill <pid>`). It finds the pid via
+  `/proc`, or `ps` where there is none.
 
 ### fix: one-shot `explore` calls could read each other's pages
 

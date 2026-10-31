@@ -143,6 +143,10 @@ def _pidfile_daemon_alive() -> bool:
 # wait, so a client that finds the socket missing gets it back before it gives up.
 _PATH_WATCH_INTERVAL = 2.0
 
+# How long shutdown waits for open client connections to finish before it
+# closes the sessions anyway.
+_CLOSE_GRACE = 5.0
+
 
 def _path_id(path: Any) -> tuple[int, int] | None:
     """(st_dev, st_ino) of PATH, or None if it doesn't exist."""
@@ -293,6 +297,7 @@ class Daemon:
         self._server: asyncio.AbstractServer | None = None
         self._sock_id: tuple[int, int] | None = None
         self._foreign_sock_id: tuple[int, int] | None = None
+        self._unbindable_sock_id: tuple[int, int] | None = None
         # 0.19.1: WALL-CLOCK boot stamp (not monotonic — it crosses the socket
         # to a different process, which has its own monotonic origin). This is
         # the only reliable staleness signal for an EDITABLE install: a
@@ -882,6 +887,7 @@ class Daemon:
         os.chmod(SOCK_PATH, 0o600)
         self._sock_id = _path_id(SOCK_PATH)
         self._foreign_sock_id = None
+        self._unbindable_sock_id = None
         PID_PATH.write_text(str(os.getpid()))
         old, self._server = self._server, server
         if old is not None:
@@ -926,7 +932,14 @@ class Daemon:
         if _path_id(LOCK_PATH) != (st.st_dev, st.st_ino):
             held = self._lock_fd
             self._lock_fd = None
-            if not self._acquire_singleton_lock():
+            try:
+                acquired = self._acquire_singleton_lock()
+            except OSError:
+                # The new lockfile couldn't even be opened (EACCES, EMFILE):
+                # keep the lock we hold and try again on the next tick.
+                self._lock_fd = held
+                raise
+            if not acquired:
                 self._lock_fd = held
                 log.error("%s is now held by another daemon — this one is "
                           "unreachable, shutting down", LOCK_PATH)
@@ -943,9 +956,18 @@ class Daemon:
                               "over; clients no longer reach this daemon", SOCK_PATH)
                     self._foreign_sock_id = sid
                 return
+            if sid is not None and sid == self._unbindable_sock_id:
+                return         # already reported; wait for the path to change
             log.warning("socket %s was %s — rebinding", SOCK_PATH,
                         "removed" if sid is None else "replaced")
-            await self._bind_socket()
+            try:
+                await self._bind_socket()
+            except OSError as exc:
+                # e.g. a regular file or a directory at the path: asyncio only
+                # replaces a stale socket. Say so once, not every tick.
+                self._unbindable_sock_id = sid
+                log.error("cannot rebind %s (%s) — clients can't reach this "
+                          "daemon until that path is removed", SOCK_PATH, exc)
             return
         try:
             ours = PID_PATH.read_text().strip() == str(os.getpid())
@@ -1109,8 +1131,11 @@ class Daemon:
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await t
             self._server.close()
+            # On 3.12+ wait_closed() waits for every accepted connection, so one
+            # stalled client would hold the daemon (and its Chromes) open
+            # forever. Give in-flight replies a grace period, then shut down.
             with contextlib.suppress(Exception):
-                await self._server.wait_closed()
+                await asyncio.wait_for(self._server.wait_closed(), _CLOSE_GRACE)
 
         await self.shutdown()
 

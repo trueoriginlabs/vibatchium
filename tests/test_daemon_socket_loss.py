@@ -254,3 +254,112 @@ def test_client_error_names_unreachable_lock_holder(rt):
         assert "did not come up" not in msg, msg
     finally:
         _stop(proc)
+
+
+# ─── 4. review follow-ups ─────────────────────────────────────────────────
+def _patch_paths(rt: Path, monkeypatch):
+    from vibatchium.daemon import server as srv
+    paths = (rt / "s.sock", rt / "d.pid", rt / "d.lock")
+    for name, p in zip(("SOCK_PATH", "PID_PATH", "LOCK_PATH"), paths, strict=True):
+        monkeypatch.setattr(srv, name, p)
+    return srv, paths
+
+
+def test_shutdown_removes_its_socket_without_server_close(rt, monkeypatch):
+    """On 3.11/3.12 closing the server leaves the socket file behind, so
+    shutdown()'s own unlink is the only cleanup. Exercise it directly."""
+    srv, (sock, pidf, _) = _patch_paths(rt, monkeypatch)
+
+    async def go():
+        d = srv.Daemon()
+        assert d._acquire_singleton_lock()
+        await d._bind_socket()
+        await d.shutdown()
+
+    asyncio.run(go())
+    assert not sock.exists()
+    assert not pidf.exists()
+
+
+def test_shutdown_without_the_lock_removes_nothing(rt, monkeypatch):
+    """A Daemon that never won the lock owns no path, even if its recorded
+    socket inode and the pidfile happen to look like its own."""
+    srv, (sock, pidf, _) = _patch_paths(rt, monkeypatch)
+    other = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    other.bind(str(sock))
+    pidf.write_text(str(os.getpid()))
+    try:
+        d = srv.Daemon()
+        d._sock_id = srv._path_id(sock)
+        asyncio.run(d.shutdown())
+        assert sock.exists()
+        assert pidf.exists()
+    finally:
+        other.close()
+
+
+def test_failed_lock_reopen_keeps_the_lock(rt, monkeypatch):
+    """If the replacement lockfile can't be opened (EACCES, EMFILE), the daemon
+    must keep the lock it holds and retry, not drop it and go blind."""
+    srv, (_, _, lock) = _patch_paths(rt, monkeypatch)
+
+    async def go():
+        d = srv.Daemon()
+        assert d._acquire_singleton_lock()
+        await d._bind_socket()
+        held = d._lock_fd
+        lock.unlink()
+        real = d._acquire_singleton_lock
+
+        def fail():
+            raise PermissionError(13, "Permission denied", str(lock))
+        d._acquire_singleton_lock = fail
+        with pytest.raises(PermissionError):
+            await d._check_paths()
+        assert d._lock_fd == held
+        d._acquire_singleton_lock = real
+        await d._check_paths()
+        st = os.fstat(d._lock_fd)
+        assert srv._path_id(lock) == (st.st_dev, st.st_ino)
+        await d.shutdown()
+
+    asyncio.run(go())
+
+
+def test_unbindable_socket_path_is_reported_once(rt, monkeypatch, caplog):
+    """A regular file at the socket path can't be rebound. Log it once, not
+    every tick, and rebind as soon as the path is cleared."""
+    srv, (sock, _, _) = _patch_paths(rt, monkeypatch)
+
+    async def go():
+        d = srv.Daemon()
+        assert d._acquire_singleton_lock()
+        await d._bind_socket()
+        sock.unlink()
+        sock.write_text("not a socket")
+        for _ in range(3):
+            await d._check_paths()
+        assert sum("cannot rebind" in r.getMessage() for r in caplog.records) == 1
+        sock.unlink()
+        await d._check_paths()
+        assert srv._path_id(sock) == d._sock_id
+        await d.shutdown()
+
+    with caplog.at_level("ERROR", logger="vibatchium.server"):
+        asyncio.run(go())
+
+
+def test_stalled_connection_does_not_block_shutdown(rt):
+    """One client that connects and never sends must not keep a SIGTERMed
+    daemon (and its Chromes) alive: 3.12+'s wait_closed() waits for it."""
+    proc = _spawn_daemon(rt, watch=None)
+    sock, _, _ = _paths(rt)
+    idle = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    idle.connect(str(sock))
+    try:
+        time.sleep(0.3)
+        proc.terminate()
+        assert proc.wait(timeout=15) == 0
+    finally:
+        idle.close()
+        _stop(proc)

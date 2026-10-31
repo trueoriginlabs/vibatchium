@@ -126,12 +126,21 @@ def _lock_holder_pid() -> int | None:
     running vibatchium daemon."""
     try:
         pid = int(LOCK_PATH.read_text().strip())
-        with open(f"/proc/{pid}/cmdline", "rb") as fh:
-            if b"vibatchium.daemon.server" in fh.read():
-                return pid
     except (OSError, ValueError):
-        pass
-    return None
+        return None
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as fh:
+            cmdline = fh.read()
+    except FileNotFoundError:
+        # No /proc (macOS), or the pid is gone: ask ps.
+        try:
+            cmdline = subprocess.run(["ps", "-p", str(pid), "-o", "command="],
+                                     capture_output=True, timeout=5).stdout
+        except (OSError, subprocess.SubprocessError):
+            return None
+    except OSError:
+        return None
+    return pid if b"vibatchium.daemon.server" in cmdline else None
 
 
 def call(cmd: str, args: dict[str, Any] | None = None, *,
