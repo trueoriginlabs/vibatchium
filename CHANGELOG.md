@@ -97,8 +97,8 @@ An adversarial review of v2 found the following, fixed before release:
   (`ignore ​previous instructions`) and a dotless `ı`.
 - **Quoting an attack no longer lowers it to low.** It changed no verdict on
   129k tweets and cost an attacker two characters. A tweet that quotes one
-  (`someone replied "ignore all previous instructions"`) is now high, which
-  twitter_persona quarantines instead of wrapping.
+  (`someone replied "ignore all previous instructions"`) is now high, so a
+  caller that quarantines high and wraps low now quarantines it.
 - **False positives removed:** soft hyphens in German text, "Edit: ignore the
   above, …", API docs ("send the access token in the Authorization header"),
   and badge URLs with a filled-in `?token=`. An exfiltration directive now
