@@ -58,6 +58,15 @@ log = logging.getLogger("vibatchium.browser")
 # (`platformVersion` is empty in BOTH arms — that one is a headless tell of its
 # own, independent of this flag.)
 #
+# Brave (2026-11-03, measured on Brave 148): the same flag empties the LOW-entropy
+# hints too — `sec-ch-ua: ` empty, `sec-ch-ua-platform: ""`, brands [] on the
+# page and in workers. Brave ships Chromium's `UACHOverrideBlank` feature ON
+# (Chrome has it off), which blanks all UA-CH whenever the UA is overridden.
+# `--disable-features=UACHOverrideBlank` brings Brave back to Chrome's
+# behaviour (brands + platform intact, high-entropy still empty), so every
+# override launch disables it — a no-op on Chrome. See add_disabled_feature
+# for why that can't simply be appended.
+#
 # Mechanism — a browser-wide `--user-agent=<clean>` launch flag, NOT a
 # Playwright `user_agent` context option. Patchright applies the context
 # option via per-context `Network.setUserAgentOverride`, which is target-
@@ -138,6 +147,55 @@ async def coherent_headless_ua(pw: Playwright,
             clean = None  # this Chrome doesn't leak — leave UA untouched
         _HEADLESS_UA_CACHE[key] = clean
         return clean
+
+
+# Playwright's own `--disable-features` list (chromiumSwitches.ts in the
+# patchright driver), which it puts on the command line ahead of our args.
+# Chrome honours only the LAST `--disable-features`: a later switch REPLACES
+# the earlier list rather than adding to it (measured on Brave 148 — a second
+# switch after `UACHOverrideBlank` re-blanked UA-CH). A test pins this copy to
+# the installed driver so a patchright bump can't drift it silently.
+PLAYWRIGHT_DISABLED_FEATURES = (
+    "AvoidUnnecessaryBeforeUnloadCheckSync",
+    "BoundaryEventDispatchTracksNodeRemoval",
+    "DestroyProfileOnBrowserClose",
+    "DialMediaRouteProvider",
+    "GlobalMediaControls",
+    "HttpsUpgrades",
+    "LensOverlay",
+    "MediaRouter",
+    "PaintHolding",
+    "ThirdPartyStoragePartitioning",
+    "Translate",
+    "AutoDeElevate",
+    "RenderDocument",
+    "OptimizationHints",
+    "msForceBrowserSignIn",
+    "msEdgeUpdateLaunchServicesPreferredVersion",
+)
+
+
+def add_disabled_feature(args: list[str], feature: str) -> list[str]:
+    """Disable ``feature`` without changing which other features are disabled.
+
+    Only the last ``--disable-features`` counts, so the feature joins whichever
+    switch is in effect now:
+      - ``args`` already carries one of ours (the proxy WebRTC guard's): append
+        to the last of them. That switch has always replaced Playwright's list
+        on proxied launches, and it still does — whether those sessions should
+        get Playwright's list is a stealth decision, not this function's.
+      - none: Playwright's own switch is in effect, so add one that repeats its
+        list (PLAYWRIGHT_DISABLED_FEATURES) plus ``feature``.
+    """
+    out = list(args)
+    idx = [i for i, a in enumerate(out) if a.startswith("--disable-features=")]
+    if idx:
+        feats = [f for f in out[idx[-1]].split("=", 1)[1].split(",") if f]
+        if feature not in feats:
+            out[idx[-1]] = "--disable-features=" + ",".join(feats + [feature])
+        return out
+    return out + ["--disable-features="
+                  + ",".join([*PLAYWRIGHT_DISABLED_FEATURES, feature])]
 
 
 # ─── 0.7.0 self-heal: renderer-crash detection ───────────────────────────
@@ -582,6 +640,7 @@ async def launch_session(profile_dir: Path, headless: bool = False,
     # the `--user-agent` flag so it reaches every target — a context-level
     # `user_agent` would miss SharedWorkers (see coherent_headless_ua). Headed
     # already reports `Chrome`, so this is headless-only.
+    clean_ua = None
     if headless:
         clean_ua = (await coherent_headless_ua(pw, executable_path)
                     if executable_path else await coherent_headless_ua(pw))
@@ -617,6 +676,11 @@ async def launch_session(profile_dir: Path, headless: bool = False,
         from ..persona import persona_launch_args
         extra_args = list(extra_args) + persona_launch_args(persona)
         applied_persona = persona
+    # UACHOverrideBlank: under the UA override Brave would blank every client
+    # hint (see the module comment); already off on Chrome. Added last, once all
+    # other args are in, so it lands in the switch Chrome honours.
+    if clean_ua:
+        extra_args = add_disabled_feature(extra_args, "UACHOverrideBlank")
     # Wave 7.5c stealth fix: Playwright defaults inject `--no-sandbox`, which
     # (a) triggers Chrome's visible yellow "unsupported command-line flag"
     # infobar — readable in every screenshot and obviously bot-shaped —

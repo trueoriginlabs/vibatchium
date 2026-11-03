@@ -190,6 +190,24 @@ navigation, so `commit` does not buy a fast return — it usually costs the full
 up with `vb wait selector` / `vb wait text` / `vb expect`, not a weaker
 `wait_until`.
 
+### A deny that hits the browser by hand too is not a vb bug
+
+If a wall returns a hard `403 Access Denied` on the first document request,
+before any JS runs, test the browser without vb before touching stealth:
+launch the same binary by hand on a fresh profile
+(`<binary> --user-data-dir=$(mktemp -d) <url>`). One probe per experiment:
+every denied request feeds the score.
+
+On 2026-11-03 Domain (Akamai) denied this box's Google Chrome 147 even when it
+was launched by hand, headful, with no automation, while Brave 148 and Chromium
+153 on the same IP loaded. vb matches real Chrome at the TLS and HTTP/2 layer,
+so it inherits whatever reputation that build's fingerprint has. **Why** that
+build was denied is not established. A stale version alone doesn't explain it
+(Brave 148 was nearly as far behind stable 156 and passed). The likelier
+explanation is that the fingerprint vb had just used for a scraping burst from
+that IP was already scored. Either way, use a different, current binary
+(`start --browser-binary`) or update Chrome rather than tuning vb.
+
 ### Never `pkill -f` on a shared box
 
 The pattern matches the agent's own shell command line and kills the session.
@@ -574,6 +592,13 @@ and start to apply.
   Chromium/CfT build is a different fingerprint; don't point one at a wall to
   "try something". Patchright only: nodriver refuses a session pin and skips the
   env default (`browser_binary_ignored: true`).
+- **Brave** works headless with its own client hints (`"Chromium";v="148",
+  "Brave";v="148", …`). Until 2026-11-03 the headless UA override blanked them
+  (`sec-ch-ua` empty), because Brave ships `UACHOverrideBlank` on.
+- **Headed under Xvfb:** Brave and Chrome pick Wayland when the daemon's env
+  says `XDG_SESSION_TYPE=wayland`, then exit with "Failed to connect to Wayland
+  display". Spawn that daemon with `XDG_SESSION_TYPE=x11` (or unset) and no
+  `WAYLAND_DISPLAY`, or use `vb show`, which unsets both for you.
 
 ### Persisted launch postures — when a change takes effect
 

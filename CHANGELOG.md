@@ -6,6 +6,40 @@ minor bumps may include breaking changes; we'll always call them out here.
 
 ## [Unreleased]
 
+### fix: headless `--browser-binary` Brave sent empty client hints
+
+A headless session on Brave sent `sec-ch-ua: ` (empty) and
+`sec-ch-ua-platform: ""`, and `navigator.userAgentData` had no brands, in pages
+and workers. A real Brave sends `"Chromium";v="148", "Brave";v="148", …`. That
+mismatch is an easy bot signal. (Akamai denied vb+Brave while a hand-launched
+Brave loaded, but that run also differed in being headless, so this fix isn't
+shown to change the verdict.)
+
+Cause: the browser-wide `--user-agent` flag that strips `HeadlessChrome`.
+Brave ships Chromium's `UACHOverrideBlank` feature on (Chrome has it off), so
+any UA override blanks every client hint. Override launches now disable that
+feature, which makes Brave behave as Chrome does: brands and platform intact,
+high-entropy values (`architecture`, `fullVersionList`, …) still empty, the
+known trade-off in the `coherent_headless_ua` comment. On Chrome it's a no-op.
+
+- Chrome honours only the LAST `--disable-features` switch; a later one
+  replaces the earlier list. So `UACHOverrideBlank` joins whichever switch is
+  in effect, and no other feature changes state on any launch.
+- **Unchanged, flagged for a decision:** for the same reason, the proxy WebRTC
+  leak guard's switch has always replaced Playwright's disable list
+  (`ThirdPartyStoragePartitioning`, `HttpsUpgrades`, `Translate`, …) on
+  proxied launches. Proxied sessions therefore run Chrome's own defaults for
+  those features, and unproxied ones run Playwright's (for example,
+  third-party storage is partitioned only when proxied). The nodriver backend
+  appears to do the same to nodriver's own switch (per nodriver 0.50's source;
+  not launched here). Which posture vb should use is a stealth decision, not
+  part of this fix.
+- Tests: the launch arguments must keep each path's previous feature set plus
+  `UACHOverrideBlank`; our copy of Playwright's list is checked against the
+  installed patchright driver; and every launchable binary (Playwright
+  Chromium, Chrome, Brave), direct and through a proxy, must keep its brands
+  and `sec-ch-ua` under the headless override.
+
 ### fix: `fetch` uses curl_cffi 0.17's Chrome 151/152 presets
 
 curl_cffi 0.17.0 (2026-10-26) added `chrome151` and `chrome152`, and moved its
@@ -823,7 +857,6 @@ f-strings, because those patterns are dense with literal regex braces and
 doubling every one to satisfy f-string escaping costs more readability than the
 bound does inline. The compiled patterns are byte-identical; nothing about
 matching changed.
-
 
 ## [0.19.0] — 2026-08-25
 
