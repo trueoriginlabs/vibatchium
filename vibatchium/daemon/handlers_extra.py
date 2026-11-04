@@ -502,7 +502,10 @@ def register_extra(daemon) -> None:
         timeout_s = float(args.get("timeout_s", 30))
         if not 0 < timeout_s <= 600:
             raise ValueError("timeout_s must be in (0, 600]")
-        return file_chooser.arm(_session(d), files, resolved, timeout_s)
+        s = _session(d)
+        file_chooser.arm(s, files, resolved, timeout_s)
+        await file_chooser.ready(s)       # intercepting before we say "armed"
+        return file_chooser.status(s)
 
     @daemon.handler("upload_status")
     async def _upload_status(d, args):

@@ -232,6 +232,30 @@ def arm(session, files: list, resolved: list, timeout_s: float) -> dict:
     return status(session)
 
 
+async def ready(session) -> None:
+    """Wait until Chrome is actually intercepting on every page.
+
+    Adding the first ``filechooser`` listener sends Playwright's
+    ``updateSubscription`` without waiting for the reply, so ``arm`` returns
+    before CDP ``Page.setInterceptFileChooserDialog`` has landed, and a click
+    right after ``upload_next`` can open a native dialog we never see (headless
+    Chrome cancels it, the arm just expires). Sending the same subscription
+    again and awaiting its reply closes that window; the server keeps one
+    interceptor per page, so the repeat is idempotent. Private patchright API
+    (pinned in pyproject); a failure leaves the fire-and-forget behaviour."""
+    try:
+        pages = list(session.context.pages)
+    except Exception:  # noqa: BLE001 — context gone
+        return
+    for p in pages:
+        try:
+            await p._impl_obj._channel.send(
+                "updateSubscription", None, {"event": "fileChooser", "enabled": True})
+        except Exception as exc:  # noqa: BLE001
+            log.debug("file chooser subscription not confirmed on %s: %s",
+                      getattr(p, "url", "?"), exc)
+
+
 def abandon(session, reason: str) -> None:
     """Settle a pending arm with ``reason`` as its error and stop intercepting:
     the session is closing, or a self-heal relaunch is replacing its browser

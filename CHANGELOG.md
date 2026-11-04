@@ -19,7 +19,9 @@ Instagram Reels scheduling this way.
 - Choosers are intercepted only while armed. Arming adds a `filechooser`
   listener on every page of the session (tabs opened meanwhile too), which
   turns on CDP `Page.setInterceptFileChooserDialog`, so the native dialog never
-  opens. The listener comes off when the arm settles: consumed, refused,
+  opens. `upload --next` returns only once Chrome confirms the interception:
+  Playwright enables it without waiting, and a click right after arming could
+  otherwise open a native dialog that is never filled. The listener comes off when the arm settles: consumed, refused,
   failed, or expired. Expiry runs on a timer, so interception ends on time even
   if no chooser opens. Unarmed, Chrome behaves natively (headless cancels the
   dialog; a headed `vb show` window shows it), on launched and attach sessions
