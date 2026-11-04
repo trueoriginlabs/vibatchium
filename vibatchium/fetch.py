@@ -22,6 +22,7 @@ handler imports ``curl_cffi`` lazily behind an ImportError guard.
 from __future__ import annotations
 
 import base64
+import functools
 import ipaddress
 import logging
 import re
@@ -36,25 +37,43 @@ log = logging.getLogger("vibatchium.fetch")
 # pointed at its newest Chrome target), so coherence degrades gracefully rather
 # than pinning a stale fingerprint.
 #
-# Kept in step with the desktop-Chrome members of curl_cffi's ``BrowserType``
-# enum for the floor in pyproject (0.16.3: chrome99 … chrome150). There is no
-# free chrome152+ preset yet — see ``tls_coherence``.
-_CHROME_TARGETS: list[tuple[int, str]] = [
+# Every desktop-Chrome member of curl_cffi's ``BrowserType`` enum we know of,
+# up to the newest release (0.17.0: chrome99 … chrome152). The pyproject floor
+# (0.16.3) stops at chrome150, so ``chrome_targets()`` keeps only the tokens the
+# installed build actually ships; handing curl_cffi a token it lacks would fail
+# the request. Platform variants (``chrome152_macos``) aren't separate majors.
+_KNOWN_CHROME_TARGETS: list[tuple[int, str]] = [
     (99, "chrome99"), (100, "chrome100"), (101, "chrome101"), (104, "chrome104"),
     (107, "chrome107"), (110, "chrome110"), (116, "chrome116"), (119, "chrome119"),
     (120, "chrome120"), (123, "chrome123"), (124, "chrome124"), (131, "chrome131"),
     (133, "chrome133a"), (136, "chrome136"), (142, "chrome142"), (145, "chrome145"),
-    (146, "chrome146"), (150, "chrome150"),
+    (146, "chrome146"), (150, "chrome150"), (151, "chrome151"), (152, "chrome152"),
 ]
 _LATEST_ALIAS = "chrome"
+
+
+@functools.cache
+def chrome_targets() -> list[tuple[int, str]]:
+    """``_KNOWN_CHROME_TARGETS`` filtered to the presets of the installed
+    curl_cffi. Without curl_cffi (this module must import without it) the full
+    list stands; the fetch handler refuses to run in that case anyway."""
+    try:
+        from curl_cffi.requests.impersonate import BrowserType
+        shipped = {b.value for b in BrowserType}
+    except Exception:  # noqa: BLE001 — absent, or a layout we don't know
+        return list(_KNOWN_CHROME_TARGETS)
+    return [t for t in _KNOWN_CHROME_TARGETS if t[1] in shipped] or list(_KNOWN_CHROME_TARGETS)
 
 _CHROME_MAJOR_RE = re.compile(r"Chrome/(\d+)")
 _TOKEN_MAJOR_RE = re.compile(r"^chrome(\d+)[a-z]?$")
 
 # Chrome 152 added the TLS ``trust_anchors`` ClientHello extension. curl_cffi
-# 0.16.3 can *send* it, but only via impersonate.pro or hand-set curlopts — no
-# free preset carries it. So a 152+ browser fetched through any free preset
-# presents a ClientHello missing an extension the real browser sends.
+# 0.16.3 has no preset that sends it (only impersonate.pro or hand-set
+# curlopts), so a 152+ browser fetched through it presents a ClientHello missing
+# an extension the real browser sends. curl_cffi 0.17.0's chrome152 preset does
+# send one more extension than chrome150 (measured on tls.peet.ws: 17 vs 16,
+# JA4 t13d1517… vs t13d1516…), so with 0.17 a 152+ UA maps to it and this gap
+# closes.
 TRUST_ANCHORS_MAJOR = 152
 # How far the live Chrome may run ahead of the impersonated preset before we
 # say so. One major is routine release lag; TLS rarely moves per release.
@@ -83,10 +102,11 @@ def pick_impersonate(ua: str | None, override: str | None = None) -> str:
     major = chrome_major(ua)
     if major is None:
         return _LATEST_ALIAS
-    if major >= _CHROME_TARGETS[-1][0]:
+    targets = chrome_targets()
+    if major >= targets[-1][0]:
         return _LATEST_ALIAS
-    best = _CHROME_TARGETS[0][1]
-    for tmajor, token in _CHROME_TARGETS:
+    best = targets[0][1]
+    for tmajor, token in targets:
         if tmajor <= major:
             best = token
         else:
@@ -108,7 +128,7 @@ def tls_coherence(ua: str | None, impersonate: str,
     by more than ``_COHERENCE_GAP`` majors, or across the Chrome 152
     ``trust_anchors`` boundary — else None. ``latest`` is what the installed
     curl_cffi resolves the ``"chrome"`` alias to (``DEFAULT_CHROME``); without
-    it the alias is assumed to mean the newest entry in ``_CHROME_TARGETS``.
+    it the alias is assumed to mean the newest entry in ``chrome_targets()``.
 
     Non-Chrome UAs and non-Chrome presets return None: there is no version
     relationship to compare. Logs once per (ua_major, preset) per process.
@@ -118,7 +138,7 @@ def tls_coherence(ua: str | None, impersonate: str,
         return None
     resolved = impersonate
     if impersonate == _LATEST_ALIAS:
-        resolved = latest or _CHROME_TARGETS[-1][1]
+        resolved = latest or chrome_targets()[-1][1]
     preset_major = _token_major(resolved)
     if preset_major is None:
         return None

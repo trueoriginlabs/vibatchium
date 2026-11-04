@@ -6,6 +6,22 @@ minor bumps may include breaking changes; we'll always call them out here.
 
 ## [Unreleased]
 
+### fix: `fetch` uses curl_cffi 0.17's Chrome 151/152 presets
+
+curl_cffi 0.17.0 (2026-10-26) added `chrome151` and `chrome152`, and moved its
+`"chrome"` alias to `chrome152`. vb's preset table stopped at `chrome150`, so a
+151+ session never got the newer presets, `tls_coherence` measured its gap
+against the wrong preset, and CI (which installs the newest curl_cffi) failed
+two `test_fetch` tests on master from 2026-10-31.
+
+- The table now lists every known preset and keeps only those the installed
+  curl_cffi ships, so the 0.16.3 floor still works (it never offers
+  `chrome152` there).
+- With 0.17, a Chrome 152+ session no longer reports the missing TLS
+  `trust_anchors` extension: the `chrome152` preset sends one more extension
+  than `chrome150` (measured on tls.peet.ws: 17 vs 16, JA4 `t13d1517…` vs
+  `t13d1516…`).
+
 ### fix: a live daemon could lose its socket and lock every client out
 
 On 2026-10-30 a script built `Daemon()` in-process under the shared runtime
