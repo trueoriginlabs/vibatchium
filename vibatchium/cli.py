@@ -60,6 +60,9 @@ class _DashArgs(click.Command):
             if name in opts:
                 options.append(a)
                 if opts[name] and "=" not in a:
+                    if i + opts[name] >= len(args):   # else the `--` below becomes its value
+                        raise click.BadOptionUsage(
+                            name, f"Option '{name}' requires an argument.", ctx=ctx)
                     options.extend(args[i + 1:i + 1 + opts[name]])
                     i += opts[name]
             elif re.fullmatch(r"--[A-Za-z][\w-]*", name):

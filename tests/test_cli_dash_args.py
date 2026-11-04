@@ -94,3 +94,14 @@ def test_mistyped_flags_still_error(sent, argv):
     r = _run(argv)
     assert r.exit_code == 2 and "No such option" in r.output
     assert sent == []
+
+
+@pytest.mark.parametrize("argv", [
+    ["fill", "#t", "--timeout"],
+    ["type", "#t", "hi", "--delay"],
+    ["mouse", "move", "1", "2", "--steps"],
+])
+def test_option_missing_its_value_says_so(sent, argv):
+    r = _run(argv)
+    assert r.exit_code == 2 and "requires an argument" in r.output, r.output
+    assert sent == []
