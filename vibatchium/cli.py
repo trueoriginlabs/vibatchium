@@ -2364,26 +2364,21 @@ def mouse_wheel(ctx, dx, dy):
               help="Report whether the armed chooser was filled.")
 @click.option("--wait", "wait_s", default=3.0, type=float, show_default=True,
               help="With --status: wait this long for an armed chooser to settle.")
-@click.option("--native", type=click.Choice(["on", "off"]), default=None,
-              help="on: let Chrome show its own file dialog (hand-driven windows). "
-                   "off: intercept again (default: unarmed choosers are swallowed).")
 @click.pass_context
-def upload(ctx, target, files, arm_next, timeout_s, show_status, wait_s, native):
+def upload(ctx, target, files, arm_next, timeout_s, show_status, wait_s):
     """Set files on an input[type=file] element.
 
     Upload buttons with no input in the DOM open a native file dialog instead.
-    vb intercepts those: arm, click, check.
+    While armed, vb intercepts it: arm, click, check.
 
         vb upload --next ./clip.mp4
         vb mouse click 412 541
         vb upload --status          # {"consumed": true, ...}
     """
-    if sum(map(bool, (arm_next, show_status, native))) > 1:
-        raise click.UsageError("use one of --next, --status, --native")
+    if arm_next and show_status:
+        raise click.UsageError("use one of --next, --status")
     if show_status:
         _emit(call("upload_status", {"wait_s": wait_s}), ctx.obj["json"])
-    elif native:
-        _emit(call("upload_native", {"state": native}), ctx.obj["json"])
     elif arm_next:
         paths = ((target,) if target else ()) + files
         if not paths:

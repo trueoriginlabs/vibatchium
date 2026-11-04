@@ -486,7 +486,8 @@ def register_extra(daemon) -> None:
 
     @daemon.handler("upload_next")
     async def _upload_next(d, args):
-        """Arm the next native file chooser with files (one shot, expiring).
+        """Arm the next native file chooser of the active page with files
+        (one shot, expiring). Choosers are intercepted only while armed.
 
         For upload buttons with no <input type=file> in the DOM: arm, then
         click the button any way you like. Paths pass the same fspolicy check
@@ -511,21 +512,6 @@ def register_extra(daemon) -> None:
         from . import file_chooser
         s = _session(d)
         await file_chooser.wait_settled(s, min(float(args.get("wait_s", 0)), 60.0))
-        return file_chooser.status(s)
-
-    @daemon.handler("upload_native")
-    async def _upload_native(d, args):
-        """`on`: stop intercepting choosers, so Chrome shows its own dialog (a
-        person driving the window by hand). `off`: intercept again."""
-        from . import file_chooser
-        s = _session(d)
-        if args.get("state") == "on":
-            s.file_chooser["armed"] = None
-            file_chooser.uninstall(s)
-        elif args.get("state") == "off":
-            file_chooser.install(s)
-        else:
-            raise ValueError("state must be on or off")
         return file_chooser.status(s)
 
     # ─── dialogs ──────────────────────────────────────────────────────────

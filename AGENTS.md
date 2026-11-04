@@ -243,8 +243,8 @@ ps -eo pid,cmd --no-headers | grep PAT | grep -v ' grep ' | grep -v 'bash -c' | 
 
 `vb upload TARGET FILES` sets files on an `<input type=file>`. Many upload
 buttons have none: they click a detached input and Chrome opens the native OS
-"Open file" dialog. Every launched session intercepts that dialog (CDP
-`Page.setInterceptFileChooserDialog`), so arm it, then click:
+"Open file" dialog. Arm the next chooser, then click; while armed, vb
+intercepts the dialog (CDP `Page.setInterceptFileChooserDialog`) and fills it:
 
 ```bash
 $VB --session work upload --next ./clip.mp4      # one shot, expires after --timeout (30s)
@@ -254,17 +254,23 @@ $VB --session work upload --status               # waits up to --wait (3s): {"co
 
 - The page sees a normal, trusted selection. Paths pass the same fspolicy check
   as `upload`, at arm time, and agent surfaces stay inside their roots.
-- **Not armed:** the chooser is swallowed and counted (`swallowed` in
-  `--status`). No native dialog ever appears, so a click can't leave a modal
-  window stalling an unattended session or sitting on the operator's screen.
-  An expired arm delivers nothing (`last.expired`).
-- Several files into a single-file chooser is refused (`last.error`), not
-  truncated.
-- **A person driving a `vb show` window by hand** can't use a site's upload
-  button while interception is on: run `$VB --session X upload --native on`
-  first (`--native off`, or the next `--next`, turns it back on). It resets
-  to intercepting on a self-heal relaunch. Attach sessions don't intercept
-  until an `upload --next`, since that browser is your own.
+- **Interception is on only while armed.** It comes off when the arm settles:
+  consumed, refused, failed, or expired (a timer, so it ends on time even if no
+  chooser ever opens). Unarmed, Chrome behaves natively: headless cancels the
+  dialog itself, and a headed `vb show` window shows the real one, so a person
+  driving it by hand can use upload buttons. Attach sessions follow the same
+  rule; your own tabs get native uploads back once the arm settles.
+- **The arm belongs to the tab that was active when you armed it.** A chooser
+  from any frame of that tab gets the files; one from another tab gets nothing
+  and is counted as `foreign`. Switch tabs (`page switch`) *before* arming.
+- One arm fills one chooser. A second chooser from the same click finds no arm
+  and is counted as `swallowed`. Several files into a single-file chooser is
+  refused (`last.error`), not truncated.
+- `last` in `--status` holds the outcome: `consumed`, `expired`, `error`,
+  `multiple`, `url` (the frame that owns the input, e.g. an iframe) and
+  `page_url` (its tab). Closing or crashing the armed tab, closing the session,
+  and a self-heal relaunch each settle a pending arm with an `error` saying so:
+  re-arm.
 
 ## Show a real window / headed login on a shared box
 
@@ -925,12 +931,12 @@ VIBATCHIUM_FILE_ROOTS=<a>:<b>   # daemon env: every caller path must resolve ins
 > Enable `VIBATCHIUM_DAEMON_IDLE_TIMEOUT` on dogfood/isolated daemons so a stray
 > one-shot daemon self-reaps; leave it off (default) for long-lived bot daemons.
 
-**MCP tool surface (0.8.0).** `vb mcp` exposes the **lean** profile (90 verbs — the 80%-case: browse, extract, interact, screenshot, tabs, multi-session, the agent loop incl. `explore`/`expect`) by default, not all 166. Pass `vb mcp --caps=full` (or `all`) for everything, or a custom bucket CSV. The long tail (network, devtools incl. `console_*`, secrets, safety, liveview, goals, storage, **and plugin `x.*` verbs**) is one re-registration away — note the lean default also hides dotted plugin verbs, so pass `--caps=full` or `--caps=lean,plugins` if an agent needs them over MCP.
+**MCP tool surface (0.8.0).** `vb mcp` exposes the **lean** profile (89 verbs — the 80%-case: browse, extract, interact, screenshot, tabs, multi-session, the agent loop incl. `explore`/`expect`) by default, not all 165. Pass `vb mcp --caps=full` (or `all`) for everything, or a custom bucket CSV. The long tail (network, devtools incl. `console_*`, secrets, safety, liveview, goals, storage, **and plugin `x.*` verbs**) is one re-registration away — note the lean default also hides dotted plugin verbs, so pass `--caps=full` or `--caps=lean,plugins` if an agent needs them over MCP.
 
 **`--caps min` — for clients without tool search.** Claude Code defers MCP tools
 behind tool search, so `lean` costs it little. A client that loads every schema
-on every turn pays for all 90 — about 75 KB, ~18.9k tokens of `tools/list`
-(`full`: 166 tools, ~136 KB, ~33.9k). `vb mcp --caps min` (or `vb setup --caps
+on every turn pays for all 89 — about 75 KB, ~18.6k tokens of `tools/list`
+(`full`: 165 tools, ~135 KB, ~33.7k). `vb mcp --caps min` (or `vb setup --caps
 min`) exposes 12 tools in ~15 KB, ~3.8k tokens: `explore`, `go`, `extract`,
 `screenshot`, `act`, `map`, `click`, `fill`, `press`, `expect`, `session_close`
 and the always-on `status`. That covers reading a walled page and a short

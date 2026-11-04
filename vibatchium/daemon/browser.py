@@ -279,7 +279,8 @@ class BrowserSession:
     persona: dict | None = None
     frame_ref: object = None         # patchright.Frame | None
     dialog_policy: dict = field(default_factory=lambda: {"action": "dismiss"})
-    # File-chooser interception + the `upload --next` arm (daemon/file_chooser.py).
+    # The `upload --next` arm + its file-chooser interception, on only while
+    # armed (daemon/file_chooser.py).
     file_chooser: dict = field(default_factory=_file_chooser.new_state)
     downloads: list = field(default_factory=list)
     network: dict = field(default_factory=lambda: {"capturing": False, "events": [], "max": 500})
@@ -778,8 +779,6 @@ async def launch_session(profile_dir: Path, headless: bool = False,
                           persona=applied_persona)
     _wire_page_tracking(sess)
     await _file_guard.install(sess)
-    # Swallow native "Open file" dialogs unless armed (attach: only on demand).
-    _file_chooser.install(sess)
     return sess
 
 
@@ -828,6 +827,8 @@ async def close_session(session: BrowserSession) -> None:
     # 0.19.4: release the file: guard — in attach mode the user's Chrome
     # outlives the session and must not keep pausing its file: loads.
     await _file_guard.uninstall(session)
+    # A pending `upload --next` arm: settle it (wakes waiters, stops its timer).
+    _file_chooser.abandon(session, "the session closed before a chooser opened")
     try:
         if session.mode == "launch":
             await session.context.close()

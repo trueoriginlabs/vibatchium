@@ -6,6 +6,48 @@ minor bumps may include breaking changes; we'll always call them out here.
 
 ## [Unreleased]
 
+### feat: `vb upload --next` fills native file choosers
+
+`vb upload TARGET FILES` needs an `<input type=file>` in the DOM. Upload
+buttons that click a detached input open Chrome's native "Open file" dialog
+instead, which nothing could fill: Meta Business Suite's reel composer blocked
+Instagram Reels scheduling this way.
+
+- `vb upload --next FILES [--timeout 30]` arms the next chooser of the active
+  tab, one shot. Paths pass the same `fspolicy.check_upload` as `upload`, at
+  arm time.
+- Choosers are intercepted only while armed. Arming adds a `filechooser`
+  listener on every page of the session (tabs opened meanwhile too), which
+  turns on CDP `Page.setInterceptFileChooserDialog`, so the native dialog never
+  opens. The listener comes off when the arm settles: consumed, refused,
+  failed, or expired. Expiry runs on a timer, so interception ends on time even
+  if no chooser opens. Unarmed, Chrome behaves natively (headless cancels the
+  dialog; a headed `vb show` window shows it), on launched and attach sessions
+  alike.
+- The arm is bound to the tab that was active when it was made. A chooser from
+  another tab gets nothing and is counted as `foreign`, so a background tab
+  that clicks inputs on a timer can't harvest the files. The arm is taken
+  before the files are set, so a second chooser from the same click gets
+  nothing either (`swallowed`). Several files into a single-file chooser is
+  refused, not truncated.
+- `vb upload --status [--wait 3]` reports `consumed`, `intercepting`, the
+  `swallowed`/`foreign` counters and the last outcome (`expired`, `error`,
+  `multiple`, `url` of the frame that owns the input, `page_url` of its tab).
+  It waits for an armed chooser to settle, since the click returns before the
+  chooser event arrives; every settle path wakes it. Closing or crashing the
+  armed tab, closing the session and a self-heal relaunch settle a pending arm
+  with an `error` that says so (a relaunch hands it to the new session).
+- Unfilled choosers are logged at INFO once per page, then at DEBUG, so a page
+  opening them in a loop can't flood the shared daemon log.
+- New verbs `upload_next`, `upload_status` (MCP tools in the `input` bucket, so
+  in `lean`).
+
+Verified in headless patchright with a detached input clicked by
+`mouse click x y`: armed, unarmed (native cancel), expiry with no chooser,
+two choosers from one click, a background tab polling `input.click()`, an
+iframe input, a closed and a crashed tab, a self-heal relaunch, multiple, the
+`.env` deny rule and agent-surface roots. Not verified: a headed window.
+
 ### feat: humanized scrolling replays the operator's recorded swipes
 
 `humanize`'s wheel was a sin curve: 18 events 16ms apart with fractional
@@ -199,36 +241,6 @@ rest (`net::ERR_ABORTED`, `Target page … has been closed`).
   still interleave with an explore, as on any shared session — use a lease.
   Queued explores each cold-start Chrome, so a long queue on one name can
   outlast the client's 120s timeout.
-
-### feat: `vb upload --next` fills native file choosers
-
-`vb upload TARGET FILES` needs an `<input type=file>` in the DOM. Upload
-buttons that click a detached input open Chrome's native "Open file" dialog
-instead, which nothing could fill: Meta Business Suite's reel composer blocked
-Instagram Reels scheduling this way. In a headed window the dialog also sat on
-the operator's screen until closed by hand.
-
-- Every launched session (self-heal relaunches and pre-warms included) listens
-  for file choosers on every page, popups and new tabs too. That turns on CDP
-  `Page.setInterceptFileChooserDialog`, so the native dialog never opens.
-- `vb upload --next FILES [--timeout 30]` arms the next chooser, one shot.
-  Paths pass the same `fspolicy.check_upload` as `upload`, at arm time. The arm
-  expires, so a chooser the page opens later can't get stale files. Several
-  files into a single-file chooser is refused, not truncated.
-- `vb upload --status [--wait 3]` reports `consumed`, the last outcome
-  (`expired`, `error`, `multiple`) and how many unarmed choosers were
-  swallowed. It waits for an armed chooser to settle, since the click returns
-  before the chooser event arrives.
-- **Behaviour change:** an unarmed chooser is swallowed. `vb upload --native
-  on` gives a hand-driven window Chrome's own dialog back (`off`, or the next
-  arm, restores interception; a self-heal relaunch resets it). Attach sessions
-  intercept only after an `upload --next`.
-- New verbs `upload_next`, `upload_status`, `upload_native` (MCP tools in the
-  `input` bucket, so in `lean`).
-
-Verified in headless patchright with a detached input clicked by
-`mouse click x y`, humanized and not: armed, unarmed, expiry, multiple, a
-second tab, the `.env` deny rule and agent-surface roots.
 
 ### change: prompt-injection classifier v2
 
