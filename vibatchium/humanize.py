@@ -440,13 +440,16 @@ def gesture_schedule(gestures: list[dict], total_dy: float, *,
 async def humanized_scroll(page, dx: float, dy: float, *,
                             duration_ms: float = 300,
                             device: str | None = None,
-                            device_key: str | None = None) -> None:
+                            device_key: str | None = None) -> float:
     """Send multiple scroll-wheel events — a replay of one of the operator's
     recorded swipes when a gesture library is installed, else a sin curve.
     `device` / `device_key` choose the session's device (scroll_device_for).
-    A library that fails to schedule falls back to the sin curve."""
+    A library that fails to schedule falls back to the sin curve.
+
+    Returns the vertical distance sent. A replay rounds to whole notches and is
+    bounded per call (see gesture_schedule), so it can differ from `dy`."""
     if dx == 0 and dy == 0:
-        return
+        return 0.0
     sched = None
     if dy:
         try:
@@ -465,11 +468,12 @@ async def humanized_scroll(page, dx: float, dy: float, *,
             # absolute deadlines, so CDP round-trip time doesn't stretch the gesture
             await asyncio.sleep(max(0.0, t0 + t_ms / 1000 - loop.time()))
             await page.mouse.wheel(dx / len(sched), step_dy)
-        return
+        return math.copysign(sum(abs(d) for _, d in sched), dy)
     steps = sinusoidal_scroll(dy, duration_ms=duration_ms) if dy else [(duration_ms, 0)]
     for dt_ms, step_dy in steps:
         await page.mouse.wheel(dx / max(1, len(steps)), step_dy)
         await asyncio.sleep(dt_ms / 1000)
+    return float(dy)
 
 
 # ─── element-aware humanization (safe: motion only, click stays verified) ──

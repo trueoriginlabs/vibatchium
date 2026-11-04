@@ -553,6 +553,19 @@ async def test_humanized_scroll_replays_installed_library(tmp_path, monkeypatch)
     assert len(page.wheels) == 6 and abs(sum(d for _, d in page.wheels) - 240) < 0.05
 
 
+
+async def test_humanized_scroll_returns_the_distance_it_sent(tmp_path, monkeypatch):
+    f = tmp_path / "gestures.json"
+    f.write_text(_json.dumps({"gestures": _WHEEL + _PAD}))
+    monkeypatch.setenv("VIBATCHIUM_GESTURES", str(f))
+    page = _WheelPage()
+    assert await _hz.humanized_scroll(page, 0, 240, device="wheel") == 240
+    page = _WheelPage()
+    sent = await _hz.humanized_scroll(page, 0, -100000, device="wheel")
+    assert sent == sum(d for _, d in page.wheels) and -100000 < sent < 0
+    monkeypatch.setenv("VIBATCHIUM_GESTURES", str(tmp_path / "none.json"))
+    assert await _hz.humanized_scroll(_WheelPage(), 0, 300, duration_ms=160) == 300
+
 def _sin_ok(page):
     assert len(page.wheels) == 10
     assert abs(sum(d for _, d in page.wheels) - 300) < 1e-6

@@ -48,7 +48,8 @@ one gesture never checked against a person.
   is scaled to the distance, at most 3x. A distance one gesture can't cover
   takes another after a 320-650ms pause, but one call replays at most 8
   gestures and 10s, since it holds the session lock: a larger request scrolls
-  less than asked. Without a library (or with fewer than 3 valid gestures)
+  less than asked, and the `mouse wheel` response says so (`scrolled_dy`,
+  `truncated: true`). Without a library (or with fewer than 3 valid gestures)
   nothing changes. `VIBATCHIUM_GESTURES` in the daemon's env points elsewhere.
 - A bad library falls back to the sin curve instead of breaking scrolling.
   Each gesture is validated at load (finite, non-negative deltas with a

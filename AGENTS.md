@@ -515,7 +515,9 @@ nearest notch (merged 240/360px events count as 2/3); a trackpad flick is
 scaled to the distance, at most 3x harder than recorded.
 A distance one recorded swipe can't cover is met by swiping again after a
 320-650ms pause. One call replays at most 8 swipes and 10s (the replay holds the
-session lock), so a larger request scrolls less than asked: call again.
+session lock), so a larger request scrolls less than asked: call again. A
+humanized `mouse wheel` reports `scrolled_dy`, plus `truncated: true` when it
+fell short.
 The library is personal data in `~/.config/vibatchium/gestures.json`; point the
 **daemon** at another file with `VIBATCHIUM_GESTURES`. A bad library never
 breaks scrolling: invalid swipes are dropped at load (non-finite or negative

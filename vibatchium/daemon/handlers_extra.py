@@ -338,10 +338,19 @@ def register_extra(daemon) -> None:
             dy = float(args.get("dy", 0))
             if humanize:
                 from ..humanize import humanized_scroll
-                await humanized_scroll(
+                sent = await humanized_scroll(
                     s.page, dx, dy,
                     device=entry.flags.get("scroll_device") if entry else None,
                     device_key=entry.name if entry else None)
+                out = {"action": action, "x": x, "y": y, "humanized": humanize,
+                       "scrolled_dy": round(sent, 2)}
+                # A swipe replay is bounded per call: say so, or a "scroll to
+                # the bottom" caller thinks it got there.
+                if abs(sent) < abs(dy) - 0.5:
+                    out["truncated"] = True
+                    out["note"] = ("humanized wheel is bounded per call; call "
+                                   "again for the remaining distance")
+                return out
             else:
                 await m.wheel(dx, dy)
         else:
