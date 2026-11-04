@@ -33,11 +33,36 @@ def test_pick_impersonate_exact_known_major():
 
 
 def test_pick_impersonate_uses_chrome150_between_146_and_150():
-    # 0.16.x added chrome150; a 148 browser must not be rounded down to 146.
+    # Whatever the installed curl_cffi: 146..149 map to chrome146, and 150 maps
+    # to chrome150 when a newer preset exists, else to the latest alias.
     assert fetch.pick_impersonate("X Chrome/148.0.0.0 Y") == "chrome146"
     assert fetch.pick_impersonate("X Chrome/149.0.0.0 Y") == "chrome146"
-    assert fetch.pick_impersonate("X Chrome/150.0.0.0 Y") == "chrome"
-    assert ("chrome150" in dict(fetch._CHROME_TARGETS).values())
+    newest = fetch.chrome_targets()[-1][0]
+    want150 = "chrome" if newest <= 150 else "chrome150"
+    assert fetch.pick_impersonate("X Chrome/150.0.0.0 Y") == want150
+    assert ("chrome150" in dict(fetch.chrome_targets()).values())
+
+
+def test_chrome_targets_only_lists_installed_presets(monkeypatch):
+    """A token the installed curl_cffi lacks is never offered: 0.16.3 stops at
+    chrome150, so a Chrome 152 UA must not be handed `chrome152` there."""
+    import enum
+    import sys
+    import types
+
+    old = types.ModuleType("curl_cffi.requests.impersonate")
+    old.BrowserType = enum.Enum("BrowserType", {"chrome146": "chrome146",
+                                                "chrome150": "chrome150"})
+    monkeypatch.setitem(sys.modules, "curl_cffi.requests.impersonate", old)
+    fetch.chrome_targets.cache_clear()
+    try:
+        assert fetch.chrome_targets() == [(146, "chrome146"), (150, "chrome150")]
+        assert fetch.pick_impersonate("X Chrome/152.0.0.0 Y") == "chrome"
+        c = fetch.tls_coherence("X Chrome/152.0.0.0 Y", "chrome")
+        assert c is not None and c["impersonate"] == "chrome150"
+        assert "trust_anchors" in c["note"]
+    finally:
+        fetch.chrome_targets.cache_clear()
 
 
 def test_chrome_targets_match_installed_curl_cffi():
@@ -46,13 +71,15 @@ def test_chrome_targets_match_installed_curl_cffi():
     otherwise a curl_cffi bump silently leaves the newest preset unused."""
     import pytest
     imp = pytest.importorskip("curl_cffi.requests.impersonate")
+    # Platform variants (chrome152_macos) share their major with the base token.
     shipped = {b.value for b in imp.BrowserType
-               if b.value.startswith("chrome") and "android" not in b.value}
-    table = {tok for _, tok in fetch._CHROME_TARGETS}
+               if b.value.startswith("chrome") and "android" not in b.value
+               and "_" not in b.value}
+    table = {tok for _, tok in fetch.chrome_targets()}
     assert table <= shipped, f"unknown tokens: {table - shipped}"
-    assert shipped <= table, f"presets missing from _CHROME_TARGETS: {shipped - table}"
+    assert shipped <= table, f"presets missing from _KNOWN_CHROME_TARGETS: {shipped - table}"
     # the alias we fall back to must resolve to the newest entry in the table
-    assert imp.DEFAULT_CHROME == fetch._CHROME_TARGETS[-1][1]
+    assert imp.DEFAULT_CHROME == fetch.chrome_targets()[-1][1]
 
 
 # ─── tls_coherence ────────────────────────────────────────────────────────
@@ -70,8 +97,8 @@ def test_tls_coherence_flags_ua_ahead_of_newest_preset():
 
 
 def test_tls_coherence_alias_defaults_to_table_head_without_latest():
-    c = fetch.tls_coherence(_UA153, "chrome")
-    assert c["impersonate"] == fetch._CHROME_TARGETS[-1][1]
+    c = fetch.tls_coherence("X Chrome/200.0.0.0 Y", "chrome")
+    assert c["impersonate"] == fetch.chrome_targets()[-1][1]
 
 
 def test_tls_coherence_silent_within_one_major():
