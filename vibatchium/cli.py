@@ -3313,18 +3313,29 @@ def oracle_ingest(trials_file, out_path, gestures_path, install, swipe_device):
             from .humanize import gesture_library_path
             targets.append(gesture_library_path())
         for t in targets:
-            t.write_text(text, encoding="utf-8")
-            t.chmod(0o600)
+            # created 0600, never briefly world-readable (fchmod covers a file
+            # that already existed with a looser mode)
+            fd = os.open(t, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            os.fchmod(fd, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(text)
             click.echo(f"wrote {t}: {lib['n']} swipes {lib['devices']}, "
-                       f"{lib['skipped']} skipped (upward or line-mode)", err=True)
+                       f"{lib['skipped']} skipped (upward, line-mode or fragments)",
+                       err=True)
         thin = [d for d, n in lib["devices"].items() if 0 < n < 3]
         if thin:
             click.echo(f"note: {', '.join(thin)} has <3 swipes and won't be replayed",
                        err=True)
+        if lib["refused"]:
+            click.echo(f"note: {lib['refused']} swipes refused: a wheel swipe that isn't "
+                       f"whole notches (a smooth-scrolling mouse?) or doesn't share the "
+                       f"other wheel swipes' notch, or a swipe too long to replay.",
+                       err=True)
         if lib["mismatched"]:
             click.echo(f"note: {lib['mismatched']} swipes don't look like their block's "
-                       f"device (a wheel swipe with fractional deltas, or the reverse). "
-                       f"The block label was kept; check you used the device asked for.",
+                       f"device (a wheel swipe with fractional deltas, refused above, or "
+                       f"a trackpad swipe in whole notches, kept as trackpad). Check you "
+                       f"used the device asked for.",
                        err=True)
 
 
@@ -3344,13 +3355,17 @@ def humanize():
 
 
 @humanize.command("on")
-@click.option("--scroll-device", type=click.Choice(["wheel", "trackpad"]), default=None,
+@click.option("--scroll-device", type=click.Choice(["wheel", "trackpad", "auto"]),
+              default=None,
               help="Pin which recorded swipes this session replays (default: a "
-                   "stable pick from the session name). Needs a swipe library.")
+                   "stable pick from the session name; `auto` clears a pin). Needs a "
+                   "swipe library. `humanize off` clears the pin too.")
 @click.pass_context
 def humanize_on(ctx, scroll_device):
-    _emit(call("humanize_on", {"scroll_device": scroll_device} if scroll_device else {}),
-          ctx.obj["json"])
+    args = {}
+    if scroll_device:
+        args["scroll_device"] = "" if scroll_device == "auto" else scroll_device
+    _emit(call("humanize_on", args), ctx.obj["json"])
 
 
 @humanize.command("off")

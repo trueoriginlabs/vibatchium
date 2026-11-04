@@ -24,7 +24,11 @@ occasional bursts through the SAME channel humanize uses (Playwright
   micro   1-3 px resting-hand corrections
   drift   short wrist-arc drifts near the cursor, horizontally biased (reading)
   reposition  a move onto another visible text block
-  scroll  1-3 wheel notches in reading rhythm (mostly down), document only
+  scroll  1-3 wheel notches in reading rhythm (mostly down), document only.
+          With a recorded swipe library (humanize.load_gesture_library) the
+          scroll is the session's own device instead, the same one its
+          humanized `mouse wheel` replays: whole notches of the recorded size
+          at recorded gaps, or one recorded trackpad flick over that distance
 
 Paths are minimum-jerk (Flash & Hogan 1985 bell-shaped velocity → decelerates
 into the landing point), with an ASYMMETRIC bow (not a symmetric Bezier),
@@ -620,6 +624,38 @@ def clear_cursor(entry) -> None:
             del _PAGE_CURSORS[page]
 
 
+def _swipe_seeds(name: str, entry) -> list[dict] | None:
+    """The recorded swipes this session's humanized wheel replays (one device,
+    humanize.scroll_device_for), or None when no library is installed."""
+    try:
+        from ..humanize import load_gesture_library, scroll_device_for
+        library = load_gesture_library()
+        if not library:
+            return None
+        flags = getattr(entry, "flags", None) or {}
+        return library[scroll_device_for(library, pinned=flags.get("scroll_device"),
+                                         key=name)]
+    except Exception:
+        return None
+
+
+def _seed_schedule(seeds: list[dict], total: float, rng: random.Random):
+    """humanize.gesture_schedule over `total`, cut so it never scrolls past the
+    distance whose column was hit-tested; None (fixed notches) if it fails."""
+    try:
+        from ..humanize import gesture_schedule
+        sched = gesture_schedule(seeds, total, rng=rng)
+    except Exception:
+        return None
+    out, run = [], 0.0
+    for t_ms, step in sched:
+        run += abs(step)
+        if run > abs(total) + 0.5:
+            break
+        out.append((t_ms, step))
+    return out or None
+
+
 # ─── the scheduler ───────────────────────────────────────────────────────────
 
 
@@ -1038,10 +1074,17 @@ class AmbientManager:
     async def _scroll(self, name: str, st: _State, page, probe: dict,
                       cursor, vw: float, vh: float, blocks: list) -> None:
         rng, params = st.rng, st.params
-        down_room = probe.get("room_down", 0) > params.notch_px
-        up_room = probe.get("room_up", 0) > params.notch_px
+        # No library: fixed 100px notches, exactly as before seeds existed. With
+        # one, a session must not wheel in notches during a verb and flick a
+        # trackpad between verbs, so ambient scrolls with the same device.
+        seeds = _swipe_seeds(name, st.entry)
+        unit = params.notch_px
+        if seeds and seeds[0]["kind"] == "wheel":
+            unit = min(abs(d) for g in seeds for d in g["dy"] if d)
+        down_room = probe.get("room_down", 0) > unit
+        up_room = probe.get("room_up", 0) > unit
         down = down_room and (not up_room or rng.random() < params.scroll_down_p)
-        dy = params.notch_px if down else -params.notch_px
+        dy = unit if down else -unit
         room = probe.get("room_down", 0) if down else probe.get("room_up", 0)
         # Scrolling slides content UNDER a still pointer, and Chrome re-runs hover
         # after a scroll (it fires mouseover on whatever arrives under the cursor —
@@ -1059,8 +1102,8 @@ class AmbientManager:
             path = [] if anchor == (int(round(cursor[0])), int(round(cursor[1]))) \
                 else plan_move(cursor, anchor, rng, params)
             for n in range(n0, 0, -1):
-                col = scroll_column(anchor, n * params.notch_px, down=down, vh=vh)
-                if col is None or n * params.notch_px > room:
+                col = scroll_column(anchor, n * unit, down=down, vh=vh)
+                if col is None or n * unit > room:
                     continue
                 chk = await self._eval(name, st, page, CHECK_JS, {
                     "pts": [[x, y] for x, y, _ in path] + col,
@@ -1075,9 +1118,22 @@ class AmbientManager:
             st.skip("scroll_unsafe")
             return
         path, n = chosen
+        sched = _seed_schedule(seeds, n * dy, rng) if seeds else None
         if path:
             await self._move(name, st, page, path)
             await self._sleep(name, st, rng.uniform(0.12, 0.4))   # hand settles
+        if sched:
+            loop = asyncio.get_running_loop()
+            t0 = loop.time()
+            for t_ms, step in sched:
+                await asyncio.sleep(max(0.0, t0 + t_ms / 1000 - loop.time()))
+                if self._blocked(name, st):
+                    raise _Yield()
+                st.last_wheel_at = time.monotonic()
+                await asyncio.wait_for(page.mouse.wheel(0, step), CDP_TIMEOUT_S)
+                st.last_wheel_at = time.monotonic()
+                st.stats["wheel_notches"] += 1
+            return
         for i in range(n):
             if i:
                 await asyncio.sleep(rng.lognormvariate(

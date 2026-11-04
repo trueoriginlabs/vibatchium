@@ -872,3 +872,86 @@ def test_oracle_ambient_safety_audit_counts_only_idle_windows():
         {"ambient": False, "features": f, "score": oracle.score_ambient(f), "idle_s": 1}])
     assert "safety violations: idle_clicks" in md
     assert oracle.extract_ambient_features({}, win)["n_gaps"] == 1     # total, never raises
+
+
+# ─── recorded swipe seeds: ambient scrolls with the session's device ─────────
+
+_PAD_LIB = [{"kind": "trackpad", "t": [i * 16 for i in range(6)],
+             "dy": [40.0, 25.0, 12.0, 6.0, 2.5, 1.0]} for _ in range(3)]
+_WHEEL_LIB = [{"kind": "wheel", "t": [0, 60, 130], "dy": [120, 120, 120]}
+              for _ in range(3)]
+
+
+def _library(tmp_path, monkeypatch, gestures):
+    import json
+    f = tmp_path / "gestures.json"
+    f.write_text(json.dumps({"gestures": gestures}))
+    monkeypatch.setenv("VIBATCHIUM_GESTURES", str(f))
+
+
+async def _ambient_wheels(monkeypatch, pin=None):
+    d, e, page = _daemon(monkeypatch)
+    if pin:
+        e.flags["scroll_device"] = pin
+    page.ptr = [400.0, 200.0]
+    st = await _enable(d, e)
+    _fast(st, scroll_p=1.0)
+    for _ in range(100):
+        if len([c for c in page.calls if c[0] == "wheel"]) >= 6:
+            break
+        await asyncio.sleep(0.02)
+    d._ambient.disable("t")
+    wheels = [c for c in page.calls if c[0] == "wheel"]
+    assert wheels, "no ambient scroll at scroll_p=1"
+    assert not any(c[3] for c in wheels)                  # never under entry.lock
+    return [c[2][1] for c in wheels]
+
+
+async def test_ambient_scroll_uses_the_trackpad_library(tmp_path, monkeypatch):
+    _library(tmp_path, monkeypatch, _PAD_LIB)
+    dys = await _ambient_wheels(monkeypatch)
+    assert any(d != int(d) for d in dys)                  # a flick, not 100px notches
+    assert max(abs(d) for d in dys) <= 40.0 * 3 + 1e-6    # humanize's scale cap
+
+
+async def test_ambient_scroll_uses_the_recorded_notch(tmp_path, monkeypatch):
+    _library(tmp_path, monkeypatch, _WHEEL_LIB)
+    dys = await _ambient_wheels(monkeypatch)
+    assert set(dys) <= {120, -120}
+
+
+async def test_ambient_scroll_follows_the_session_pin(tmp_path, monkeypatch):
+    _library(tmp_path, monkeypatch, _WHEEL_LIB + _PAD_LIB)
+    assert set(await _ambient_wheels(monkeypatch, pin="wheel")) <= {120, -120}
+    dys = await _ambient_wheels(monkeypatch, pin="trackpad")
+    assert any(d != int(d) for d in dys)
+
+
+def test_seed_schedule_never_scrolls_past_the_checked_column():
+    sched = ambient._seed_schedule(_PAD_LIB, -300, random.Random(3))
+    assert abs(sum(d for _, d in sched) + 300) < 0.5
+    assert ambient._seed_schedule([{"kind": "wheel"}], 100, random.Random(0)) is None
+
+
+# ─── humanize_on scroll_device (handlers_extra; uses this file's fake daemon) ─
+
+
+async def test_humanize_on_validates_scroll_device_before_any_change(monkeypatch):
+    d, e, _ = _daemon(monkeypatch)
+
+    async def on(**args):
+        return await d.dispatch({"cmd": "humanize_on", "id": "1",
+                                 "args": {"_session": "t", **args}})
+
+    out = await on(scroll_device="bogus")
+    assert out["ok"] is False and "scroll_device" in out["error"]
+    assert not e.flags.get("humanize") and "scroll_device" not in e.flags
+    assert (await on(scroll_device="trackpad"))["ok"]
+    assert e.flags["humanize"] and e.flags["scroll_device"] == "trackpad"
+    assert (await on())["ok"]                             # no arg keeps the pin
+    assert e.flags["scroll_device"] == "trackpad"
+    assert (await on(scroll_device=""))["ok"]             # "" clears it
+    assert e.flags["humanize"] and "scroll_device" not in e.flags
+    assert (await on(scroll_device="wheel"))["ok"]
+    out = await d.dispatch({"cmd": "humanize_off", "id": "2", "args": {"_session": "t"}})
+    assert out["ok"] and "scroll_device" not in e.flags   # off clears it too

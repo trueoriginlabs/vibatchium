@@ -407,17 +407,42 @@ def load_baseline(path: str | Path | None = None) -> dict:
         return base
     try:
         recorded = _json.loads(p.read_text(encoding="utf-8"))
-    except (ValueError, OSError) as exc:  # bad JSON / unreadable / bad encoding
+    except (ValueError, OSError, RecursionError) as exc:  # bad JSON / unreadable / nesting bomb
         log.warning("baseline %s unreadable (%s) — using literature defaults", p, exc)
         return base
     if not isinstance(recorded, dict):
         return base
+    try:
+        return _overlay_baseline(base, recorded, p)
+    except Exception as exc:   # never raises: a baseline that slips past the checks
+        log.warning("baseline %s unusable (%s) — using literature defaults", p, exc)
+        return {k: dict(v) for k, v in HUMAN_BASELINE.items()}
+
+
+def _finite_samples(samples: Any) -> list[float]:
+    """The finite numbers in a recorded sample list (none when it isn't a list).
+    NaN / Infinity / a huge int would turn into a band no value can be scored
+    against, or crash `run_oracle`."""
+    if not isinstance(samples, list):
+        return []
+    out = []
+    for s in samples:
+        if isinstance(s, (int, float)) and not isinstance(s, bool):
+            try:
+                v = float(s)
+            except OverflowError:
+                continue
+            if math.isfinite(v):
+                out.append(v)
+    return out
+
+
+def _overlay_baseline(base: dict, recorded: dict, p: Path) -> dict:
     for feat, samples in recorded.items():
         if (feat not in base or not isinstance(samples, list)
                 or "score" not in (base[feat]["kind"], base[feat].get("recorded_kind"))):
             continue
-        vals = sorted(float(s) for s in samples
-                      if isinstance(s, (int, float)) and not isinstance(s, bool))
+        vals = sorted(_finite_samples(samples))
         if len(vals) < 5:
             continue
         base[feat]["kind"] = "score"
@@ -434,8 +459,7 @@ def load_baseline(path: str | Path | None = None) -> dict:
         base[feat]["lo"], base[feat]["hi"] = lo, hi
         base[feat]["source"] = f"recorded operator baseline (n={len(vals)}, interp p5-p95)"
     base["__source__"] = {"kind": "meta", "recorded": str(p)}
-    swipe_totals = [float(v) for v in recorded.get("scroll_dy_total") or []
-                    if isinstance(v, (int, float)) and not isinstance(v, bool)]
+    swipe_totals = _finite_samples(recorded.get("scroll_dy_total"))
     if swipe_totals:
         # run_oracle wheels this distance so the ON pass is one swipe of the
         # operator's own size, comparable with the recorded per-swipe bands.
@@ -701,6 +725,8 @@ _SWIPE_FEATURES = ["scroll_steps", "scroll_dy_total", "scroll_dy_max_step",
 # are 30-100ms apart and trackpad momentum ticks ~16ms, so 300ms separates
 # deliberate swipes without cutting a fling's tail.
 SWIPE_SPLIT_MS = 300.0
+# A swipe smaller than this is a stray tick, not a flick to replay or band.
+SWIPE_MIN_PX = 10.0
 
 
 def split_wheel_bursts(events: list[dict], split_ms: float = SWIPE_SPLIT_MS
@@ -730,38 +756,44 @@ def _down_swipe(burst: list[dict]) -> bool:
 
 def classify_gesture(dys: list[float]) -> str:
     """'wheel' when every nonzero delta is a whole multiple of one notch quantum
-    (>= 40px), else 'trackpad' (continuous deltas, momentum tail)."""
-    mags = [abs(d) for d in dys if d]
-    if not mags:
-        return "trackpad"
-    q = min(mags)
-    if q >= 40 and all(abs(m / q - round(m / q)) < 0.02 for m in mags):
-        return "wheel"
-    return "trackpad"
+    (>= 40px), else 'trackpad' (continuous deltas, momentum tail). The same test
+    humanize applies to a wheel library at load (humanize.wheel_notch)."""
+    from .humanize import wheel_notch
+    return "wheel" if wheel_notch(dys) is not None else "trackpad"
 
 
 SWIPE_DEVICES = ("wheel", "trackpad")
 
 
 def _swipe_bursts(trials: list[dict]):
-    """(device, burst) for every forward swipe in the 'swipe' trials, plus the
-    count of bursts skipped (upward or line-mode) and of labels the delta shape
-    disagrees with. The recorder labels each block with the device the operator
-    was asked to use; the label wins, the classifier only covers unlabelled
-    trials."""
+    """(device, burst) for the swipe in each 'swipe' trial, plus the count of
+    bursts skipped and of labels the delta shape disagrees with.
+
+    The recorder ends a trial after SWIPE_SPLIT_MS of wheel silence, but on a
+    setTimeout, which fires a few ms late: an event 301-310ms after the last can
+    still land in the trial and split off as a fragment. A trial is one flick by
+    construction, so only its largest forward burst is kept; the rest (fragments,
+    upward or line-mode bursts) and a kept burst under SWIPE_MIN_PX are skipped.
+    The recorder labels each block with the device the operator was asked to
+    use; the label wins, the classifier only covers unlabelled trials."""
     out, skipped, mismatched = [], 0, 0
     for tr in trials:
         if not isinstance(tr, dict) or tr.get("kind") != "swipe":
             continue
         label = tr.get("device") if tr.get("device") in SWIPE_DEVICES else None
-        for burst in split_wheel_bursts(tr.get("events") or []):
-            if not _down_swipe(burst):
-                skipped += 1
-                continue
-            shape = classify_gesture([e.get("dy") or 0 for e in burst])
-            if label and label != shape:
-                mismatched += 1
-            out.append((label or shape, burst))
+        bursts = split_wheel_bursts(tr.get("events") or [])
+        down = [b for b in bursts if _down_swipe(b)]
+        burst = max(down, key=lambda b: sum(e.get("dy") or 0 for e in b), default=None)
+        skipped += len(bursts) - (burst is not None)
+        if burst is None:
+            continue
+        if sum(e.get("dy") or 0 for e in burst) < SWIPE_MIN_PX:
+            skipped += 1
+            continue
+        shape = classify_gesture([e.get("dy") or 0 for e in burst])
+        if label and label != shape:
+            mismatched += 1
+        out.append((label or shape, burst))
     return out, skipped, mismatched
 
 
@@ -776,19 +808,33 @@ def build_gesture_library(trials: list[dict], *, source: str | None = None) -> d
     Each gesture keeps its timing relative to its first event and its per-event
     dy, so a wheel stays quantized and a trackpad keeps its fade-out. Both
     devices are kept; humanize gives each session one of them, since a person
-    doesn't switch device between two flicks. Pure."""
+    doesn't switch device between two flicks.
+
+    The library holds exactly what humanize will replay: a swipe that fails
+    `humanize.valid_gesture` (a "wheel" swipe that isn't whole notches, such as
+    a smooth-scrolling mouse's fractional deltas, or one too long to replay) or
+    whose notch differs from the other wheel swipes' is `refused`. Pure."""
+    from .humanize import one_notch_gestures, valid_gesture
     bursts, skipped, mismatched = _swipe_bursts(trials)
-    gestures = []
+    gestures, refused = [], 0
     for device, burst in bursts:
         t0 = burst[0]["t"]
-        gestures.append({
-            "kind": device,
-            "t": [round(e["t"] - t0, 2) for e in burst],
-            "dy": [round(float(e.get("dy") or 0), 3) for e in burst],
-        })
+        g = {"kind": device,
+             "t": [round(e["t"] - t0, 2) for e in burst],
+             "dy": [round(float(e.get("dy") or 0), 3) for e in burst]}
+        if valid_gesture(g):
+            gestures.append(g)
+        else:
+            refused += 1
+    wheels = [g for g in gestures if g["kind"] == "wheel"]
+    if wheels:
+        keep = {id(g) for g in one_notch_gestures(wheels)}
+        refused += len(wheels) - len(keep)
+        gestures = [g for g in gestures if g["kind"] != "wheel" or id(g) in keep]
     return {"version": 2, "source": source, "n": len(gestures),
             "devices": {d: sum(g["kind"] == d for g in gestures) for d in SWIPE_DEVICES},
-            "skipped": skipped, "mismatched": mismatched, "gestures": gestures}
+            "skipped": skipped, "mismatched": mismatched, "refused": refused,
+            "gestures": gestures}
 
 
 def aggregate_trials(trials: list[dict], *, swipe_device: str | None = None) -> dict:

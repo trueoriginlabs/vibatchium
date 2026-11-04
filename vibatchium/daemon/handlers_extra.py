@@ -369,12 +369,14 @@ def register_extra(daemon) -> None:
             raise RuntimeError(
                 "humanize requires a running session — start one first"
             )
-        entry.flags["humanize"] = True
         device = args.get("scroll_device")
         if device not in (None, "", "wheel", "trackpad"):
-            raise ValueError("scroll_device must be wheel or trackpad")
+            raise ValueError("scroll_device must be wheel, trackpad or \"\" (clear)")
+        entry.flags["humanize"] = True
         if device:
             entry.flags["scroll_device"] = device
+        elif device == "":
+            entry.flags.pop("scroll_device", None)
         return {"humanize": True, "session": entry.name,
                 **_scroll_device_status(entry)}
 
@@ -385,6 +387,7 @@ def register_extra(daemon) -> None:
         if entry is None:
             return {"humanize": False, "note": "no running session"}
         entry.flags["humanize"] = False
+        entry.flags.pop("scroll_device", None)
         from .ambient import clear_cursor
         clear_cursor(entry)
         return {"humanize": False, "session": entry.name}

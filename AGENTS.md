@@ -508,15 +508,28 @@ no real device. Record your own swipes (`vb oracle record --clicks 0 --type-line
 trackpad block; open it in Chrome) and `vb oracle ingest trials.json -o b.json
 --install`: every humanized `mouse wheel` on the box then replays one of your
 swipes. Each session uses one device, picked from its name or pinned with
-`humanize on --scroll-device wheel|trackpad`. A wheel keeps its whole notches,
-so the distance rounds to a notch; a trackpad flick is scaled to the exact
-distance.
+`humanize on --scroll-device wheel|trackpad` (`--scroll-device auto`, MCP
+`scroll_device: ""`, or `humanize off` clears the pin). Ambient scrolling uses
+the same device. A wheel keeps its whole notches, so the distance rounds to the
+nearest notch (merged 240/360px events count as 2/3); a trackpad flick is
+scaled to the distance, at most 3x harder than recorded.
+A distance one recorded swipe can't cover is met by swiping again after a
+320-650ms pause. One call replays at most 8 swipes and 10s (the replay holds the
+session lock), so a larger request scrolls less than asked: call again.
 The library is personal data in `~/.config/vibatchium/gestures.json`; point the
-**daemon** at another file with `VIBATCHIUM_GESTURES`. `vb oracle run --baseline
+**daemon** at another file with `VIBATCHIUM_GESTURES`. A bad library never
+breaks scrolling: invalid swipes are dropped at load (non-finite or negative
+deltas, t not starting near 0 or going backwards, longer than 2.5s or 300
+events, a "wheel" that isn't whole notches), and a device with fewer than 3 left,
+an unreadable file, or a schedule that fails falls back to the sin curve.
+`vb oracle run --baseline
 b.json` then grades one swipe of your median size against your recorded bands.
 That check is circular by design: it shows the replay survives CDP (deltas and
 16ms timing intact), not that the swipes are human. They are, because they are
-yours.
+yours. Two tells it leaves alone: a CDP-dispatched wheel event reports
+`wheelDeltaY = -120` whatever its `deltaY` (the sin curve had that too), and
+replays reuse a small set of recorded swipes, so over many calls the same few
+shapes repeat.
 
 **Ambient** fills the silence *between* verbs — the tell Akamai measured (63.2%
 of agentic requests carried zero mouse events). While a session idles it moves

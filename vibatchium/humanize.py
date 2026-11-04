@@ -36,9 +36,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import math
 import random
-import statistics
+
+log = logging.getLogger("vibatchium.humanize")
 
 
 def humanized_path(
@@ -222,6 +224,74 @@ async def humanized_click(page, x: float, y: float, *,
 
 _gesture_cache: dict = {}
 
+# What one recorded swipe may look like. Anything outside these is dropped at
+# load: a library is a file on disk, and one bad entry must cost that entry,
+# not every humanized wheel on the box.
+NOTCH_MIN_PX = 40            # a smaller "quantum" is a trackpad, not a notch
+GESTURE_MAX_EVENTS = 300     # a 1s fling at 120 Hz is ~120
+GESTURE_MAX_MS = 2500.0      # first to last event: a fling's tail is ~1-1.5s
+GESTURE_T0_MAX_MS = 50.0     # t is relative to the gesture's first event
+# One replay call. A distance one recorded swipe can't cover is met by flicking
+# again after a pause, as a person does, but never for longer than this: the
+# replay holds the session lock, and the client gives up after 120s. A larger
+# request is cut short.
+REPLAY_MAX_GESTURES = 8
+REPLAY_MAX_MS = 10_000.0
+REPLAY_MAX_EVENTS = 1200
+CHAIN_PAUSE_MS = (320.0, 650.0)   # > the recorder's 300ms gesture split
+TRACKPAD_MAX_SCALE = 3.0     # a flick replayed harder than this is flicked twice
+
+
+def wheel_notch(dys) -> float | None:
+    """The notch quantum when every nonzero delta is a whole multiple of the
+    smallest one (>= NOTCH_MIN_PX), else None (continuous, trackpad-like)."""
+    mags = [abs(d) for d in dys if d]
+    if not mags:
+        return None
+    q = min(mags)
+    if q >= NOTCH_MIN_PX and all(abs(m / q - round(m / q)) < 0.02 for m in mags):
+        return q
+    return None
+
+
+def _multiple_of(dys, q: float) -> bool:
+    return all(abs(abs(d) / q - round(abs(d) / q)) < 0.02 for d in dys if d)
+
+
+def _finite(v) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+
+
+def valid_gesture(g) -> bool:
+    """One replayable recorded swipe: finite, non-negative deltas with a positive
+    sum, non-decreasing t starting near 0, bounded length and duration, and, for
+    a wheel, whole notches."""
+    if not isinstance(g, dict) or g.get("kind") not in ("wheel", "trackpad"):
+        return False
+    t, dy = g.get("t"), g.get("dy")
+    if not (isinstance(t, list) and isinstance(dy, list)
+            and 0 < len(t) == len(dy) <= GESTURE_MAX_EVENTS):
+        return False
+    if not (all(_finite(v) for v in t) and all(_finite(v) for v in dy)):
+        return False
+    if not 0 <= t[0] <= GESTURE_T0_MAX_MS or any(t[i + 1] < t[i] for i in range(len(t) - 1)):
+        return False
+    if t[-1] - t[0] > GESTURE_MAX_MS:
+        return False
+    total = sum(dy)
+    if min(dy) < 0 or not (math.isfinite(total) and total > 0):
+        return False
+    return g["kind"] != "wheel" or wheel_notch(dy) is not None
+
+
+def one_notch_gestures(wheels: list[dict]) -> list[dict]:
+    """The wheel gestures that share one notch quantum (the quantum covering the
+    most of them). Two mice in one library would make "rounds to a notch"
+    meaningless; a merged 240px event still counts as two 120px notches."""
+    cands = {wheel_notch(g["dy"]) for g in wheels}
+    best = max(cands, key=lambda q: (sum(_multiple_of(g["dy"], q) for g in wheels), q))
+    return [g for g in wheels if _multiple_of(g["dy"], best)]
+
 
 def gesture_library_path():
     """Where the daemon looks for the seed library."""
@@ -237,12 +307,14 @@ def gesture_library_path():
 def load_gesture_library(path=None) -> dict[str, list[dict]] | None:
     """The replayable gestures per device (`wheel` / `trackpad`), keeping only
     devices with at least 3, or None when there is no usable library (missing,
-    unreadable, or too few gestures). Re-read only when the file's mtime changes."""
+    unreadable, or too few valid gestures). Invalid gestures are dropped
+    (valid_gesture), and the wheel ones must share one notch. Never raises.
+    Re-read only when the file's mtime changes."""
     import json
-    p = path or gesture_library_path()
     try:
+        p = path or gesture_library_path()
         mtime = p.stat().st_mtime
-    except OSError:
+    except Exception:
         return None
     hit = _gesture_cache.get(str(p))
     if hit and hit[0] == mtime:
@@ -251,10 +323,13 @@ def load_gesture_library(path=None) -> dict[str, list[dict]] | None:
         lib = json.loads(p.read_text(encoding="utf-8"))
         by_device: dict[str, list[dict]] = {}
         for g in lib.get("gestures") or []:
-            if (g.get("kind") in ("wheel", "trackpad") and g.get("t") and g.get("dy")
-                    and len(g["t"]) == len(g["dy"]) and sum(g["dy"]) > 0):
+            if valid_gesture(g):
                 by_device.setdefault(g["kind"], []).append(g)
-    except (ValueError, OSError, AttributeError, TypeError):
+        if by_device.get("wheel"):
+            by_device["wheel"] = one_notch_gestures(by_device["wheel"])
+    except Exception as exc:   # bad JSON, a nesting bomb (RecursionError), odd shapes
+        log.warning("gesture library %s unusable (%s): humanized scroll uses the "
+                    "sin curve", p, type(exc).__name__)
         by_device = {}
     out = {k: v for k, v in by_device.items() if len(v) >= 3} or None
     _gesture_cache[str(p)] = (mtime, out)
@@ -277,44 +352,88 @@ def scroll_device_for(devices, *, pinned: str | None = None,
     return kinds[int(hashlib.sha256(key.encode()).hexdigest(), 16) % len(kinds)]
 
 
-def gesture_schedule(gestures: list[dict], total_dy: float, *,
-                     rng: random.Random | None = None
-                     ) -> list[tuple[float, float]]:
-    """Pick a recorded gesture near `total_dy` and return its (t_ms, dy) events,
-    t relative to the first. Pure + deterministic with a seeded `rng`.
-
-    A wheel gesture keeps its notch deltas: scaling 120 to 131 would itself be a
-    tell, so the distance is met by choosing (then trimming or extending) a
-    gesture with about |total_dy| / notch events, and the total lands on a whole
-    notch. A trackpad gesture is continuous, so it is scaled to the exact
-    distance. Timing gets an overall ±10% stretch and ±5% per gap."""
-    r = rng or random
-    target = abs(total_dy)
-    sign = 1.0 if total_dy >= 0 else -1.0
-    if gestures[0]["kind"] == "wheel":
-        notch = statistics.median(d for g in gestures for d in g["dy"])
-        n = max(1, round(target / notch))
-        ranked = sorted(gestures, key=lambda g: (abs(len(g["dy"]) - n), r.random()))
-        g = r.choice(ranked[:3])
-        ts, dys = list(g["t"]), list(g["dy"])
-        own_gaps = [ts[i + 1] - ts[i] for i in range(len(ts) - 1)] or [60.0]
-        while len(dys) < n:
-            ts.append(ts[-1] + r.choice(own_gaps))
-            dys.append(dys[-1])
-        ts, dys = ts[:n], dys[:n]
-    else:
-        ranked = sorted(gestures, key=lambda g: (
-            abs(math.log(max(target, 1.0) / sum(g["dy"]))), r.random()))
-        g = r.choice(ranked[:3])
-        ts = list(g["t"])
-        scale = target / sum(g["dy"])
-        dys = [d * scale for d in g["dy"]]
+def _retime(ts: list[float], dys: list[float], r) -> list[tuple[float, float]]:
+    """(t, dy) with t relative to the first event, the whole gesture stretched
+    ±10% and each gap ±5%."""
     stretch = r.uniform(0.9, 1.1)
     out, t = [], 0.0
     for i, d in enumerate(dys):
         if i:
             t += (ts[i] - ts[i - 1]) * stretch * r.uniform(0.95, 1.05)
-        out.append((round(t, 2), round(sign * d, 3)))
+        out.append((t, d))
+    return out
+
+
+def _wheel_segment(gestures: list[dict], left: float, r):
+    """One recorded wheel gesture covering up to `left` px: the one whose total
+    overshoots `left` least (so trimming lands exactly), or, when none reaches
+    it, one of the longest. Trimmed by running distance; a merged notch past the
+    target is cut to the notches still needed, so every event stays a whole
+    number of notches and the total is exact."""
+    over = [g for g in gestures if sum(g["dy"]) >= left - 1e-6]
+    if over:
+        ranked = sorted(over, key=lambda g: (sum(g["dy"]) - left, r.random()))
+    else:
+        ranked = sorted(gestures, key=lambda g: (-sum(g["dy"]), r.random()))
+    g = r.choice(ranked[:3])
+    ts, dys, run = [], [], 0.0
+    for t, d in zip(g["t"], g["dy"], strict=True):
+        if run >= left - 1e-6:
+            break
+        d = min(d, left - run)
+        ts.append(t)
+        dys.append(d)
+        run += d
+    return _retime(ts, dys, r)
+
+
+def _trackpad_segment(gestures: list[dict], left: float, r):
+    """One recorded flick near `left` px, scaled to it, but never more than
+    TRACKPAD_MAX_SCALE harder than it was recorded."""
+    ranked = sorted(gestures, key=lambda g: (
+        abs(math.log(max(left, 1.0) / sum(g["dy"]))), r.random()))
+    g = r.choice(ranked[:3])
+    scale = min(left / sum(g["dy"]), TRACKPAD_MAX_SCALE)
+    return _retime(list(g["t"]), [d * scale for d in g["dy"]], r)
+
+
+def gesture_schedule(gestures: list[dict], total_dy: float, *,
+                     rng: random.Random | None = None
+                     ) -> list[tuple[float, float]]:
+    """Recorded gesture(s) covering `total_dy`, as (t_ms, dy) events with t
+    relative to the first. Pure + deterministic with a seeded `rng`.
+
+    A wheel gesture keeps its notch deltas (scaling 120 to 131 would itself be a
+    tell): the distance rounds to a whole notch, and a gesture is picked and
+    trimmed by its running total. A trackpad gesture is continuous, so it is
+    scaled to the distance (at most TRACKPAD_MAX_SCALE). Each gesture plays at
+    its recorded length, timing stretched ±10% (±5% per gap). A distance one
+    gesture can't cover takes another after a 320-650ms pause, up to
+    REPLAY_MAX_GESTURES / REPLAY_MAX_MS / REPLAY_MAX_EVENTS per call; past that
+    the scroll is cut short of the request."""
+    r = rng or random
+    sign = 1.0 if total_dy >= 0 else -1.0
+    wheel = gestures[0]["kind"] == "wheel"
+    if wheel:
+        notch = min(abs(d) for g in gestures for d in g["dy"] if d)
+        left = max(1, round(abs(total_dy) / notch)) * notch
+        done_below = notch / 2
+    else:
+        left = abs(total_dy)
+        done_below = 0.5
+    out: list[tuple[float, float]] = []
+    for _ in range(REPLAY_MAX_GESTURES):
+        seg = (_wheel_segment if wheel else _trackpad_segment)(gestures, left, r)
+        start = 0.0
+        if out:
+            start = out[-1][0] + r.uniform(*CHAIN_PAUSE_MS)
+            if (start + seg[-1][0] > REPLAY_MAX_MS
+                    or len(out) + len(seg) > REPLAY_MAX_EVENTS):
+                break
+        out.extend((round(start + t, 2), round(sign * d, 3)) for t, d in seg)
+        left -= sum(d for _, d in seg)
+        if left < done_below:
+            break
     return out
 
 
@@ -324,13 +443,22 @@ async def humanized_scroll(page, dx: float, dy: float, *,
                             device_key: str | None = None) -> None:
     """Send multiple scroll-wheel events — a replay of one of the operator's
     recorded swipes when a gesture library is installed, else a sin curve.
-    `device` / `device_key` choose the session's device (scroll_device_for)."""
+    `device` / `device_key` choose the session's device (scroll_device_for).
+    A library that fails to schedule falls back to the sin curve."""
     if dx == 0 and dy == 0:
         return
-    library = load_gesture_library() if dy else None
-    if library:
-        kind = scroll_device_for(library, pinned=device, key=device_key)
-        sched = gesture_schedule(library[kind], dy)
+    sched = None
+    if dy:
+        try:
+            library = load_gesture_library()
+            if library:
+                kind = scroll_device_for(library, pinned=device, key=device_key)
+                sched = gesture_schedule(library[kind], dy)
+        except Exception as exc:
+            log.warning("swipe replay failed to schedule (%s): using the sin curve",
+                        type(exc).__name__)
+            sched = None
+    if sched:
         loop = asyncio.get_running_loop()
         t0 = loop.time()
         for t_ms, step_dy in sched:

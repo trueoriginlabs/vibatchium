@@ -22,22 +22,39 @@ one gesture never checked against a person.
   records swipes only. The capture now stores `deltaMode`; Firefox's line-mode
   swipes are skipped.
 - `vb oracle ingest … --gestures PATH` writes the swipes as a seed library, and
-  `--install` puts it at `~/.config/vibatchium/gestures.json` (`0600`, out of
-  git). Both devices are kept. Each swipe takes its block's label; ingest
-  reports swipes whose deltas don't look like that device.
+  `--install` puts it at `~/.config/vibatchium/gestures.json` (created `0600`,
+  out of git). Both devices are kept. Each swipe takes its block's label; ingest
+  reports swipes whose deltas don't look like that device, and refuses a
+  "wheel" swipe that isn't whole notches (a smooth-scrolling mouse) or doesn't
+  share the other wheel swipes' notch. A trial is one flick by construction, so
+  ingest keeps its largest burst: a tick that lands 301-310ms late (the
+  recorder's 300ms timer fires a few ms late) no longer becomes a second
+  "swipe", and a burst under 10px is dropped.
 - **One device per session.** A person switches between mouse and trackpad
   between sittings, not between two flicks, so a session never mixes them. The
   session name picks the device (stable across runs and restarts), and
   `vb humanize on --scroll-device wheel|trackpad` (MCP: `scroll_device`) pins
-  it. `humanize status` reports the device in use.
+  it; `--scroll-device auto` (MCP `scroll_device: ""`) or `humanize off`
+  clears the pin, and an invalid device is refused before humanize changes.
+  `humanize status` reports the device in use. Ambient scrolling uses the same
+  device: recorded notches or a recorded trackpad flick instead of fixed 100px
+  notches (unchanged with no library).
 - With a library present, `humanized_scroll` (every humanized `mouse wheel`)
   picks one of the session device's three recorded gestures nearest the
-  requested distance. It
+  requested distance, by running total. It
   stretches the timing ±10% (±5% per gap) and sends each event at its absolute
-  deadline. Wheel deltas are never rescaled, so the distance rounds to a whole
-  notch. A trackpad gesture is scaled to the exact distance. Without a library
-  (or with fewer than 3 gestures) nothing changes. `VIBATCHIUM_GESTURES` in the
-  daemon's env points elsewhere.
+  deadline. Wheel deltas are never rescaled, so the distance rounds to the
+  nearest whole notch (a merged 240px event counts as two). A trackpad gesture
+  is scaled to the distance, at most 3x. A distance one gesture can't cover
+  takes another after a 320-650ms pause, but one call replays at most 8
+  gestures and 10s, since it holds the session lock: a larger request scrolls
+  less than asked. Without a library (or with fewer than 3 valid gestures)
+  nothing changes. `VIBATCHIUM_GESTURES` in the daemon's env points elsewhere.
+- A bad library falls back to the sin curve instead of breaking scrolling.
+  Each gesture is validated at load (finite, non-negative deltas with a
+  positive sum, t non-decreasing from near 0, at most 2.5s and 300 events, a
+  wheel in whole notches) and invalid ones are dropped; an unreadable file or a
+  schedule that raises uses the sin curve.
 - The oracle gains `scroll_duration_ms`, `scroll_gap_ms_median` and
   `scroll_dy_max_step`. They are reported only, since no literature band
   separates a trackpad from the sin curve, and become scored when a recorded
@@ -45,6 +62,9 @@ one gesture never checked against a person.
   (`ingest --swipe-device`, default the one with more swipes), since a band
   spanning both would pass either. `oracle run` then wheels the operator's
   median swipe distance instead of 700px and replays that same device.
+- `load_baseline` keeps its never-raises contract with the new features: a
+  scalar, NaN, Infinity or overflowing sample is skipped, so `oracle run` can't
+  crash on it.
 - **Behaviour change:** `scroll` trials no longer feed the `scroll_steps` band.
   A scroll-to-Continue run is many flicks long, while the runner grades one
   wheel call, so the band comes from swipes.
@@ -56,6 +76,9 @@ fling replays at a 16.7ms median gap, 58-59 events, ~1000ms. Both were 7/7 and
 recording driven through the page ingested as 6 wheel + 6 trackpad, and the
 pin switched one session's replay between them. This is circular
 by design: it shows the replay survives CDP, not that the source swipes are human.
+It doesn't touch two tells: a CDP wheel event reports `wheelDeltaY = -120`
+whatever its `deltaY` (as the sin curve did), and replays reuse a small set of
+recorded gestures.
 
 ### fix: negative numbers and dash-leading text no longer fail as options
 

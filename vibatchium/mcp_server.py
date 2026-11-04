@@ -744,9 +744,10 @@ TOOLS: list[tuple[str, str, dict, str, Any]] = [
      "With a recorded swipe library installed, the wheel replays the operator's swipes "
      "on one device per session.",
      {"type": "object", "properties": {
-         "scroll_device": {"type": "string", "enum": ["wheel", "trackpad"],
+         "scroll_device": {"type": "string", "enum": ["wheel", "trackpad", ""],
                            "description": "Pin the session's swipe device (default: "
-                                          "a stable pick from the session name)."},
+                                          "a stable pick from the session name); "
+                                          "\"\" clears the pin, as humanize_off does."},
      }}, "humanize_on", None),
     ("humanize_off", "Disable humanize for current session.",
      {"type": "object", "properties": {}}, "humanize_off", None),
