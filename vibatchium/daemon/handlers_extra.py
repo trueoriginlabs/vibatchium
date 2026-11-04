@@ -338,7 +338,19 @@ def register_extra(daemon) -> None:
             dy = float(args.get("dy", 0))
             if humanize:
                 from ..humanize import humanized_scroll
-                await humanized_scroll(s.page, dx, dy)
+                sent = await humanized_scroll(
+                    s.page, dx, dy,
+                    device=entry.flags.get("scroll_device") if entry else None,
+                    device_key=entry.name if entry else None)
+                out = {"action": action, "x": x, "y": y, "humanized": humanize,
+                       "scrolled_dy": round(sent, 2)}
+                # A swipe replay is bounded per call: say so, or a "scroll to
+                # the bottom" caller thinks it got there.
+                if abs(sent) < abs(dy) - 0.5:
+                    out["truncated"] = True
+                    out["note"] = ("humanized wheel is bounded per call; call "
+                                   "again for the remaining distance")
+                return out
             else:
                 await m.wheel(dx, dy)
         else:
@@ -346,6 +358,17 @@ def register_extra(daemon) -> None:
         return {"action": action, "x": x, "y": y, "humanized": humanize}
 
     # ─── Wave 6.2b: humanize per-session toggle ──────────────────────────
+
+    def _scroll_device_status(entry) -> dict:
+        """Which device this session's humanized wheel replays, if a swipe
+        library is installed (None = sin curve)."""
+        from ..humanize import load_gesture_library, scroll_device_for
+        library = load_gesture_library()
+        if not library:
+            return {"scroll_device": None, "scroll_seeds": False}
+        return {"scroll_device": scroll_device_for(
+                    library, pinned=entry.flags.get("scroll_device"), key=entry.name),
+                "scroll_seeds": True}
 
     @daemon.handler("humanize_on")
     async def _humanize_on(d, args):
@@ -355,8 +378,16 @@ def register_extra(daemon) -> None:
             raise RuntimeError(
                 "humanize requires a running session — start one first"
             )
+        device = args.get("scroll_device")
+        if device not in (None, "", "wheel", "trackpad"):
+            raise ValueError("scroll_device must be wheel, trackpad or \"\" (clear)")
         entry.flags["humanize"] = True
-        return {"humanize": True, "session": entry.name}
+        if device:
+            entry.flags["scroll_device"] = device
+        elif device == "":
+            entry.flags.pop("scroll_device", None)
+        return {"humanize": True, "session": entry.name,
+                **_scroll_device_status(entry)}
 
     @daemon.handler("humanize_off")
     async def _humanize_off(d, args):
@@ -365,6 +396,7 @@ def register_extra(daemon) -> None:
         if entry is None:
             return {"humanize": False, "note": "no running session"}
         entry.flags["humanize"] = False
+        entry.flags.pop("scroll_device", None)
         from .ambient import clear_cursor
         clear_cursor(entry)
         return {"humanize": False, "session": entry.name}
@@ -376,7 +408,7 @@ def register_extra(daemon) -> None:
         if entry is None:
             return {"humanize": False, "note": "no running session"}
         return {"humanize": bool(entry.flags.get("humanize")),
-                "session": entry.name}
+                "session": entry.name, **_scroll_device_status(entry)}
 
     @daemon.handler("humanize_ambient")
     async def _humanize_ambient(d, args):

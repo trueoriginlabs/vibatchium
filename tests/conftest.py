@@ -50,6 +50,13 @@ os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp(prefix="vbtest-st-")
 os.environ.setdefault("VIBATCHIUM_TEST_PROFILE",
                       tempfile.mkdtemp(prefix="vbtest-prof-"))
 
+# An operator's recorded swipe library (~/.config/vibatchium/gestures.json) would
+# turn every humanized and ambient wheel in the suite into a replay of it. Point
+# the in-process code and the test daemon at a file that doesn't exist, so the
+# suite pins the no-library behaviour; tests that want a library set their own.
+os.environ["VIBATCHIUM_GESTURES"] = os.path.join(
+    tempfile.mkdtemp(prefix="vbtest-gest-"), "gestures.json")
+
 # Vault isolation MUST run BEFORE any vibatchium import (same as SOCK_PATH above):
 # secrets.py freezes VAULT_PATH from this env at import time, and the fixed test key
 # re-keys the WHOLE vault file on every save. If VAULT_PATH froze to the real

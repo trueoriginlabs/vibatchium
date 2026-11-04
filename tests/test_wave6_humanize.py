@@ -409,3 +409,242 @@ def test_budgeted_type_delays_bounds_long_text():
     for n in (5000, 20000):
         d = budgeted_type_delays(n, seed=1)
         assert len(d) == n and sum(d) <= 20000, f"n={n} sum={sum(d)}"
+
+
+# ─── recorded swipe seeds ────────────────────────────────────────────────────
+
+import json as _json
+import random as _random
+
+import pytest
+
+from vibatchium import humanize as _hz
+
+_WHEEL = [{"kind": "wheel", "t": [0, 48, 130], "dy": [120, 120, 120]},
+          {"kind": "wheel", "t": [0], "dy": [120]},
+          {"kind": "wheel", "t": [0, 70], "dy": [120, 120]},
+          {"kind": "wheel", "t": [0, 35, 90, 160, 210], "dy": [120] * 5}]
+_PAD = [{"kind": "trackpad", "t": [i * 16 for i in range(6)],
+         "dy": [40.0, 25.0, 12.0, 6.0, 2.5, 1.0]} for _ in range(3)]
+
+
+def test_gesture_schedule_wheel_keeps_notches():
+    for dy, n in ((360, 3), (120, 1), (50, 1), (840, 7)):
+        sched = _hz.gesture_schedule(_WHEEL, dy, rng=_random.Random(dy))
+        assert len(sched) == n
+        assert all(d == 120 for _, d in sched)                 # never rescaled
+        ts = [t for t, _ in sched]
+        assert ts[0] == 0 and ts == sorted(ts)
+
+
+def test_gesture_schedule_trackpad_scales_to_distance_and_sign():
+    sched = _hz.gesture_schedule(_PAD, -200, rng=_random.Random(1))
+    assert abs(sum(d for _, d in sched) + 200) < 0.05
+    assert all(d < 0 for _, d in sched)
+    assert len(sched) == 6                                     # one flick
+    # timing is the recording's, stretched by at most ~15%
+    assert 80 * 0.85 <= sched[-1][0] <= 80 * 1.16
+
+
+def test_gesture_schedule_trackpad_flicks_again_past_its_scale_cap():
+    # _PAD is an 86.5px flick: 500px would replay it 5.8x harder; past 3x it is
+    # flicked twice, with a pause between, and still lands on the distance
+    sched = _hz.gesture_schedule(_PAD, -500, rng=_random.Random(1))
+    assert abs(sum(d for _, d in sched) + 500) < 0.05
+    assert len(sched) == 12
+    assert max(abs(d) for _, d in sched) <= 40.0 * _hz.TRACKPAD_MAX_SCALE + 1e-6
+    gap = sched[6][0] - sched[5][0]
+    assert _hz.CHAIN_PAUSE_MS[0] <= gap <= _hz.CHAIN_PAUSE_MS[1]
+
+
+@pytest.mark.parametrize("lib", ["wheel", "trackpad"])
+def test_gesture_schedule_is_bounded_per_call(lib):
+    # `mouse wheel 0 100000` used to extend a wheel gesture notch by notch:
+    # 833 notches over ~55s with the session lock held
+    gestures = _WHEEL if lib == "wheel" else _PAD
+    for seed in range(5):
+        sched = _hz.gesture_schedule(gestures, 100000, rng=_random.Random(seed))
+        ts = [t for t, _ in sched]
+        assert ts == sorted(ts)
+        assert ts[-1] <= _hz.REPLAY_MAX_MS
+        assert len(sched) <= _hz.REPLAY_MAX_EVENTS
+        starts = 1 + sum(1 for i in range(len(ts) - 1)
+                         if ts[i + 1] - ts[i] >= _hz.CHAIN_PAUSE_MS[0])
+        assert starts <= _hz.REPLAY_MAX_GESTURES
+        assert sum(d for _, d in sched) < 100000                # cut short, by design
+
+
+_MERGED = [{"kind": "wheel", "t": [0, 60, 120], "dy": [120, 240, 120]},
+           {"kind": "wheel", "t": [0, 50], "dy": [360, 120]},
+           {"kind": "wheel", "t": [0], "dy": [240]},
+           {"kind": "wheel", "t": [0, 40, 95, 150], "dy": [120, 120, 240, 360]}]
+
+
+@pytest.mark.parametrize("asked,landed", [(700, 720), (2000, 2040), (130, 120),
+                                          (60, 120), (840, 840)])
+def test_wheel_distance_counts_merged_notches(asked, landed):
+    # ranked + trimmed by running distance, not event count: a 240/360px event
+    # is 2/3 notches. Old code: 700 asked -> 307 scrolled, 2000 -> 535
+    for seed in range(6):
+        sched = _hz.gesture_schedule(_MERGED, asked, rng=_random.Random(seed))
+        assert sum(d for _, d in sched) == landed               # nearest whole notch
+        assert all(d % 120 == 0 and d > 0 for _, d in sched)
+
+
+def test_wheel_library_must_be_whole_notches(tmp_path):
+    f = tmp_path / "g.json"
+    frac = [{"kind": "wheel", "t": [0, 40], "dy": [57.3, 61.0]} for _ in range(4)]
+    f.write_text(_json.dumps({"gestures": frac}))
+    assert _hz.load_gesture_library(f) is None                 # smooth-scroll "wheel"
+    g = tmp_path / "two-mice.json"
+    hundred = [{"kind": "wheel", "t": [0, 40], "dy": [100, 100]} for _ in range(2)]
+    g.write_text(_json.dumps({"gestures": _MERGED + hundred}))
+    got = _hz.load_gesture_library(g)["wheel"]
+    assert got == _MERGED                                      # the majority notch
+
+
+def test_load_gesture_library_per_device_and_threshold(tmp_path):
+    f = tmp_path / "g.json"
+    f.write_text(_json.dumps({"gestures": _WHEEL + _PAD + _PAD[:1]}))
+    got = _hz.load_gesture_library(f)
+    assert sorted(got) == ["trackpad", "wheel"]
+    assert len(got["wheel"]) == 4 and len(got["trackpad"]) == 4
+    f.write_text(_json.dumps({"gestures": _WHEEL + _PAD[:2]}))
+    import os
+    os.utime(f, (2, 2))
+    assert sorted(_hz.load_gesture_library(f)) == ["wheel"]   # 2 trackpad: dropped
+    f.write_text(_json.dumps({"gestures": _WHEEL[:2]}))
+    os.utime(f, (1, 1))                                        # force a re-read
+    assert _hz.load_gesture_library(f) is None                 # < 3 gestures
+    assert _hz.load_gesture_library(tmp_path / "missing.json") is None
+    (tmp_path / "bad.json").write_text("{nope")
+    assert _hz.load_gesture_library(tmp_path / "bad.json") is None
+
+
+class _WheelPage:
+    def __init__(self):
+        self.mouse = self
+        self.wheels = []
+
+    async def wheel(self, dx, dy):
+        self.wheels.append((dx, dy))
+
+
+def test_scroll_device_is_one_per_session_and_stable():
+    both = {"wheel": _WHEEL, "trackpad": _PAD}
+    picks = {k: _hz.scroll_device_for(both, key=k) for k in
+             (f"acct-{i}" for i in range(40))}
+    assert set(picks.values()) == {"wheel", "trackpad"}       # names spread out
+    assert all(_hz.scroll_device_for(both, key=k) == v for k, v in picks.items())
+    assert _hz.scroll_device_for(both, pinned="trackpad", key="acct-0") == "trackpad"
+    # a pin the library can't serve falls back to what it has
+    assert _hz.scroll_device_for({"wheel": _WHEEL}, pinned="trackpad") == "wheel"
+
+
+async def test_humanized_scroll_replays_installed_library(tmp_path, monkeypatch):
+    f = tmp_path / "gestures.json"
+    f.write_text(_json.dumps({"gestures": _WHEEL + _PAD}))
+    monkeypatch.setenv("VIBATCHIUM_GESTURES", str(f))
+    page = _WheelPage()
+    await _hz.humanized_scroll(page, 0, 240, device="wheel")
+    assert [d for _, d in page.wheels] == [120, 120]
+    page = _WheelPage()
+    await _hz.humanized_scroll(page, 0, 240, device="trackpad")
+    assert len(page.wheels) == 6 and abs(sum(d for _, d in page.wheels) - 240) < 0.05
+
+
+
+async def test_humanized_scroll_returns_the_distance_it_sent(tmp_path, monkeypatch):
+    f = tmp_path / "gestures.json"
+    f.write_text(_json.dumps({"gestures": _WHEEL + _PAD}))
+    monkeypatch.setenv("VIBATCHIUM_GESTURES", str(f))
+    page = _WheelPage()
+    assert await _hz.humanized_scroll(page, 0, 240, device="wheel") == 240
+    page = _WheelPage()
+    sent = await _hz.humanized_scroll(page, 0, -100000, device="wheel")
+    assert sent == sum(d for _, d in page.wheels) and -100000 < sent < 0
+    monkeypatch.setenv("VIBATCHIUM_GESTURES", str(tmp_path / "none.json"))
+    assert await _hz.humanized_scroll(_WheelPage(), 0, 300, duration_ms=160) == 300
+
+def _sin_ok(page):
+    assert len(page.wheels) == 10
+    assert abs(sum(d for _, d in page.wheels) - 300) < 1e-6
+
+
+_ok_pad = {"kind": "trackpad", "t": [0, 16, 32], "dy": [30.0, 10.0, 2.0]}
+_BAD_LIBRARIES = {
+    "nesting-bomb": "[" * 100000 + "]" * 100000,
+    "gestures-not-a-list": _json.dumps({"gestures": 5}),
+    "top-level-list": _json.dumps([_ok_pad] * 3),
+    "trackpad-infinity": '{"gestures": [' + ",".join(
+        [_json.dumps(_ok_pad)] * 2
+        + ['{"kind": "trackpad", "t": [0, 16], "dy": [Infinity, 1.0]}']) + "]}",
+    "nan-t": '{"gestures": [' + ",".join(
+        ['{"kind": "trackpad", "t": [0, NaN, 32], "dy": [30.0, 10.0, 2.0]}'] * 3) + "]}",
+    "t-is-a-string": _json.dumps({"gestures": [{**_ok_pad, "t": "abc"}] * 3}),
+    "t-elements-strings": _json.dumps({"gestures": [{**_ok_pad, "t": ["a", "b", "c"]}] * 3}),
+    "ten-minute-gesture": _json.dumps({"gestures": [
+        {"kind": "wheel", "t": [600000], "dy": [120]}] * 3}),
+    "long-duration": _json.dumps({"gestures": [
+        {"kind": "wheel", "t": [0, 600000], "dy": [120, 120]}] * 3}),
+    "t-goes-backwards": _json.dumps({"gestures": [
+        {**_ok_pad, "t": [0, 32, 16]}] * 3}),
+    "negative-delta": _json.dumps({"gestures": [
+        {**_ok_pad, "dy": [30.0, -10.0, 2.0]}] * 3}),
+    "zero-sum": _json.dumps({"gestures": [
+        {"kind": "wheel", "t": [0, 40], "dy": [0, 0]}] * 3}),
+    "bool-delta": _json.dumps({"gestures": [
+        {**_ok_pad, "dy": [True, 10.0, 2.0]}] * 3}),
+    "length-mismatch": _json.dumps({"gestures": [
+        {**_ok_pad, "dy": [30.0, 10.0]}] * 3}),
+    "too-many-events": _json.dumps({"gestures": [
+        {"kind": "trackpad", "t": [i * 0.5 for i in range(5000)],
+         "dy": [1.0] * 5000}] * 3}),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_BAD_LIBRARIES))
+async def test_bad_library_falls_back_to_sin_curve(tmp_path, monkeypatch, case):
+    f = tmp_path / f"{case}.json"
+    f.write_text(_BAD_LIBRARIES[case])
+    assert _hz.load_gesture_library(f) is None                 # never raises
+    monkeypatch.setenv("VIBATCHIUM_GESTURES", str(f))
+    page = _WheelPage()
+    await _hz.humanized_scroll(page, 0, 300, duration_ms=160, device="trackpad")
+    _sin_ok(page)
+
+
+async def test_wheel_library_of_mostly_zero_deltas_still_replays(tmp_path, monkeypatch):
+    # the median delta here is 0: that used to raise ZeroDivisionError
+    f = tmp_path / "zeros.json"
+    f.write_text(_json.dumps({"gestures": [
+        {"kind": "wheel", "t": [0, 20, 40, 60], "dy": [0, 0, 0, 120]}] * 3}))
+    monkeypatch.setenv("VIBATCHIUM_GESTURES", str(f))
+    page = _WheelPage()
+    await _hz.humanized_scroll(page, 0, 120)
+    assert sum(d for _, d in page.wheels) == 120
+    assert {d for _, d in page.wheels} <= {0, 120}
+
+
+async def test_schedule_failure_falls_back_to_sin_curve(tmp_path, monkeypatch):
+    f = tmp_path / "gestures.json"
+    f.write_text(_json.dumps({"gestures": _WHEEL}))
+    monkeypatch.setenv("VIBATCHIUM_GESTURES", str(f))
+
+    def boom(*a, **k):
+        raise RuntimeError("bad library")
+
+    monkeypatch.setattr(_hz, "gesture_schedule", boom)
+    page = _WheelPage()
+    await _hz.humanized_scroll(page, 0, 300, duration_ms=160)
+    _sin_ok(page)
+
+
+async def test_humanized_scroll_falls_back_to_sin_curve(tmp_path, monkeypatch):
+    monkeypatch.setenv("VIBATCHIUM_GESTURES", str(tmp_path / "none.json"))
+    page = _WheelPage()
+    await _hz.humanized_scroll(page, 0, 300, duration_ms=160)
+    assert len(page.wheels) == 10
+    assert abs(sum(d for _, d in page.wheels) - 300) < 1e-6
+    # exactly the pre-seed events, delta for delta
+    assert page.wheels == [(0, d) for _, d in _hz.sinusoidal_scroll(300, duration_ms=160)]
