@@ -790,9 +790,11 @@ async def test_humanized_click_never_leaves_the_button_held(monkeypatch):
 
 async def test_relaunch_and_revive_drop_a_stale_button_flag(monkeypatch):
     from vibatchium.daemon import backends as _backends
+    from vibatchium.daemon import file_chooser
     from vibatchium.daemon.registry import SessionRegistry
     reg = SessionRegistry()
-    old = types.SimpleNamespace(mode="launch", headless=True, nav_allowlist=None)
+    old = types.SimpleNamespace(mode="launch", headless=True, nav_allowlist=None,
+                                file_chooser=file_chooser.new_state())
     e = SessionEntry(name="s", profile_dir=Path("/tmp/vbtest-ambient"), session=old)
     e.flags["_buttons_down"] = True
     reg._entries["s"] = e

@@ -16,6 +16,7 @@ from patchright.async_api import (
     async_playwright,
 )
 
+from . import file_chooser as _file_chooser
 from . import file_guard as _file_guard
 
 log = logging.getLogger("vibatchium.browser")
@@ -278,6 +279,9 @@ class BrowserSession:
     persona: dict | None = None
     frame_ref: object = None         # patchright.Frame | None
     dialog_policy: dict = field(default_factory=lambda: {"action": "dismiss"})
+    # The `upload --next` arm + its file-chooser interception, on only while
+    # armed (daemon/file_chooser.py).
+    file_chooser: dict = field(default_factory=_file_chooser.new_state)
     downloads: list = field(default_factory=list)
     network: dict = field(default_factory=lambda: {"capturing": False, "events": [], "max": 500})
     # 0.8.0 (Vibium lesson): browser console + log capture via a CDP session.
@@ -823,6 +827,8 @@ async def close_session(session: BrowserSession) -> None:
     # 0.19.4: release the file: guard — in attach mode the user's Chrome
     # outlives the session and must not keep pausing its file: loads.
     await _file_guard.uninstall(session)
+    # A pending `upload --next` arm: settle it (wakes waiters, stops its timer).
+    _file_chooser.abandon(session, "the session closed before a chooser opened")
     try:
         if session.mode == "launch":
             await session.context.close()

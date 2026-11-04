@@ -484,6 +484,39 @@ def register_extra(daemon) -> None:
         await loc.set_input_files(resolved)
         return {"uploaded": files, "to": target}
 
+    @daemon.handler("upload_next")
+    async def _upload_next(d, args):
+        """Arm the next native file chooser of the active page with files
+        (one shot, expiring). Choosers are intercepted only while armed.
+
+        For upload buttons with no <input type=file> in the DOM: arm, then
+        click the button any way you like. Paths pass the same fspolicy check
+        as `upload`, here at arm time."""
+        from . import file_chooser
+        files = args["files"]
+        if isinstance(files, str):
+            files = [files]
+        if not files:
+            raise ValueError("upload_next needs at least one file")
+        resolved = fspolicy.check_upload(files, verb="upload_next")
+        timeout_s = float(args.get("timeout_s", 30))
+        if not 0 < timeout_s <= 600:
+            raise ValueError("timeout_s must be in (0, 600]")
+        s = _session(d)
+        file_chooser.arm(s, files, resolved, timeout_s)
+        await file_chooser.ready(s)       # intercepting before we say "armed"
+        return file_chooser.status(s)
+
+    @daemon.handler("upload_status")
+    async def _upload_status(d, args):
+        """Whether the armed chooser was filled. `wait_s` waits for an armed,
+        not-yet-settled chooser (the click that opens it returns before the
+        chooser event arrives)."""
+        from . import file_chooser
+        s = _session(d)
+        await file_chooser.wait_settled(s, min(float(args.get("wait_s", 0)), 60.0))
+        return file_chooser.status(s)
+
     # ─── dialogs ──────────────────────────────────────────────────────────
 
     @daemon.handler("dialog_policy")

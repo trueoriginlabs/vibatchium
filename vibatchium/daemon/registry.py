@@ -968,7 +968,14 @@ class SessionRegistry:
                 f"attach session {name!r} lost its browser — re-attach with "
                 f"`vb attach` (auto-relaunch only applies to launched sessions)")
         from . import backends as _backends
+        from . import file_chooser as _file_chooser
         from .browser import ensure_nav_guard
+        # A pending `upload --next` arm can't survive the browser it was bound
+        # to: settle it with the reason now (before teardown reports a plain
+        # "page closed"), and hand the state to the new session below so
+        # `upload_status` there says why.
+        _file_chooser.abandon(old, "the browser was relaunched (self-heal) "
+                                   "before a chooser opened; re-arm")
         # Best-effort teardown; bound it so a hung close on a zombie-locked
         # profile dir can't wedge the session worse than the original crash.
         try:
@@ -1001,6 +1008,7 @@ class SessionRegistry:
         if old.nav_allowlist:
             sess.nav_allowlist = old.nav_allowlist
             await ensure_nav_guard(sess)
+        sess.file_chooser = old.file_chooser
         entry.session = sess
         # A `mouse down` held on the dead browser is not held on the new one:
         # drop the flag, or ambient would refuse to move for the session's life.
