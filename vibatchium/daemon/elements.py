@@ -104,6 +104,11 @@ def _strip_quotes(s: str) -> str:
     return s
 
 
+# `button:has-text("Pay now")`, `a:text-is("Cart")`, `li:nth-child(2) a`: a word
+# glued to `:name(`. Visible text with a colon has a space after it.
+_CSS_PSEUDO_FN_RE = re.compile(r"\w:[a-z][a-z-]*\(")
+
+
 def _looks_like_plain_text(target: str) -> bool:
     """Heuristic: should a bare quoted target be treated as visible text?
 
@@ -115,6 +120,7 @@ def _looks_like_plain_text(target: str) -> bool:
     - Starts with a Playwright selector-engine prefix or XPath
     - Contains a word-dot-word pattern (CSS class: `h1.title`, `button.submit`)
     - Contains a word-hash-word pattern (CSS id: `div#main`)
+    - Contains a pseudo-class call (`button:has-text("Pay now")`)
 
     Specifically ALLOWS (text with dots, commas, etc.):
     - "Mr. Smith", "More information...", "Hello, world!"
@@ -127,6 +133,8 @@ def _looks_like_plain_text(target: str) -> bool:
     if any(p in t for p in (" > ", " ~ ", " + ", "[", "]")):
         return False
     if any(t.startswith(p) for p in _PW_SELECTOR_PREFIXES):
+        return False
+    if _CSS_PSEUDO_FN_RE.search(t):
         return False
     if _CSS_CLASS_PATTERN_RE.search(t) or _CSS_ID_PATTERN_RE.search(t):
         return False

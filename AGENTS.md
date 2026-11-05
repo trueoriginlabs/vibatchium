@@ -55,31 +55,19 @@ $VB search "how do bot walls score TLS" -n 10         # find URLs; no browser, n
 Every item below was re-verified against the code in 0.18.7. Field notes that
 turned out to be wrong are marked, because the wrong version circulated first.
 
-### Two locator dialects, split by verb — the biggest time-waster
+### One locator grammar, and one trap left in it
 
-`wait selector` speaks **Playwright syntax only**. vb's `@text:` / `@role:` /
-`@label:` grammar is not decoded there and raises an invalid-selector error.
+`click`, `fill`, `count`, `text` and `wait selector` all take the same targets:
+`@eN`, `@text:` / `@role:` / `@label:`, visible text, Playwright syntax, CSS.
+`wait selector` still ignores `vb frame switch`: it always waits on the main page.
 
-```bash
-vb wait selector "@text:Log in"          # ✗ Unexpected token "@text"
-vb wait selector "text=Log in"           # ✓
-vb wait selector "role=button[name='Log in']"   # ✓
-vb map && vb wait selector @e12          # ✓ routed to wait_ref (bare `e12` ok; `[ref=e12]` is not)
-```
-
-`count` / `click` / `fill` / `text` have the **inverse** trap: a CSS selector
-containing a space and no `[ ] . #` is silently reinterpreted as visible text,
-so it matches nothing and reports no error.
+A plain tag selector with a space and no `[ ] . # >` or `:name(` still reads as
+visible text, so it matches nothing:
 
 ```bash
-vb count "button:has-text('Log in')"     # ✗ becomes a text lookup → 0
-vb count "css=button:has-text('Log in')" # ✓ force the CSS engine
-vb count "@role:button[name=Log in]"     # ✓ or use the semantic grammar
+vb count "main section"     # ✗ a text lookup → 0
+vb count "css=main section" # ✓ force the CSS engine
 ```
-
-**Rule:** prefix raw selectors with `css=` for count/click/fill; never use
-`@prefix:` with `wait selector`. `wait selector` also ignores `vb frame switch`
-— it always waits on the main page.
 
 ### `eval` can wedge a session until the daemon dies
 
@@ -122,14 +110,16 @@ exactly `max_links` results.
 ```bash
 vb --session work observe "accept the cookie banner"   # plan only
 vb --session work act "accept the cookie banner"       # plan + execute
+vb --session work act "fill Email with a@b.co"         # or: select Victoria in State
 ```
 
 The default backend is heuristic: **no API key, no inference**. Inference
 happens only with an explicit `--llm`; having `ANTHROPIC_API_KEY` set changes
 nothing. The matcher is keyword overlap against each element's accessible
-*name*, not semantics — no overlap returns `{"executed":0,"reason":"empty plan"}`.
-It returns a `_durable` locator (`role=button[name="Add to cart"]`) that
-self-heals when the DOM shifts.
+*name*, not semantics. One action per call. No overlap returns
+`{"executed":0,"reason":"empty plan"}`; a step that failed, or a fill with no
+value, returns `executed: 0` and `error`. It returns a `_durable` locator
+(`role=button[name="Add to cart"]`) that self-heals when the DOM shifts.
 
 To disambiguate: `vb candidates "<sel>"` (0-based, max 50) then
 `vb click "<sel>" --index N`. `--index` works on `fill`/`type`/`hover` too.
@@ -184,11 +174,12 @@ cannot hang indefinitely. Only `--wait-until networkidle`, passed
 deliberately, can stall on ad/XHR-heavy pages (and is still capped by
 `--timeout`).
 
-Every `go` also runs a non-tunable ≤5s "body has >100 chars" render gate after
-navigation, so `commit` does not buy a fast return — it usually costs the full
-5s and hands back a barely-rendered page. If a page truly isn't ready, follow
-up with `vb wait selector` / `vb wait text` / `vb expect`, not a weaker
-`wait_until`.
+Every `go` also waits up to 5s after navigation for the page text to stop
+changing, so `commit` does not buy a fast return. This costs about a second on a
+static page. The result says `still_rendering: true` when the 5s ran out first:
+follow up with `vb text --settle`, `vb wait selector` or `vb expect`. A short
+page must hold still for 1.5s, because client-rendered sites show a header, sit
+level for a second, then fill in.
 
 ### A deny that hits the browser by hand too is not a vb bug
 
@@ -226,6 +217,8 @@ ps -eo pid,cmd --no-headers | grep PAT | grep -v ' grep ' | grep -v 'bash -c' | 
 | "This page is all tables/charts" | `$VB extract` flags `structure_loss` → `$VB screenshot --tiles` and read the tile PNGs with your own vision |
 | "What fields does this form have / how do I fill it?" | `$VB detect-forms` — every form's fields with a ready-to-use `locator` each (secrets redacted); pipe a locator into `fill`/`click` |
 | "The upload button has no `<input type=file>` / opens a native file dialog" | `$VB upload --next <file>` then click the button any way (`mouse click x y` keeps it humanized), then `$VB upload --status` → `consumed: true`. See "File choosers" |
+| "Check prices or facts across many sites" | WebSearch or `$VB search` for the URLs, then `$VB explore` each one. Don't guess URLs; a product or article page beats a site's search page |
+| "Fill a form, get a shipping quote, go through a checkout" | `$VB go` → `$VB map` → `fill` / `select` / `check` / `click` → `$VB text --settle` to read the result |
 | "My selector matches several elements" | `$VB candidates <target>` to list them, then `$VB click/fill <target> --index N` |
 | "Just do the action — don't make me name a selector" | `$VB act "<intent>"` (plan + execute); `$VB observe "<intent>"` to preview the plan first |
 | "Log in / submit with stored creds or a TOTP" | `$VB fill @e7 --use-secret <site>:password` — see "Authenticated flows" |
@@ -695,7 +688,7 @@ not a native window.
 
 ## Output
 
-- `explore` → JSON to stdout `{url, title, text, screenshot_path?, screenshot_reason?, status, elapsed_ms, closed}`. **Text-first.** The MCP tool captures a screenshot *only* as a fallback when the page yields no usable text or is walled (`screenshot` = `auto`|`always`|`never`, `min_text_chars` tunes the auto threshold); when it does, the PNG comes back as a viewable image block, not base64. The CLI still screenshots by default, written to `~/.cache/vibatchium/explores/` (no base64 in stdout); `--auto-screenshot` makes the CLI text-first too, `-o <dir>` writes a chosen dir + markdown summary, `--inline-screenshot` returns base64 inline.
+- `explore` → JSON to stdout `{url, title, text, screenshot_path?, screenshot_reason?, status, elapsed_ms, closed, blocked?, hint?, still_rendering?, queued_ms?}`. `blocked: true` means a 401/403/429/503: the text is not the page. **Text-first.** The MCP tool captures a screenshot *only* as a fallback when the page yields no usable text or is walled (`screenshot` = `auto`|`always`|`never`, `min_text_chars` tunes the auto threshold); when it does, the PNG comes back as a viewable image block, not base64. The CLI still screenshots by default, written to `~/.cache/vibatchium/explores/` (no base64 in stdout); `--auto-screenshot` makes the CLI text-first too, `-o <dir>` writes a chosen dir + markdown summary, `--inline-screenshot` returns base64 inline.
 - `research` → per-thread markdown + landing screenshots + `index.md` in `--output-dir`.
 - `screenshot` → PNG via `--path`. `text`/`html`/`content` → stdout. `--tiles` slices a full-page capture into fixed-height (`--tile-height`, default 1024px) PNG tiles written to disk (0600) — returns `{tiles:[paths], count}`, never base64 — for layout-heavy pages a vision-capable agent then reads tile-by-tile. The session's real viewport is used (no exotic fixed width — that's a fingerprint signal). Needs Pillow (the `[annotate]` extra). Output is 1 image pixel per CSS pixel unless the session was started with `--scale N` (see *Retina / 2× captures*), which multiplies every capture path — plain, `--full-page`, `--tiles`, `--annotate` — by N.
 - `extract` → `{markdown, chars, url?, title?, truncated?, structure_loss?, structure_signals?, forms?, forms_hint?}`. Clean Markdown of the page (or a `target` subtree) with boilerplate stripped — the drop-in for "scrape this authenticated page to Markdown" that Crawl4AI/Firecrawl can't reach. Always text, never base64; `max_chars` (default 40000) caps it. Sets `structure_loss` when it had to flatten multi-column tables or drop `<svg>`/`<canvas>` charts — the cue to `screenshot --tiles` and read the tiles with your own vision. Reports `forms` (dropped from markdown) so you know to `map`/`extract_fields` them. `mode` (default `markdown`) also does `links` (deduped `{url,text}`, absolute post-hydration URLs), `assets` (`{url,type,rel?}`, `data:` dropped), and `main` (main-content only via a text-density scorer, whole-page fallback).
@@ -750,11 +743,20 @@ stop/close/delete/proxy/geo — but NOT `session_close_all`/`shutdown`/`clean`).
 The token is resolved client-side (`--lease-token` / `VIBATCHIUM_LEASE`) and
 never read daemon-side. Over MCP it's threaded per-call as the `lease` arg.
 
+**Abandoned agent sessions close themselves.** Agents often leave sessions open,
+and at `VIBATCHIUM_MAX_SESSIONS` every new `go` is refused. A session started over
+MCP (or a `--caps` REST shim) closes after 30 idle minutes
+(`VIBATCHIUM_AGENT_SESSION_IDLE_S`). The profile and its cookies stay, so `go`
+reopens it, but open tabs are gone. CLI and SDK sessions are never closed this
+way, nor are leased, headed or goal-owned sessions, and nothing closes while
+a live view runs.
+
 **Off-budget `explore`.** `vb explore URL` *without* `--session` now runs on a
 throwaway ephemeral session (`_ex-<pid>-<seq>`) counted against a **separate**
 `VIBATCHIUM_MAX_EPHEMERAL` budget — so one-shot lookups never compete with your
 pinned/production sessions for a `VIBATCHIUM_MAX_SESSIONS` slot, and never touch
-`default`. On this no-`--session` lane `--keep-open` is **ignored** (response carries
+`default`. When the lane is full an explore waits for a free slot, up to
+`VIBATCHIUM_EXPLORE_QUEUE_S` (60s), and reports `queued_ms`. On this no-`--session` lane `--keep-open` is **ignored** (response carries
 `keep_open_ignored: true`): the minted `_ex-` name is unaddressable and the slot is
 always reclaimed on return. To keep a page open for follow-up calls, pin an explicit
 `--session` — `explore` *with* a `--session` is unchanged, and since 0.18.13 says so:
@@ -880,6 +882,8 @@ VIBATCHIUM_DEFAULT_HEADLESS=1   # force headless even at an interactive TTY
 VIBATCHIUM_DEFAULT_HEADED=1     # opt a whole daemon back into headed windows
 VIBATCHIUM_MAX_SESSIONS=16      # persistent-session cap (default 8)
 VIBATCHIUM_MAX_EPHEMERAL=4      # off-budget one-shot lane cap (default 4; 0 disables explore's lane)
+VIBATCHIUM_AGENT_SESSION_IDLE_S=1800 # close a session an MCP agent started after this long idle (0 = never); profile stays, CLI/SDK sessions never touched
+VIBATCHIUM_EXPLORE_QUEUE_S=60   # how long an explore waits for a free one-shot slot before it is refused (0 = refuse at once)
 VIBATCHIUM_SELF_HEAL=0          # disable Chrome crash auto-recovery (fail loudly)
 VIBATCHIUM_LEASE=<token>        # client-side lease token presented on every call
 VIBATCHIUM_LOG_VERBS=1          # per-verb DEBUG audit trail
@@ -931,6 +935,8 @@ VIBATCHIUM_FILE_ROOTS=<a>:<b>   # daemon env: every caller path must resolve ins
 > Enable `VIBATCHIUM_DAEMON_IDLE_TIMEOUT` on dogfood/isolated daemons so a stray
 > one-shot daemon self-reaps; leave it off (default) for long-lived bot daemons.
 
+**MCP output limits.** `text`, `html`, `map`, `map_compact` and `explore` return at most 40,000 characters over MCP, with `truncated: true` and `total_chars`; pass `max_chars` for more. The CLI is uncapped.
+
 **MCP tool surface (0.8.0).** `vb mcp` exposes the **lean** profile (89 verbs — the 80%-case: browse, extract, interact, screenshot, tabs, multi-session, the agent loop incl. `explore`/`expect`) by default, not all 165. Pass `vb mcp --caps=full` (or `all`) for everything, or a custom bucket CSV. The long tail (network, devtools incl. `console_*`, secrets, safety, liveview, goals, storage, **and plugin `x.*` verbs**) is one re-registration away — note the lean default also hides dotted plugin verbs, so pass `--caps=full` or `--caps=lean,plugins` if an agent needs them over MCP.
 
 **`--caps min` — for clients without tool search.** Claude Code defers MCP tools
@@ -938,8 +944,8 @@ behind tool search, so `lean` costs it little. A client that loads every schema
 on every turn pays for all 89 — about 75 KB, ~18.6k tokens of `tools/list`
 (`full`: 165 tools, ~135 KB, ~33.7k). `vb mcp --caps min` (or `vb setup --caps
 min`) exposes 12 tools in ~15 KB, ~3.8k tokens: `explore`, `go`, `extract`,
-`screenshot`, `act`, `map`, `click`, `fill`, `press`, `expect`, `session_close`
-and the always-on `status`. That covers reading a walled page and a short
+`screenshot`, `text`, `map_compact`, `click`, `fill`, `press`, `expect`,
+`session_close` and the always-on `status`. That covers reading a walled page and a short
 form or search flow. `go` auto-starts the session, `expect` does the waiting, and
 `session_close` gives the Chrome back. Each verb's reason is in `caps.py`.
 `min` composes like a bucket (`--caps min,search`), works on a `--caps`

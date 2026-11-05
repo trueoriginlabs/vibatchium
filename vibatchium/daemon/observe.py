@@ -91,17 +91,27 @@ _INTENT_VERB_HINTS = [
     ("check", {"check", "tick", "enable"}),
     ("uncheck", {"uncheck", "untick", "disable"}),
 ]
+_PICK_WORDS = {"select", "choose", "pick"}
+_DROPDOWN_ROLES = {"combobox", "listbox"}
+
+
+def _has_word(text: str, word: str) -> bool:
+    # Whole words: "uncheck" must not read as "check", nor "checkout" as "check".
+    return re.search(rf"\b{re.escape(word)}(?:s|ed|ing)?\b", text) is not None
 
 
 def infer_verb(intent: str, role: str | None = None) -> str:
     intent_l = intent.lower()
     for verb, hints in _INTENT_VERB_HINTS:
-        if any(h in intent_l for h in hints):
+        if any(_has_word(intent_l, h) for h in hints):
             # role guards: don't `fill` a button, don't `click` a textbox
             if verb == "fill" and role in {"button", "link"}:
                 continue
             if verb == "click" and role == "textbox":
                 continue
+            if (verb == "click" and role in _DROPDOWN_ROLES | {"option"}
+                    and any(_has_word(intent_l, w) for w in _PICK_WORDS)):
+                return "select"
             return verb
     if role == "textbox":
         return "fill"
@@ -159,20 +169,52 @@ def heuristic_plan(intent: str, entries: list[SnapEntry]) -> list[dict]:
     if durable:
         step["_durable"] = durable
     if verb == "fill":
-        # extract "type X" / "fill X with Y" tail as the value. Two-pass:
-        # 1. "fill X with Y" / "fill X into Y" → Y
-        # 2. tail-only: "type|fill|enter|input|write <Y>"
-        m = re.search(r"(?:fill|type|enter|input|write)\s+\S+\s+with\s+[\"']?([^\"']+?)[\"']?\s*$",
-                      intent, re.I)
-        if not m:
-            m = re.search(r"(?:type|fill|enter|input|write)\s+[\"']?([^\"']+?)[\"']?\s+(?:in|into)\s+",
-                          intent, re.I)
-        if not m:
-            m = re.search(r"(?:type|fill|enter|input|write)\s+(?:in\s+|into\s+)?[\"']?([^\"']+?)[\"']?\s*$",
-                          intent, re.I)
-        if m:
-            step["text"] = m.group(1).strip()
+        value = _fill_value(intent, best)
+        if value:
+            step["text"] = value
+    elif verb == "select":
+        if best.role == "option":
+            # The option itself matched: the choice is its name, and the
+            # control is the dropdown above it in the snapshot.
+            step["text"] = best.name
+            owner = next((e for e in reversed(entries[:entries.index(best)])
+                          if e.role in _DROPDOWN_ROLES), None)
+            if owner is None:
+                step["verb"] = "click"
+            else:
+                step["target"] = owner.ref
+                step["_role"], step["_name"] = owner.role, owner.name
+                step["_durable"] = build_durable_selector(owner.role, owner.name)
+        else:
+            m = re.search(r"(?:select|choose|pick)\s+[\"']?(.+?)[\"']?"
+                          r"(?:\s+(?:in|from|for|as|on)\s+.*)?$", intent, re.I)
+            if m:
+                step["text"] = m.group(1).strip()
     return [step]
+
+
+_FILL_VERBS = r"(?:fill|type|enter|input|write)"
+_FIELD_WORDS = {"field", "box", "input", "form", "textbox", "text"}
+
+
+def _fill_value(intent: str, entry: SnapEntry) -> str | None:
+    """The text to enter, or None if the intent doesn't give one.
+
+    "fill the email field with x" -> x, "type x into the email field" -> x,
+    "type x" -> x. "fill the email field" names only the field: the value must
+    not become the field's own description.
+    """
+    m = (re.search(rf"\b{_FILL_VERBS}\b.*?\bwith\s+[\"']?(.+?)[\"']?\s*$", intent, re.I)
+         or re.search(rf"\b{_FILL_VERBS}\s+[\"']?(.+?)[\"']?\s+(?:in|into)\s+", intent, re.I))
+    if m:
+        return m.group(1).strip()
+    m = re.search(rf"\b{_FILL_VERBS}\s+(?:in\s+|into\s+)?[\"']?(.+?)[\"']?\s*$", intent, re.I)
+    if not m:
+        return None
+    value = m.group(1).strip()
+    if _intent_tokens(value) <= entry.tokens | _FIELD_WORDS:
+        return None
+    return value
 
 
 # ─── self-healing selector derivation (Wave 5.3) ─────────────────────────
@@ -326,9 +368,14 @@ def _normalize_url(url: str) -> str:
         return url
 
 
+# Bump when plans change shape or meaning, so cached ones stop being replayed.
+# v2: a fill value used to include the field's own name.
+_PLAN_VERSION = 2
+
+
 def _cache_key(url: str, intent: str) -> str:
     return hashlib.sha256(
-        f"{_normalize_url(url)}\n{intent}".encode()).hexdigest()[:16]
+        f"v{_PLAN_VERSION}\n{_normalize_url(url)}\n{intent}".encode()).hexdigest()[:16]
 
 
 def cache_load() -> dict:

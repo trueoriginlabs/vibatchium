@@ -19,7 +19,7 @@ import pytest
 from vibatchium import caps as C
 from vibatchium import mcp_server as M
 
-MIN_TOOLS = {"explore", "go", "extract", "screenshot", "act", "map", "click",
+MIN_TOOLS = {"explore", "go", "extract", "screenshot", "text", "map_compact", "click",
              "fill", "press", "expect", "session_close", "status"}
 
 

@@ -35,6 +35,7 @@ import time
 from typing import Any
 from collections.abc import Awaitable, Callable
 
+from .action_errors import explain_action_timeout
 from . import handlers, handlers_extra
 from . import lease as _lease
 from .. import fspolicy as _fspolicy
@@ -46,7 +47,7 @@ from .paths import (
 from . import ambient as _ambient
 from . import freeze as _freeze
 from .registry import (SessionEntry, SessionRegistry, current_session_ctx,
-                       session_explicit_ctx)
+                       get_agent_session_idle_s, session_explicit_ctx)
 
 log = logging.getLogger("vibatchium.server")
 
@@ -666,8 +667,8 @@ class Daemon:
                         return {
                             "id": req_id, "ok": False,
                             "error": f"no session {session_name!r} — "
-                                     f"run `vb start"
-                                     f"{' --session ' + session_name if session_name != DEFAULT_SESSION_NAME else ''}` first",
+                                     f"start one with `go` and a URL, or `vb start"
+                                     f"{' --session ' + session_name if session_name != DEFAULT_SESSION_NAME else ''}`",
                         }
                 else:
                     # Per-goal caps enforcement (D5): while a goal owns this
@@ -761,6 +762,9 @@ class Daemon:
             # "use vb show" guidance isn't buried behind a type name.
             if isinstance(exc, (SessionNotStarted, HeadedNoDisplayError)):
                 return {"id": req_id, "ok": False, "error": str(exc)}
+            reason = explain_action_timeout(exc)
+            if reason:
+                return {"id": req_id, "ok": False, "error": f"TimeoutError: {reason}"}
             return {"id": req_id, "ok": False, "error": f"{type(exc).__name__}: {exc}"}
         finally:
             if hooked:
@@ -1099,6 +1103,46 @@ class Daemon:
                          "(%d renderer(s), idle %.0fs)", name, fresh, idle_for)
             return fresh
 
+    async def _agent_session_reaper(self) -> None:
+        """Close sessions an agent surface started and then left. Only those:
+        CLI and SDK sessions belong to bots and people, whose idle gaps mean
+        nothing. Same out-of-wait-set contract as the reaper above."""
+        after = get_agent_session_idle_s()
+        if after <= 0:
+            return
+        poll = min(60.0, max(1.0, after / 4))
+        while not self._stopping.is_set():
+            await asyncio.sleep(poll)
+            for name in self.registry.list_running():
+                try:
+                    await self._close_if_abandoned(name, after)
+                except Exception:  # noqa: BLE001 — never kill the loop
+                    log.exception("agent-session reap failed session=%s", name)
+
+    def _is_abandoned(self, name: str, after: float) -> bool:
+        entry = self.registry.peek(name)
+        if entry is None or not entry.flags.get("agent_started") or entry.ephemeral:
+            return False
+        sess = entry.session
+        # A headed window or attached browser has a person on the other side,
+        # and so may a live view.
+        if (getattr(sess, "mode", None) != "launch"
+                or not getattr(sess, "headless", False)
+                or getattr(self, "_liveview_server", None) is not None
+                or entry.lease_active() is not None):
+            return False
+        return (time.time() - entry.last_used_at >= after
+                and not entry.lock.locked() and entry.inflight == 0)
+
+    async def _close_if_abandoned(self, name: str, after: float) -> None:
+        if not self._is_abandoned(name, after):
+            return
+        async with self.registry.mutate_lock:
+            if self._is_abandoned(name, after):   # a verb may have just landed
+                await self.registry.close(name)
+                log.info("closed abandoned agent session=%s (idle over %.0fs)",
+                         name, after)
+
     async def run(self) -> None:
         # 0.9.1: race-free singleton — hold an exclusive flock for life.
         if not self._acquire_singleton_lock():
@@ -1153,11 +1197,12 @@ class Daemon:
         # 0.16.0: idle-freeze poll loop — same out-of-wait-set contract
         # as the reaper (returns immediately when disabled).
         freezer = asyncio.create_task(self._idle_freezer())
+        agent_reaper = asyncio.create_task(self._agent_session_reaper())
         watchdog = asyncio.create_task(self._path_watchdog())
         try:
             await stopper
         finally:
-            for t in (stopper, reaper, freezer, watchdog):
+            for t in (stopper, reaper, freezer, agent_reaper, watchdog):
                 t.cancel()
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await t

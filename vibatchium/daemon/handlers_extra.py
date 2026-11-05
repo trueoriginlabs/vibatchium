@@ -841,8 +841,20 @@ def register_extra(daemon) -> None:
         capture_body = bool(args.get("body", False))
         max_body = int(args.get("max_body", 1_000_000))
 
-        # page.wait_for_response accepts a string (substring) or regex source
-        resp = await s.page.wait_for_response(pattern, timeout=timeout)
+        # Substring of the URL, or a regex. The response has to arrive after
+        # this call starts, so start it before the click that triggers it: the
+        # verb is unlocked so that click can run while this waits.
+        try:
+            rx = re.compile(pattern)
+        except re.error:
+            rx = None
+
+        def matches(r) -> bool:
+            return pattern in r.url or (rx is not None and rx.search(r.url) is not None)
+
+        async with s.page.expect_response(matches, timeout=timeout) as info:
+            pass
+        resp = await info.value
         out = {
             "url": resp.url,
             "status": resp.status,
@@ -1960,8 +1972,15 @@ def register_extra(daemon) -> None:
             """
             verb = step["verb"]
             base_args = {"target": step["target"]}
-            if verb == "fill" and "text" in step:
+            if verb == "fill":
+                if "text" not in step:
+                    raise ValueError("the intent names a field but no value: "
+                                     "say `fill <field> with <value>`")
                 base_args["text"] = step["text"]
+            elif verb == "select":
+                if "text" not in step:
+                    raise ValueError("the intent names no option to select")
+                base_args["label"] = step["text"]
             if prefer_durable:
                 durable = step.get("_durable")
                 if not durable:
@@ -2020,14 +2039,18 @@ def register_extra(daemon) -> None:
             cache_status = "stale"      # hit, but the plan no longer fit
         else:
             cache_status = "hit"
-        return {
-            "executed": len(executed),
+        failed = next((e["error"] for e in executed if "error" in e), None)
+        out = {
+            "executed": sum("error" not in e for e in executed),
             "intent": intent,
             "source": result.get("source"),
             "self_healed": self_healed,
             "cache_status": cache_status,
             "steps": executed,
         }
+        if failed:
+            out["error"] = failed
+        return out
 
     # ─── Wave 6.1a: live-view server ─────────────────────────────────────
 

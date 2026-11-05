@@ -29,7 +29,7 @@ def _list(caps, monkeypatch):
 def test_core_set_is_small():
     """Each always-loaded schema costs context on every turn."""
     assert 1 <= len(mcp_server._ALWAYS_LOAD) <= 6
-    assert set(mcp_server._ALWAYS_LOAD) == {"explore", "go", "extract", "screenshot", "act"}
+    assert set(mcp_server._ALWAYS_LOAD) == {"explore", "go", "extract", "screenshot", "text"}
 
 
 def test_core_set_exists_in_the_lean_default(monkeypatch):

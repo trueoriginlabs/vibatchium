@@ -170,11 +170,19 @@ TOOLS: list[tuple[str, str, dict, str, Any]] = [
     ("url", "Get current URL.", {"type": "object", "properties": {}}, "url", None),
     ("title", "Get current page title.",
      {"type": "object", "properties": {}}, "title", None),
-    ("text", "Get inner text (whole page or a target — @eN, @text:Foo, @label:Email, CSS, etc.).",
-     {"type": "object", "properties": {"target": _str("Optional @eN / @text: / @label: / CSS.")}},
+    ("text", "Get inner text (whole page or a target — @eN, @text:Foo, @label:Email, CSS, etc.). "
+             "After a click or form step, pass settle=true: it waits for the page to "
+             "stop changing, then reads, and returns the url too. Use that instead of "
+             "a timed wait in page script.",
+     {"type": "object", "properties": {
+         "target": _str("Optional @eN / @text: / @label: / CSS."),
+         "settle": _bool("Wait up to 5s for the page text to stop changing first.", False),
+         "max_chars": _int("Cap the returned text.", 40_000)}},
      "text", None),
     ("html", "Get HTML (whole page or a target — @eN, @text:Foo, @label:Email, CSS, etc.).",
-     {"type": "object", "properties": {"target": _str("Optional @eN / @text: / @label: / CSS.")}},
+     {"type": "object", "properties": {
+         "target": _str("Optional @eN / @text: / @label: / CSS."),
+         "max_chars": _int("Cap the returned HTML.", 40_000)}},
      "html", None),
     ("extract",
      "Clean, LLM-ready Markdown of the page (or a target subtree) — boilerplate "
@@ -260,13 +268,16 @@ TOOLS: list[tuple[str, str, dict, str, Any]] = [
      {"type": "object", "properties": {
          "indent": _bool("Preserve YAML indent.", True),
          "depth": _int("Limit snapshot depth."),
+         "max_chars": _int("Cap the returned snapshot.", 40_000),
      }},
      "map", None),
     ("diff_map", "Diff current snapshot vs the previous one.",
      {"type": "object", "properties": {}}, "diff_map", None),
-    ("click", "Click an @eN ref or CSS selector.",
+    ("click", "Click an element. Target: an @eN ref from map_compact, visible text "
+              "(`Add to cart`), @text: / @label: / @role:button[name=Pay], or a CSS selector. "
+              "If the page covers or disables the target the error says what is in the way.",
      {"type": "object",
-      "properties": {"target": _str("@eN ref or selector."),
+      "properties": {"target": _str("@eN ref, visible text, @text:/@label:/@role:, or CSS."),
                      "timeout_ms": _int("Timeout in ms.", 30_000),
                      "index": _int("Act on the Nth match (0-based, document order) when the target matches several elements."),
                      "auto_dismiss_banners": _bool(
@@ -287,7 +298,8 @@ TOOLS: list[tuple[str, str, dict, str, Any]] = [
                      "timeout_ms": _int("Timeout in ms.", 30_000)},
       "required": ["target"]},
      "focus", None),
-    ("select", "Pick option(s) on a <select>; choose by value/label/index.",
+    ("select", "Pick an option on a <select> by value/label/index. Also works on a custom "
+               "dropdown: pass the button that opens it and the option's label.",
      {"type": "object",
       "properties": {"target": _str("@eN or selector for the <select>."),
                      "value": _str("Option value attribute."),
@@ -307,7 +319,8 @@ TOOLS: list[tuple[str, str, dict, str, Any]] = [
                      "timeout_ms": _int("Timeout in ms.", 30_000)},
       "required": ["target"]},
      "fill", None),
-    ("type", "Type text (key-by-key) into an element.",
+    ("type", "Type text key by key into an element. Use this rather than fill when the "
+             "field offers suggestions as you type, such as an address box.",
      {"type": "object",
       "properties": {"target": _str("@eN ref or selector."),
                      "text": _str("Text to type."),
@@ -374,9 +387,9 @@ TOOLS: list[tuple[str, str, dict, str, Any]] = [
      "storage_restore", None),
     ("cookies", "List current cookies.",
      {"type": "object", "properties": {}}, "cookies", None),
-    ("wait_selector", "Wait until a CSS selector reaches a state.",
+    ("wait_selector", "Wait until an element reaches a state. Takes the same targets as click.",
      {"type": "object",
-      "properties": {"selector": _str("CSS selector."),
+      "properties": {"selector": _str("@eN ref, visible text, @text:/@label:/@role:, or CSS."),
                      "state": _str("visible|hidden|attached|detached"),
                      "timeout_ms": _int("Timeout in ms.", 30_000)},
       "required": ["selector"]},
@@ -648,6 +661,7 @@ TOOLS: list[tuple[str, str, dict, str, Any]] = [
          "depth": _int("Limit snapshot depth."),
          "interactive": _bool("Only actionable roles (button/link/textbox/checkbox/…).", False),
          "bbox": _bool("Append real-Chrome bounding-box coords per element.", False),
+         "max_chars": _int("Cap the returned snapshot.", 40_000),
      }},
      "map_compact", None),
     ("observe", "Plan a verb + target for an intent without executing.",
@@ -657,9 +671,12 @@ TOOLS: list[tuple[str, str, dict, str, Any]] = [
                      "force": _bool("Bypass cache.", False)},
       "required": ["intent"]},
      "observe", None),
-    ("act", "Plan the action for a natural-language intent and execute it in one shot.",
+    ("act", "Do one action from a short instruction, without naming a selector. It matches "
+            "the words against element names, with no reasoning, so use the page's own "
+            "wording: `click Add to cart`, `fill Email with a@b.co`, `select Victoria in "
+            "State`, `tick Accept terms`. One action per call. Check `executed` and `error`.",
      {"type": "object",
-      "properties": {"intent": _str("Natural-language intent."),
+      "properties": {"intent": _str("One action in the page's own words."),
                      "llm": _bool("Use Claude.", False)},
       "required": ["intent"]},
      "act", None),
@@ -1255,7 +1272,28 @@ Concurrency: this daemon may be SHARED with other agents. A one-shot lookup (exp
 
 Entry points (this server's current tool surface):
 """
-    return head + "\n".join(entries) + "\n(Other verbs may exist behind opt-in caps.)"
+    return (head + "\n".join(entries) + _workflow_notes(exposed)
+            + "\n(Other verbs may exist behind opt-in caps.)")
+
+
+def _workflow_notes(exposed: set[str]) -> str:
+    """How to combine the tools, for the ones this surface has. Both notes come
+    from clean-agent runs: agents chose vb without help, then lost time here."""
+    notes = ""
+    if "explore" in exposed:
+        notes += ("\n\nCovering many sites: find the URLs with WebSearch first, then "
+                  "explore each one. Don't guess URLs, and prefer a product or article "
+                  "page over a site's own search page. On 8 retailers that found 6 prices; "
+                  "guessing URLs found 3, and WebFetch alone 3. Parallel explores are fine: "
+                  "extra ones wait for a free slot.")
+    if {"go", "map_compact", "fill", "click", "text", "session_close"} <= exposed:
+        steps = " / ".join(v for v in ("fill", "select", "check", "click") if v in exposed)
+        notes += (f"\n\nForms and checkouts: go(url), map_compact for refs, then {steps}, "
+                  "passing one `session` throughout. After each step "
+                  "read with text(settle=true) rather than a timed wait in page script. Stop before "
+                  "anything the user hasn't approved, such as paying or accepting terms. "
+                  "Finish with session_close: open sessions count against a shared cap.")
+    return notes
 
 
 # Default-surface text (no caps filter → full surface) for the Server() ctor /
@@ -1421,10 +1459,11 @@ def _annotations_for(name: str):
 #   explore     — the one-call entry point; the 80% case on its own.
 #   go, extract — navigate + LLM-ready Markdown: the stateful read loop.
 #   screenshot  — the fallback when extract flags structure_loss (tiles=true).
-#   act         — interact by intent without first learning the selector verbs.
-# Deliberately not here: `text` (extract supersedes it) and `click`/`fill`
-# (act covers the common case; the long tail is one search away).
-_ALWAYS_LOAD = ("explore", "go", "extract", "screenshot", "act")
+#   text        — settle=true, the wait-then-read step after every action.
+# Deliberately not here: `click`/`fill` (one search away, and every checkout
+# run found them), and `act`. It was always loaded until 2026-11-05 and was
+# called 0 times in 232 real MCP calls and in 12 clean-agent runs.
+_ALWAYS_LOAD = ("explore", "go", "extract", "screenshot", "text")
 _ALWAYS_LOAD_META = {"anthropic/alwaysLoad": True}
 
 
@@ -1549,13 +1588,44 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.Content]
     if not daemon_is_running():
         spawn_daemon()
 
+    max_chars = args.pop("max_chars", None) if cmd in _TRIMMED_FIELD else None
     try:
-        result = await asyncio.to_thread(daemon_call, cmd, args,
-                                         session=session, lease=lease)
+        result = await asyncio.to_thread(daemon_call, cmd, args, session=session,
+                                         lease=lease, **_call_options(cmd))
     except Exception as exc:  # noqa: BLE001
         return _err(f"error: {type(exc).__name__}: {exc}")
 
+    _trim_result(cmd, result, max_chars)
     return _result_to_content(result)
+
+
+# Verbs that can return a whole page, and the field that holds it. An agent's
+# context is the budget here: a long page took `map` to 940 KB. The CLI stays
+# uncapped, since there a pipe to grep or a file is the usual reader.
+_TRIMMED_FIELD = {"text": "text", "html": "html", "map": "text",
+                  "map_compact": "text", "explore": "text"}
+_DEFAULT_MAX_CHARS = 40_000
+
+
+def _trim_result(cmd: str, result: Any, max_chars: int | None) -> None:
+    field = _TRIMMED_FIELD.get(cmd)
+    if field is None or not isinstance(result, dict):
+        return
+    value = result.get(field)
+    limit = max_chars or _DEFAULT_MAX_CHARS
+    if not isinstance(value, str) or len(value) <= limit:
+        return
+    result[field] = value[:limit]
+    result["truncated"] = True
+    result["total_chars"] = len(value)
+    result["truncated_note"] = (
+        f"Showing the first {limit} of {len(value)} characters. Narrow it with "
+        f"`target` or `interactive`, use `extract`, or raise `max_chars`.")
+
+
+def _call_options(cmd: str) -> dict:
+    # An explore can wait 60s for a slot and then 60s on the navigation.
+    return {"timeout": 240.0} if cmd == "explore" else {}
 
 
 def _result_to_content(result: Any) -> list[types.Content]:

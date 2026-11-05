@@ -527,15 +527,12 @@ def test_skill_prefers_act_and_says_no_api_key_needed():
     assert "no API key" in md
 
 
-def test_skill_documents_selector_grammar_and_the_wait_exception():
-    """@text:/@label:/@role: resolve for click/fill/count but NOT for
-    `wait selector`, which errors 'Unsupported token'. Verified against
-    handlers._wait_selector, which bypasses elements.resolve_target."""
+def test_skill_documents_selector_grammar():
+    """One grammar across verbs, `wait selector` included."""
     md = setup_cmd._skill_md("/x/vb")
     for form in ("@text:", "@label:", "@role:button"):
         assert form in md
-    assert "wait selector` does NOT accept" in md
-    assert "text=" in md, "must give the Playwright form that does work"
+    assert "`wait selector` takes all of these too" in md
 
 
 def test_skill_covers_typing_not_just_clicking():

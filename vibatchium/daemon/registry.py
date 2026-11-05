@@ -141,6 +141,25 @@ def get_max_ephemeral() -> int:
         return 4
 
 
+def get_explore_queue_s() -> float:
+    """How long an explore waits for a free one-shot slot before it is refused
+    (VIBATCHIUM_EXPLORE_QUEUE_S, default 60; 0 refuses at once)."""
+    try:
+        return max(0.0, float(os.environ.get("VIBATCHIUM_EXPLORE_QUEUE_S", "60")))
+    except ValueError:
+        return 60.0
+
+
+def get_agent_session_idle_s() -> float:
+    """Idle seconds before a session an agent surface started is closed
+    (VIBATCHIUM_AGENT_SESSION_IDLE_S, default 1800; 0 disables). Agents often
+    don't close what they open, and leaked sessions fill MAX_SESSIONS."""
+    try:
+        return max(0.0, float(os.environ.get("VIBATCHIUM_AGENT_SESSION_IDLE_S", "1800")))
+    except ValueError:
+        return 1800.0
+
+
 def get_session_ram_floor_mb() -> int:
     """0.12.0: opt-in memory admission floor (MB). When > 0, create() refuses a
     NEW cold Chrome launch if /proc/meminfo MemAvailable is below it — a portable
@@ -719,7 +738,7 @@ class SessionRegistry:
                 raise SessionLimitError(
                     f"VIBATCHIUM_MAX_SESSIONS={cap} reached "
                     f"({used} persistent sessions running). Close one with "
-                    f"`vb session close <name>`, raise the cap, or run one-shot "
+                    f"`session_close` (`vb session close <name>`), raise the cap, or run one-shot "
                     f"work via `vb explore` (off-budget ephemeral lane)."
                 )
         pdir = profile_dir if profile_dir is not None else session_dir(name)

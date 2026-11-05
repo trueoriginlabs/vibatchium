@@ -6,6 +6,48 @@ minor bumps may include breaking changes; we'll always call them out here.
 
 ## [Unreleased]
 
+### fix: agents no longer stop on half-read pages, silent failures or refusals
+
+Found by running clean agents on real shops and driving the MCP server by hand.
+
+- **`go` and `explore` read client-rendered pages too early.** They stopped
+  waiting at 100 characters, which a site header passes: Myer's search page read
+  126 characters, then 5,069 three seconds later, with status 200 and no warning,
+  and an agent reported "no results". They now wait for the text to stop
+  changing, up to 5s, and say `still_rendering: true` if time ran out. This adds
+  about a second to a static page; `wait_for_render=False` opts out.
+- **`explore` queues when the one-shot lane is full** instead of refusing, for up
+  to `VIBATCHIUM_EXPLORE_QUEUE_S` (60s), and reports `queued_ms`.
+- **`vb wait-response` always crashed**: it called a method Playwright doesn't
+  have. It now works; start it before the click it is waiting for.
+- **Failed clicks say why, on one line**: what covers the target, that it's
+  disabled, hidden or missing. The full log stays in the daemon log. Before, the
+  reason sat in a 27-line log ending in a blank line, so `| tail -1` showed nothing.
+- **Refusals are flagged.** `go` and `explore` return `blocked: true` and a `hint`
+  on 401, 403, 429 and 503. An HTTP error with an empty body gets a plain error.
+- **`act` entered the wrong text.** "fill the email field with a@b.co" typed "the
+  email field with a@b.co" and reported success. "uncheck" matched "check", and
+  "select X in Y" clicked instead of selecting. A step that fails no longer counts
+  as `executed`, and cached plans from the old planner are ignored.
+- **One target grammar.** `wait selector` takes `@text:`, `@role:`, visible text
+  and refs like `click`. `button:has-text("Pay")` and other pseudo-class selectors
+  with a space are CSS now, not a visible-text lookup.
+- **MCP:** whole-page results are capped at 40,000 characters (`max_chars` raises
+  it). `map` reached 940 KB on a long page. `map_compact`, `click`, `fill` and
+  `text` load up front in place of `act`, which no agent called. The server
+  instructions now cover finding URLs before reading them, the form loop, and
+  closing sessions.
+- `vb text --settle` (MCP `settle=true`) waits for the page to stop changing, then
+  reads it, in place of `eval` with `setTimeout`.
+- `select` works on custom dropdowns (a button that opens a list): pass the
+  button and the option's label.
+- `back`, `forward` and `reload` wait for the page text to settle too.
+- Sessions started over MCP close after 30 idle minutes
+  (`VIBATCHIUM_AGENT_SESSION_IDLE_S`, 0 disables), because agents left them open
+  and a full daemon refuses every new `go`. The profile stays. CLI and SDK sessions
+  are never touched, nor are leased, headed or goal-owned ones.
+- `vb press Escape` presses on the page. `vb screenshot out.png` and `--path` work.
+
 ### feat: `vb upload --next` fills native file choosers
 
 `vb upload TARGET FILES` needs an `<input type=file>` in the DOM. Upload
