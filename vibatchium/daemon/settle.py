@@ -13,16 +13,29 @@ from __future__ import annotations
 import asyncio
 import time
 
-_TEXT_LEN_JS = "document.body ? document.body.innerText.trim().length : 0"
-
-QUIET_S_LONG = 0.8       # page already has plenty of text
-QUIET_S_SHORT = 1.5      # short page: more likely to be a shell still loading
+QUIET_MS_LONG = 800      # page already has plenty of text
+QUIET_MS_SHORT = 1500    # short page: more likely to be a shell still loading
 LONG_PAGE_CHARS = 3000
-POLL_S = 0.2
+POLL_MS = 200
 # A request older than this stops counting as "still loading". Analytics and
 # long polls stay open forever, and would otherwise hold every page to the cap.
 YOUNG_REQUEST_S = 1.5
 _DATA_REQUESTS = ("xhr", "fetch", "document")
+
+# Polls inside the page, in one call. Every evaluate from the driver hands the
+# page a user activation (Playwright sends userGesture), so polling from Python
+# would keep pages "activated" for the whole wait, letting them open popups and
+# file dialogs. `s` keeps its state between polls: Playwright reuses the arg.
+_STILL_JS = """(s) => {
+  const n = document.body ? document.body.innerText.trim().length : 0;
+  const now = performance.now();
+  if (s.last == null || Math.abs(n - s.last) > Math.max(20, s.last * 0.01)) {
+    s.last = n;
+    s.since = now;
+  }
+  const quiet = s.last >= s.longPage ? s.quietLong : s.quietShort;
+  return s.last > s.minChars && now - s.since >= quiet;
+}"""
 
 
 class RequestWatch:
@@ -56,35 +69,23 @@ class RequestWatch:
 
 
 async def wait_settled(page, *, cap_ms: int = 5000, min_chars: int = 100,
-                       watch: RequestWatch | None = None) -> dict:
-    """Return once the page has at least `min_chars` of text and it has held
-    still, or at `cap_ms`. Never raises: an empty page, a navigation in
-    progress or a starved renderer just use up the time.
-
-    Returns {"settled": bool, "chars": int}. `settled` False means the cap was
-    reached, so the caller should say the page may still be rendering.
+                       watch: RequestWatch | None = None) -> bool:
+    """True once the page has more than `min_chars` of text and it has held
+    still. False at `cap_ms`, so the caller should say the page may still be
+    rendering. Never raises: an empty page, a navigation in progress or a
+    starved renderer just use up the time.
     """
     deadline = time.monotonic() + cap_ms / 1000
-    last: int | None = None
-    still_since = time.monotonic()
-    while True:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            return {"settled": False, "chars": last or 0}
+    while (remaining := deadline - time.monotonic()) > 0:
+        state = {"minChars": min_chars, "longPage": LONG_PAGE_CHARS,
+                 "quietLong": QUIET_MS_LONG, "quietShort": QUIET_MS_SHORT}
         try:
-            # evaluate has no timeout of its own, and a busy page can starve it.
-            chars = await asyncio.wait_for(page.evaluate(_TEXT_LEN_JS),
-                                           timeout=min(remaining, 1.0))
-        except Exception:  # noqa: BLE001 — navigating, closed or starved
-            chars = None
-        now = time.monotonic()
-        moved = (chars is None or last is None
-                 or abs(chars - last) > max(20, last * 0.01))
-        if chars is not None and moved:
-            last = chars
-        if moved or (watch is not None and watch.busy()):
-            still_since = now
-        quiet = QUIET_S_LONG if (last or 0) >= LONG_PAGE_CHARS else QUIET_S_SHORT
-        if (last or 0) > min_chars and now - still_since >= quiet:
-            return {"settled": True, "chars": last}
-        await asyncio.sleep(POLL_S)
+            await page.wait_for_function(
+                _STILL_JS, arg=state, polling=POLL_MS, timeout=remaining * 1000)
+        except Exception:  # noqa: BLE001 — timed out, navigating or closed
+            await asyncio.sleep(min(POLL_MS / 1000, max(0.0, remaining)))
+            continue
+        if watch is None or not watch.busy():
+            return True
+        await asyncio.sleep(POLL_MS / 1000)
+    return False

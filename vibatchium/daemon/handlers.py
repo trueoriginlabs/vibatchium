@@ -208,9 +208,9 @@ BLOCK_HINT = ("HTTP {status}: the site refused this request, so this is not the 
               "blocked rather than as missing.")
 
 
-def _nav_result(s, settle: dict) -> dict:
+def _nav_result(s, settled: bool) -> dict:
     out = {"url": s.page.url}
-    if not settle["settled"]:
+    if not settled:
         out["still_rendering"] = True
     return out
 
@@ -2618,7 +2618,7 @@ def register_all(daemon) -> None:
         # fires before an SPA has its content, so `text` read a shell. Costs
         # about a second on a static page; opt out per call with
         # `wait_for_render=False` for raw DCL behavior.
-        settle = None
+        settled = None
         render = args.get("wait_for_render", True)
         with RequestWatch(s.page) if render else contextlib.nullcontext() as watch:
             try:
@@ -2631,7 +2631,7 @@ def register_all(daemon) -> None:
                         f"on automated clients.") from exc
                 raise
             if render:
-                settle = await wait_settled(
+                settled = await wait_settled(
                     s.page, watch=watch,
                     cap_ms=int(args.get("render_timeout_ms", 5000)),
                     min_chars=int(args.get("min_chars", 100)))
@@ -2640,9 +2640,8 @@ def register_all(daemon) -> None:
         status = resp.status if resp else None
         title = await s.page.title()
         out = {"url": s.page.url, "title": title, "status": status}
-        if settle is not None and not settle["settled"]:
+        if settled is False:
             out["still_rendering"] = True
-            out["chars"] = settle["chars"]
         if status in BLOCK_STATUSES:
             out["blocked"] = True
             out["hint"] = BLOCK_HINT.format(status=status)
@@ -2719,10 +2718,10 @@ def register_all(daemon) -> None:
             await s.page.go_back(wait_until=wait_until, timeout=timeout)
         except Exception as exc:  # noqa: BLE001
             log.info("go_back soft-failed: %s", exc)
-        settle = await wait_settled(s.page)
+        settled = await wait_settled(s.page)
         _invalidate_snapshot(d)
         s.frame_ref = None
-        return _nav_result(s, settle)
+        return _nav_result(s, settled)
 
     @daemon.handler("forward")
     async def _forward(d, args):
@@ -2733,19 +2732,19 @@ def register_all(daemon) -> None:
             await s.page.go_forward(wait_until=wait_until, timeout=timeout)
         except Exception as exc:  # noqa: BLE001
             log.info("go_forward soft-failed: %s", exc)
-        settle = await wait_settled(s.page)
+        settled = await wait_settled(s.page)
         _invalidate_snapshot(d)
         s.frame_ref = None
-        return _nav_result(s, settle)
+        return _nav_result(s, settled)
 
     @daemon.handler("reload")
     async def _reload(d, args):
         s = _need_session(d)
         wait_until = args.get("wait_until", "domcontentloaded")
         await s.page.reload(wait_until=wait_until)
-        settle = await wait_settled(s.page)
+        settled = await wait_settled(s.page)
         _invalidate_snapshot(d)
-        return _nav_result(s, settle)
+        return _nav_result(s, settled)
 
     @daemon.handler("url")
     async def _url(d, args):
@@ -2771,11 +2770,11 @@ def register_all(daemon) -> None:
         # with a setTimeout: 52 of 197 calls in three checkout runs.
         if args.get("settle"):
             with RequestWatch(s.page) as watch:
-                settle = await wait_settled(
+                settled = await wait_settled(
                     s.page, watch=watch, min_chars=0,
                     cap_ms=int(args.get("settle_timeout_ms", 5000)))
             out["url"] = s.page.url
-            if not settle["settled"]:
+            if not settled:
                 out["still_rendering"] = True
         if sel:
             out["text"] = await _resolve_target(d, sel).inner_text()

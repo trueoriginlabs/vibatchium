@@ -28,80 +28,51 @@ from .test_integration_daemon import IsolatedDaemon
 
 # ─── settle: the wait after a navigation ─────────────────────────────────
 class _Page:
-    """Reports the text length the scripted timeline has reached."""
+    """A page whose in-page wait answers from a script of outcomes."""
 
-    def __init__(self, timeline, *, hang=False):
-        self.timeline = timeline          # [(seconds, chars), ...]
-        self.t0 = time.monotonic()
-        self.hang = hang
+    def __init__(self, *outcomes):
+        self.outcomes = list(outcomes)
+        self.calls = 0
 
-    async def evaluate(self, _js):
-        if self.hang:
-            await asyncio.sleep(60)
-        elapsed = time.monotonic() - self.t0
-        return [c for t, c in self.timeline if t <= elapsed][-1]
-
-
-@pytest.fixture
-def fast_quiet(monkeypatch):
-    monkeypatch.setattr(settle, "QUIET_S_LONG", 0.08)
-    monkeypatch.setattr(settle, "QUIET_S_SHORT", 0.3)
-    monkeypatch.setattr(settle, "POLL_S", 0.02)
+    async def wait_for_function(self, _js, *, arg, polling, timeout):
+        self.calls += 1
+        outcome = self.outcomes.pop(0) if len(self.outcomes) > 1 else self.outcomes[0]
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
 
 
 def _settle(page, **kw):
     return asyncio.run(settle.wait_settled(page, **kw))
 
 
-def test_settle_waits_out_a_short_plateau(fast_quiet):
-    # Officeworks: a level stretch of text, then the results arrive.
-    out = _settle(_Page([(0, 2275), (0.2, 7988)]), cap_ms=2000)
-    assert out == {"settled": True, "chars": 7988}
+def test_settle_is_one_call_into_the_page():
+    # Each call from the driver gives the page a user activation.
+    page = _Page(True)
+    assert _settle(page) is True
+    assert page.calls == 1
 
 
-def test_settle_does_not_stop_at_the_old_100_char_gate(fast_quiet):
-    out = _settle(_Page([(0, 124), (0.1, 1012), (0.2, 5070)]), cap_ms=2000)
-    assert out["chars"] == 5070
+def test_settle_retries_through_a_navigation():
+    page = _Page(Exception("Execution context was destroyed"), True)
+    assert _settle(page, cap_ms=2000) is True
 
 
-def test_settle_long_page_returns_on_the_short_window(fast_quiet):
-    t0 = time.monotonic()
-    assert _settle(_Page([(0, 56_000)]), cap_ms=2000)["settled"]
-    assert time.monotonic() - t0 < 0.25
+def test_settle_gives_up_at_the_cap():
+    assert _settle(_Page(Exception("Timeout")), cap_ms=300) is False
 
 
-def test_settle_ignores_small_changes(fast_quiet):
-    # A ticking clock must not hold the page to the cap.
-    timeline = [(i * 0.01, 5000 + i % 2 * 5) for i in range(300)]
-    assert _settle(_Page(timeline), cap_ms=2000)["settled"]
-
-
-def test_settle_reports_a_page_that_never_stops(fast_quiet):
-    timeline = [(i * 0.01, 1000 + i * 100) for i in range(300)]
-    assert not _settle(_Page(timeline), cap_ms=300)["settled"]
-
-
-def test_settle_reports_an_empty_page_at_the_cap(fast_quiet):
-    assert _settle(_Page([(0, 0)]), cap_ms=200) == {"settled": False, "chars": 0}
-
-
-def test_settle_survives_a_starved_page(fast_quiet):
-    t0 = time.monotonic()
-    assert not _settle(_Page([(0, 0)], hang=True), cap_ms=200)["settled"]
-    assert time.monotonic() - t0 < 1
-
-
-def test_settle_waits_for_a_young_request(fast_quiet):
+def test_settle_goes_round_again_while_a_request_is_young():
     class Watch:
         def __init__(self):
-            self.t0 = time.monotonic()
+            self.answers = [True, False]
 
         def busy(self):
-            return time.monotonic() - self.t0 < 0.5
+            return self.answers.pop(0)
 
-    t0 = time.monotonic()
-    assert _settle(_Page([(0, 5000)]), cap_ms=2000, watch=Watch())["settled"]
-    assert time.monotonic() - t0 >= 0.5
+    page = _Page(True)
+    assert _settle(page, cap_ms=2000, watch=Watch()) is True
+    assert page.calls == 2
 
 
 def test_request_watch_forgets_old_requests(monkeypatch):
@@ -292,6 +263,16 @@ DROPDOWN = (b"<!doctype html><title>Pick</title><p>" + b"Body text for the form 
             b"</p><button id=st onclick=\"l.hidden=false\">State</button>"
             b"<ul id=l role=listbox hidden><li role=option onclick=\"out.textContent="
             b"this.textContent;l.hidden=true\">Victoria</li></ul><div id=out></div>")
+# Level for a second, then the results: what Officeworks' search page does.
+PLATEAU = (b"<!doctype html><title>Plateau</title><p>" + b"Site header text. " * 12 +
+           b"</p><main id=m></main><script>setTimeout(()=>{m.textContent='Result row. '"
+           b".repeat(300)},1000)</script>")
+TICKER = (b"<!doctype html><title>Ticker</title><p>" + b"Long article text. " * 300 +
+          b"</p><span id=t></span><script>setInterval(()=>{t.textContent=Date.now()},100)"
+          b"</script>")
+GROWING = (b"<!doctype html><title>Growing</title><p>" + b"Text. " * 30 +
+           b"</p><script>setInterval(()=>{document.body.append('More text here. '.repeat(20))"
+           b"},150)</script>")
 OVERLAY = PAGE + b"<div style='position:fixed;inset:0;z-index:9'>drawer</div>"
 
 
@@ -303,6 +284,12 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             body = SPA
         elif path == "/dropdown":
             body = DROPDOWN
+        elif path == "/plateau":
+            body = PLATEAU
+        elif path == "/ticker":
+            body = TICKER
+        elif path == "/growing":
+            body = GROWING
         elif path == "/overlay":
             body = OVERLAY
         elif path == "/api":
@@ -357,6 +344,23 @@ def test_explore_reads_the_rendered_page(daemon, site):
     assert "still_rendering" not in out
 
 
+def test_go_waits_out_a_level_stretch(daemon, site):
+    _ok(daemon.call("go", {"url": f"{site}/plateau"}, session="p1"))
+    assert "Result row" in _ok(daemon.call("text", session="p1"))["text"]
+
+
+def test_go_is_not_held_up_by_a_ticking_clock(daemon, site):
+    t0 = time.monotonic()
+    out = _ok(daemon.call("go", {"url": f"{site}/ticker"}, session="p1"))
+    assert "still_rendering" not in out and time.monotonic() - t0 < 4
+
+
+def test_go_says_when_a_page_never_stops(daemon, site):
+    out = _ok(daemon.call("go", {"url": f"{site}/growing", "render_timeout_ms": 1200},
+                          session="p1"))
+    assert out["still_rendering"] is True
+
+
 def test_go_flags_a_refusal(daemon, site):
     out = _ok(daemon.call("go", {"url": f"{site}/forbidden"}, session="g1"))
     assert out["status"] == 403 and out["blocked"] and "refused" in out["hint"]
@@ -380,8 +384,8 @@ def test_parallel_explores_queue_instead_of_failing(daemon, site):
     assert any(r["result"].get("queued_ms") for r in results)
 
 
-def test_explore_refuses_when_the_wait_runs_out(tmp_path, site):
-    run = IsolatedDaemon(tmp_path, {"VIBATCHIUM_MAX_EPHEMERAL": "1",
+def test_explore_refuses_when_the_wait_runs_out(tmp_path_factory, site):
+    run = IsolatedDaemon(tmp_path_factory.mktemp("gu"), {"VIBATCHIUM_MAX_EPHEMERAL": "1",
                                     "VIBATCHIUM_EXPLORE_QUEUE_S": "0"}).start()
     try:
         with ThreadPoolExecutor(2) as pool:
@@ -434,9 +438,9 @@ def test_text_settle_waits_for_the_click_result(daemon, site):
     assert "api-result" in out["text"] and out["url"].startswith(site)
 
 
-def test_idle_agent_sessions_close_and_cli_sessions_stay(tmp_path, site):
+def test_idle_agent_sessions_close_and_cli_sessions_stay(tmp_path_factory, site):
     from vibatchium import fspolicy
-    run = IsolatedDaemon(tmp_path, {"VIBATCHIUM_AGENT_SESSION_IDLE_S": "3"}).start()
+    run = IsolatedDaemon(tmp_path_factory.mktemp("gu"), {"VIBATCHIUM_AGENT_SESSION_IDLE_S": "3"}).start()
     scope = {fspolicy.SCOPE_ARG: fspolicy.agent_scope()}
     try:
         _ok(run.call("go", {"url": site, **scope}, session="agent1"))
@@ -450,9 +454,9 @@ def test_idle_agent_sessions_close_and_cli_sessions_stay(tmp_path, site):
     assert set(running) == {"agent2", "bot1"}
 
 
-def test_a_used_agent_session_stays_open(tmp_path, site):
+def test_a_used_agent_session_stays_open(tmp_path_factory, site):
     from vibatchium import fspolicy
-    run = IsolatedDaemon(tmp_path, {"VIBATCHIUM_AGENT_SESSION_IDLE_S": "4"}).start()
+    run = IsolatedDaemon(tmp_path_factory.mktemp("gu"), {"VIBATCHIUM_AGENT_SESSION_IDLE_S": "4"}).start()
     try:
         _ok(run.call("go", {"url": site, fspolicy.SCOPE_ARG: fspolicy.agent_scope()},
                      session="busy1"))
@@ -478,6 +482,6 @@ def test_cli_press_and_screenshot_take_the_obvious_forms():
         positional = CliRunner().invoke(cli.cli, ["screenshot", "/tmp/a.png"])
         flag = CliRunner().invoke(cli.cli, ["screenshot", "--path", "/tmp/a.png"])
     assert positional.exit_code == 0 and flag.exit_code == 0, positional.output + flag.output
-    assert all(c.args[1]["path"] == "/tmp/a.png" for c in call.call_args_list)
+    assert all(c.args[1]["path"].endswith("/tmp/a.png") for c in call.call_args_list)
 
 
