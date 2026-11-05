@@ -10,9 +10,11 @@ import asyncio
 import http.server
 import shutil
 import socketserver
+import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 import pytest
 
@@ -323,6 +325,13 @@ def site():
     server.shutdown()
 
 
+@pytest.fixture
+def short_tmp():
+    """pytest's macOS temp paths overflow the 104-byte AF_UNIX socket limit."""
+    with tempfile.TemporaryDirectory(prefix="gu", dir="/tmp", ignore_cleanup_errors=True) as d:
+        yield Path(d)
+
+
 @pytest.fixture(scope="module")
 def daemon(tmp_path_factory):
     if not shutil.which("google-chrome") and not shutil.which("google-chrome-stable"):
@@ -384,8 +393,8 @@ def test_parallel_explores_queue_instead_of_failing(daemon, site):
     assert any(r["result"].get("queued_ms") for r in results)
 
 
-def test_explore_refuses_when_the_wait_runs_out(tmp_path_factory, site):
-    run = IsolatedDaemon(tmp_path_factory.mktemp("gu"), {"VIBATCHIUM_MAX_EPHEMERAL": "1",
+def test_explore_refuses_when_the_wait_runs_out(short_tmp, site):
+    run = IsolatedDaemon(short_tmp, {"VIBATCHIUM_MAX_EPHEMERAL": "1",
                                     "VIBATCHIUM_EXPLORE_QUEUE_S": "0"}).start()
     try:
         with ThreadPoolExecutor(2) as pool:
@@ -438,9 +447,9 @@ def test_text_settle_waits_for_the_click_result(daemon, site):
     assert "api-result" in out["text"] and out["url"].startswith(site)
 
 
-def test_idle_agent_sessions_close_and_cli_sessions_stay(tmp_path_factory, site):
+def test_idle_agent_sessions_close_and_cli_sessions_stay(short_tmp, site):
     from vibatchium import fspolicy
-    run = IsolatedDaemon(tmp_path_factory.mktemp("gu"), {"VIBATCHIUM_AGENT_SESSION_IDLE_S": "3"}).start()
+    run = IsolatedDaemon(short_tmp, {"VIBATCHIUM_AGENT_SESSION_IDLE_S": "3"}).start()
     scope = {fspolicy.SCOPE_ARG: fspolicy.agent_scope()}
     try:
         _ok(run.call("go", {"url": site, **scope}, session="agent1"))
@@ -454,9 +463,9 @@ def test_idle_agent_sessions_close_and_cli_sessions_stay(tmp_path_factory, site)
     assert set(running) == {"agent2", "bot1"}
 
 
-def test_a_used_agent_session_stays_open(tmp_path_factory, site):
+def test_a_used_agent_session_stays_open(short_tmp, site):
     from vibatchium import fspolicy
-    run = IsolatedDaemon(tmp_path_factory.mktemp("gu"), {"VIBATCHIUM_AGENT_SESSION_IDLE_S": "4"}).start()
+    run = IsolatedDaemon(short_tmp, {"VIBATCHIUM_AGENT_SESSION_IDLE_S": "4"}).start()
     try:
         _ok(run.call("go", {"url": site, fspolicy.SCOPE_ARG: fspolicy.agent_scope()},
                      session="busy1"))
