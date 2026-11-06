@@ -6,6 +6,19 @@ minor bumps may include breaking changes; we'll always call them out here.
 
 ## [Unreleased]
 
+## [0.21.0] — 2026-11-06
+
+Agents had too many ways to stop early or read the wrong thing: pages read before
+they finished rendering, silent failures, reads that ignored the chosen iframe, and
+a daemon that stayed dead after losing its driver. This release fixes those, adds
+native file choosers and recorded scroll gestures, and ships the v2
+prompt-injection classifier.
+
+**Behaviour changes:** sessions started over MCP now close after 30 idle minutes
+(`VIBATCHIUM_AGENT_SESSION_IDLE_S`, 0 disables). `go` and `explore` take about a
+second longer on static pages. `--caps min` swaps `act` and `map` for `text` and
+`map_compact`. After `vb frame`, reads, clicks and fills act on that frame.
+
 ### fix: agents no longer stop on half-read pages, silent failures or refusals
 
 Found by running clean agents on real shops and driving the MCP server by hand.
