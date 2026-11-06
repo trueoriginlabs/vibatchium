@@ -20,12 +20,14 @@ from . import elements
 from . import freeze as _freeze
 from . import lease as _lease
 from . import secret_guard as _secret_guard
+from .settle import RequestWatch, wait_settled
 from .paths import (
     CACHE_DIR, DEFAULT_SESSION_NAME, PROFILES_DIR, get_active_session_name,
     list_session_names, secure_mkdir, secure_write, session_dir,
     set_active_session_name, validate_name, validate_session_ref,
 )
-from .registry import (current_session_ctx, get_max_ephemeral, SessionLimitError,
+from .registry import (current_session_ctx, get_explore_queue_s, get_max_ephemeral,
+                       SessionLimitError,
                        session_explicit_ctx)
 
 
@@ -108,7 +110,7 @@ class HeadedNoDisplayError(RuntimeError):
 
 import re as _re
 
-_REF_TARGET_RE = _re.compile(r"^@?(e\d+)$|^\[ref=e\d+\]$")
+_REF_TARGET_RE = _re.compile(r"^@?((?:f\d+)?e\d+)$|^\[ref=(?:f\d+)?e\d+\]$")
 
 
 def _mask_url(url: str) -> str:
@@ -146,7 +148,8 @@ def _need_session(daemon):
         except LookupError:
             name = DEFAULT_SESSION_NAME
         suffix = (f" --session {name}" if name != DEFAULT_SESSION_NAME else "")
-        raise SessionNotStarted(f"no session {name!r} — run `vb start{suffix}` first")
+        raise SessionNotStarted(f"no session {name!r} — start one with `go` and a URL, "
+                                f"or `vb start{suffix}`")
     # Repair a stale session.page if the previously-active page has detached
     # (popup-then-close, navigation-cancelled, target-crashed). Pick the
     # newest live page from the context as the fallback. NOTE (0.7.0): a true
@@ -196,6 +199,43 @@ def _is_ref_target(target: str) -> bool:
     return bool(_REF_TARGET_RE.match(target.strip()))
 
 
+# A refusal, not a missing page. Without this an agent reads an empty 200-style
+# result and concludes the site has nothing.
+BLOCK_STATUSES = frozenset({401, 403, 429, 503})
+BLOCK_HINT = ("HTTP {status}: the site refused this request, so this is not the "
+              "page content. Retrying the same URL from here will likely get the "
+              "same answer. Try a different page on the site, or report it as "
+              "blocked rather than as missing.")
+
+
+async def _frameset_children(surface) -> list:
+    """The child frames if this document is a frameset, else []. A frameset page
+    has no <body>, so its text only exists in its frames."""
+    frame = getattr(surface, "main_frame", surface)
+    if not await frame.locator("frameset").count():
+        return []
+    return [f for f in frame.child_frames if not f.is_detached()]
+
+
+async def _read_text(surface) -> str:
+    if frames := await _frameset_children(surface):
+        return "\n".join(filter(None, [await _read_text(f) for f in frames]))
+    return await surface.inner_text("body")
+
+
+async def _read_html(surface) -> str:
+    if frames := await _frameset_children(surface):
+        return "\n".join([await _read_html(f) for f in frames])
+    return await surface.content()
+
+
+def _nav_result(s, settled: bool) -> dict:
+    out = {"url": s.page.url}
+    if not settled:
+        out["still_rendering"] = True
+    return out
+
+
 def _resolve_target(daemon, target: str):
     """Resolve `target` to a Locator.
 
@@ -213,10 +253,10 @@ def _resolve_target(daemon, target: str):
         if daemon._snapshot is None:
             raise RuntimeError(
                 f"ref {target!r} cannot be resolved — last `map` was invalidated by "
-                f"a navigation. Run `vb map` to refresh the snapshot first."
+                f"a navigation. Run `map_compact` (`vb map`) for fresh refs."
             )
-        return elements.resolve(s.page, daemon._snapshot, target)
-    return elements.resolve_target(s.page, daemon._snapshot, target)
+        return elements.resolve(s.page, daemon._snapshot, target)  # refs name their frame
+    return elements.resolve_target(s.target, daemon._snapshot, target)
 
 
 # ─── secret-render masking (0.16.3) ──────────────────────────────────────
@@ -1019,6 +1059,8 @@ def register_all(daemon) -> None:
             name, profile_dir=profile_dir, headless=headless,
             backend=backend, ephemeral=ephemeral,
         )
+        if fspolicy.in_agent_scope():
+            entry.flags["agent_started"] = True
 
         out = {"started": True, "mode": "launch",
                "session": name, "profile": str(entry.profile_dir),
@@ -2351,6 +2393,9 @@ def register_all(daemon) -> None:
             if go_res.get("walled"):
                 body["walled"] = go_res["walled"]
                 body["advice"] = go_res.get("advice")
+            for key in ("blocked", "hint", "still_rendering"):
+                if key in go_res:
+                    body[key] = go_res[key]
             # Skills surfaced during the inner `go` (opt-in via VIBATCHIUM_SKILLS).
             if go_res.get("skills"):
                 body["skills"] = go_res["skills"]
@@ -2456,11 +2501,11 @@ def register_all(daemon) -> None:
             # UNLOCKED and calls start() in-process (bypassing dispatch's
             # mutate_lock), so without this N concurrent no-pin explores would
             # all pass the ephemeral cap check and overshoot VIBATCHIUM_MAX_EPHEMERAL.
-            async with d.registry.mutate_lock:
-                await d._handlers["start"](d, {"ephemeral": True,
-                                               "headless": resolve_headless({})})
+            queued_ms = await _start_explore_session(d)
             out = await _run_body()
             out["lane"] = "ephemeral"
+            if queued_ms:
+                out["queued_ms"] = queued_ms
             # The minted session is unaddressable after this call (the contextvar
             # resets on return and the `_ex-` name is rejected by validate_name),
             # so keep_open is meaningless here — ALWAYS reclaim the off-budget
@@ -2491,6 +2536,34 @@ def register_all(daemon) -> None:
                 except Exception:  # noqa: BLE001
                     pass
             current_session_ctx.reset(tok)
+
+    async def _start_explore_session(d) -> int:
+        """Start the minted explore session, waiting for a slot when the lane
+        is full. A burst of parallel explores is normal agent behaviour, and a
+        refusal drops that work, so it queues instead. Returns ms spent waiting.
+        """
+        deadline = time.monotonic() + get_explore_queue_s()
+        cap = get_max_ephemeral()
+        waited = 0.0
+        while True:
+            # Poll before trying: a refused start logs a WARNING, and a queued
+            # explore isn't a refusal until it runs out of time.
+            while (cap > 0 and d.registry.count_ephemeral() >= cap
+                   and time.monotonic() < deadline):
+                await asyncio.sleep(0.25)
+                waited += 0.25
+            try:
+                async with d.registry.mutate_lock:
+                    await d._handlers["start"](d, {"ephemeral": True,
+                                                   "headless": resolve_headless({})})
+                return int(waited * 1000)
+            except SessionLimitError:
+                # Lost the race for a slot that just opened: go back in line.
+                # Any other refusal (cap 0, the RAM floor) won't clear by waiting.
+                if (cap > 0 and d.registry.count_ephemeral() >= cap
+                        and time.monotonic() < deadline):
+                    continue
+                raise
 
     @daemon.handler("shutdown")
     async def _shutdown(d, args):
@@ -2562,32 +2635,37 @@ def register_all(daemon) -> None:
             # 0.19.4: a javascript: URL runs its body in the CURRENT document's
             # main world — it is `eval` under another verb. Same guard.
             await _secret_guard.guard_caller_js(entry, "go javascript:", s.page)
-        resp = await s.page.goto(url, wait_until=wait_until, timeout=timeout)
-        # Wave 7.7.12: bounded SPA-hydration wait. `domcontentloaded` fires
-        # before client-side render on heavy SPAs (Immunefi, HackerOne,
-        # bughunters.google.com) — without this wait, `text` returned ""
-        # and screenshots came back uniform-blank-white. SSR sites satisfy
-        # the predicate in <50ms (no cost); SPAs get up to 5s to hydrate.
-        # Opt out per-call with `wait_for_render=False` for raw DCL behavior.
-        if args.get("wait_for_render", True):
-            min_chars = int(args.get("min_chars", 100))
-            render_timeout = int(args.get("render_timeout_ms", 5000))
+        # Bounded wait for client-side render, on by default: `domcontentloaded`
+        # fires before an SPA has its content, so `text` read a shell. Costs
+        # about a second on a static page; opt out per call with
+        # `wait_for_render=False` for raw DCL behavior.
+        settled = None
+        render = args.get("wait_for_render", True)
+        with RequestWatch(s.page) if render else contextlib.nullcontext() as watch:
             try:
-                await s.page.wait_for_function(
-                    "(n) => document.body && "
-                    "document.body.innerText.trim().length > n",
-                    arg=min_chars,
-                    timeout=render_timeout,
-                )
-            except Exception:  # noqa: BLE001
-                # Bounded — proceed even if page is genuinely empty
-                # (about:blank, error pages, asset URLs, etc.).
-                pass
+                resp = await s.page.goto(url, wait_until=wait_until, timeout=timeout)
+            except Exception as exc:
+                if "ERR_HTTP_RESPONSE_CODE_FAILURE" in str(exc):
+                    raise RuntimeError(
+                        f"{url} answered with an HTTP error and an empty body, "
+                        f"so there is no page to read. That is usually a block "
+                        f"on automated clients.") from exc
+                raise
+            if render:
+                settled = await wait_settled(
+                    s.page, watch=watch,
+                    cap_ms=int(args.get("render_timeout_ms", 5000)),
+                    min_chars=int(args.get("min_chars", 100)))
         _invalidate_snapshot(d)
         s.frame_ref = None
         status = resp.status if resp else None
         title = await s.page.title()
         out = {"url": s.page.url, "title": title, "status": status}
+        if settled is False:
+            out["still_rendering"] = True
+        if status in BLOCK_STATUSES:
+            out["blocked"] = True
+            out["hint"] = BLOCK_HINT.format(status=status)
         wall = _backends.is_walled(title, status)
         if wall:
             out["walled"] = wall
@@ -2661,9 +2739,10 @@ def register_all(daemon) -> None:
             await s.page.go_back(wait_until=wait_until, timeout=timeout)
         except Exception as exc:  # noqa: BLE001
             log.info("go_back soft-failed: %s", exc)
+        settled = await wait_settled(s.page)
         _invalidate_snapshot(d)
         s.frame_ref = None
-        return {"url": s.page.url}
+        return _nav_result(s, settled)
 
     @daemon.handler("forward")
     async def _forward(d, args):
@@ -2674,17 +2753,19 @@ def register_all(daemon) -> None:
             await s.page.go_forward(wait_until=wait_until, timeout=timeout)
         except Exception as exc:  # noqa: BLE001
             log.info("go_forward soft-failed: %s", exc)
+        settled = await wait_settled(s.page)
         _invalidate_snapshot(d)
         s.frame_ref = None
-        return {"url": s.page.url}
+        return _nav_result(s, settled)
 
     @daemon.handler("reload")
     async def _reload(d, args):
         s = _need_session(d)
         wait_until = args.get("wait_until", "domcontentloaded")
         await s.page.reload(wait_until=wait_until)
+        settled = await wait_settled(s.page)
         _invalidate_snapshot(d)
-        return {"url": s.page.url}
+        return _nav_result(s, settled)
 
     @daemon.handler("url")
     async def _url(d, args):
@@ -2704,11 +2785,23 @@ def register_all(daemon) -> None:
         # matches click/fill/hover). Route through _resolve_target so @eN
         # and @text:/@label: prefixes work consistently.
         sel = args.get("target") or args.get("selector")
-        if sel:
-            loc = _resolve_target(d, sel)
-            return {"text": await loc.inner_text()}
         s = _need_session(d)
-        return {"text": await s.page.inner_text("body")}
+        out = {}
+        # Wait-then-read after an action. Agents were spelling this as `eval`
+        # with a setTimeout: 52 of 197 calls in three checkout runs.
+        if args.get("settle"):
+            with RequestWatch(s.page) as watch:
+                settled = await wait_settled(
+                    s.target, watch=watch, min_chars=0,
+                    cap_ms=int(args.get("settle_timeout_ms", 5000)))
+            out["url"] = s.page.url
+            if not settled:
+                out["still_rendering"] = True
+        if sel:
+            out["text"] = await _resolve_target(d, sel).inner_text()
+        else:
+            out["text"] = await _read_text(s.target)
+        return out
 
     @daemon.handler("html")
     async def _html(d, args):
@@ -2731,7 +2824,7 @@ def register_all(daemon) -> None:
         # whole-page path also frees the session lock (same goal as the locator
         # branch). wait_for cancels the call and surfaces a TimeoutError.
         import asyncio as _asyncio
-        return {"html": await _asyncio.wait_for(s.page.content(), timeout / 1000)}
+        return {"html": await _asyncio.wait_for(s.target.content(), timeout / 1000)}
 
     @daemon.handler("extract")
     async def _extract(d, args):
@@ -2775,7 +2868,7 @@ def register_all(daemon) -> None:
                 res = await _asyncio.wait_for(loc.evaluate(el_fn, jarg), timeout / 1000)
             else:
                 s = _need_session(d)
-                res = await _asyncio.wait_for(s.page.evaluate(page_fn, jarg), timeout / 1000)
+                res = await _asyncio.wait_for(s.target.evaluate(page_fn, jarg), timeout / 1000)
             res["mode"] = mode
             return res
 
@@ -2791,19 +2884,19 @@ def register_all(daemon) -> None:
                 )
             from ..dom_js import MAIN_PAGE
             s = _need_session(d)
-            picked = await _asyncio.wait_for(s.page.evaluate(MAIN_PAGE), timeout / 1000)
+            picked = await _asyncio.wait_for(s.target.evaluate(MAIN_PAGE), timeout / 1000)
             raw_html = picked.get("html")
             ratio = picked.get("ratio") or 0
             fallback = (not raw_html) or ratio < _MAIN_MIN_RATIO
             if fallback:
-                raw_html = await _asyncio.wait_for(s.page.content(), timeout / 1000)
+                raw_html = await _asyncio.wait_for(_read_html(s.target), timeout / 1000)
             md, sig = extract_with_signals(raw_html or "")
             out = _markdown_response(md, sig, int(args.get("max_chars", 40_000)))
             out["mode"] = "main"
             out["main_content"] = not fallback
             if fallback:
                 out["main_fallback"] = True   # no dense block → returned full page
-            out["url"] = s.page.url
+            out["url"] = s.target.url
             return out
 
         # ── default: whole-page / subtree markdown (unchanged behavior) ──────
@@ -2813,15 +2906,15 @@ def register_all(daemon) -> None:
             url = None
         else:
             s = _need_session(d)
-            raw_html = await _asyncio.wait_for(s.page.content(), timeout / 1000)
-            url = s.page.url
+            raw_html = await _asyncio.wait_for(_read_html(s.target), timeout / 1000)
+            url = s.target.url
         md, sig = extract_with_signals(raw_html)
         out = _markdown_response(md, sig, int(args.get("max_chars", 40_000)))
         if url is not None:
             out["url"] = url
             s = _need_session(d)
             try:
-                out["title"] = await s.page.title()
+                out["title"] = await s.target.title()
             except Exception:  # noqa: BLE001
                 pass
         return out
@@ -2866,7 +2959,7 @@ def register_all(daemon) -> None:
             loc = _resolve_target(d, target)
             return await _asyncio.wait_for(loc.evaluate(FIELDS_EL, jarg), timeout / 1000)
         s = _need_session(d)
-        return await _asyncio.wait_for(s.page.evaluate(FIELDS_PAGE, jarg), timeout / 1000)
+        return await _asyncio.wait_for(s.target.evaluate(FIELDS_PAGE, jarg), timeout / 1000)
 
     @daemon.handler("eval")
     async def _eval(d, args):
@@ -3269,7 +3362,17 @@ def register_all(daemon) -> None:
         if value is not None: kwargs["value"] = value
         if label is not None: kwargs["label"] = label
         if index is not None: kwargs["index"] = index
-        result = await loc.select_option(**kwargs)
+        try:
+            result = await loc.select_option(**kwargs)
+        except Exception as exc:
+            wanted = label if label is not None else value
+            if "not a <select>" not in str(exc) or wanted is None:
+                raise
+            # A custom dropdown (Radix, MUI, ...): a button that opens a list.
+            await loc.click()
+            await _need_session(d).page.get_by_role(
+                "option", name=wanted).first.click()
+            return {"selected": [wanted], "custom_dropdown": True}
         return {"selected": result}
 
     @daemon.handler("scroll")
@@ -3442,11 +3545,14 @@ def register_all(daemon) -> None:
 
     @daemon.handler("wait_selector")
     async def _wait_selector(d, args):
-        s = _need_session(d)
+        _need_session(d)
         sel = args["selector"]
         state = args.get("state", "visible")
         timeout = int(args.get("timeout_ms", 30_000))
-        await s.page.wait_for_selector(sel, state=state, timeout=timeout)
+        # One grammar with click/fill: @text:, @label:, @role: and refs work
+        # here too. A locator must match one element, so take the first; the
+        # old wait_for_selector did the same.
+        await _resolve_target(d, sel).first.wait_for(state=state, timeout=timeout)
         return {"matched": sel, "state": state}
 
     @daemon.handler("wait_ref")

@@ -206,22 +206,20 @@ def test_bare_eN_ref_form_works():
 # ─── the space-in-selector trap (documented in AGENTS.md "Traps") ───────────
 
 def test_css_selector_with_a_space_is_read_as_plain_text():
-    """`count "button:has-text('Log in')"` returns 0 with no error, while
-    `wait selector` with the IDENTICAL string resolves it.
-
-    _looks_like_plain_text fires on any space-containing string with no
-    `[ ] . #`, so count/click/fill route it to get_by_text while wait_selector
-    hands it straight to Playwright's CSS engine. This is the single most
-    time-wasting inconsistency in the locator surface, and AGENTS.md now
-    documents `css=` as the fix — so pin the behaviour here, or the doc drifts
-    the moment the heuristic changes.
+    """A tag selector with a space and nothing else CSS-looking still reads as
+    visible text, so `count "article div"` returns 0 with no error. AGENTS.md
+    documents `css=` as the fix, so pin the behaviour here, or the doc drifts
+    the moment the heuristic changes. Pseudo-class selectors no longer fall in:
+    `button:has-text('Log in')` cost agents 8-30s per click.
     """
     from vibatchium.daemon.elements import _looks_like_plain_text as plain
 
-    # the trap: a real CSS selector, silently treated as text
-    assert plain("button:has-text('Log in')") is True
+    # the trap that remains
     assert plain("article div") is True
-    assert plain("div:has(button:has-text('Log in'))") is True
+
+    # a pseudo-class call is always CSS
+    assert plain("button:has-text('Log in')") is False
+    assert plain("div:has(button:has-text('Log in'))") is False
 
     # ...and the documented escape hatch defeats it
     assert plain("css=button:has-text('Log in')") is False

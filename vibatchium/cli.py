@@ -1099,7 +1099,8 @@ def explore(ctx, url, intent, keep_open, screenshot_on, auto_screenshot,
             "skip_verify": skip_verify}
     if intent is not None:
         args["intent"] = intent
-    result = call("explore", args)
+    # An explore can wait 60s for a slot and then 60s on the navigation.
+    result = call("explore", args, timeout=240.0)
     b64 = result.get("screenshot_b64")
     if b64 and output_dir:
         # Explicit -o: user chose the path, honor their dir permissions.
@@ -1481,10 +1482,15 @@ def title(ctx):
 
 @cli.command()
 @click.argument("selector", required=False)
+@click.option("--settle", is_flag=True,
+              help="Wait up to 5s for the page text to stop changing first. Use "
+                   "after a click instead of `sleep`.")
 @click.pass_context
-def text(ctx, selector):
+def text(ctx, selector, settle):
     """Get inner text (whole page or a selector)."""
     args = {"selector": selector} if selector else {}
+    if settle:
+        args["settle"] = True
     _emit(call("text", args), ctx.obj["json"], "text")
 
 
@@ -1815,7 +1821,8 @@ def keys(ctx, keys):
 # ─── screenshot ───────────────────────────────────────────────────────────
 
 @cli.command()
-@click.option("-o", "--output", default=None,
+@click.argument("path_arg", metavar="[PATH]", required=False)
+@click.option("-o", "--output", "--path", default=None,
               help="Output file path. Default: CACHE_DIR/screenshots/<ts>.png "
                    "(0600 perms — screenshots may show authenticated sessions).")
 @click.option("--full-page", is_flag=True, help="Full-page screenshot (not just viewport).")
@@ -1838,7 +1845,7 @@ def keys(ctx, keys):
                    "(default VIBATCHIUM_MAX_SCREENSHOT_PX=30000; 0 disables). A "
                    "taller page is captured to the top N px + height_truncated=true.")
 @click.pass_context
-def screenshot(ctx, output, full_page, annotate, tiles, tile_height, max_tiles,
+def screenshot(ctx, path_arg, output, full_page, annotate, tiles, tile_height, max_tiles,
                tile_dir, max_screenshot_px):
     """Capture a screenshot, optionally annotated or sliced into tiles.
 
@@ -1847,6 +1854,7 @@ def screenshot(ctx, output, full_page, annotate, tiles, tile_height, max_tiles,
     users on shared machines). Pass `-o <path>` to write to a specific
     location with your own permission policy.
     """
+    output = output or path_arg
     import time as _time
     from .daemon.paths import CACHE_DIR, secure_mkdir
     if tiles:
@@ -2063,10 +2071,13 @@ def focus(ctx, target):
 
 @cli.command()
 @click.argument("target")
-@click.argument("press_keys")
+@click.argument("press_keys", required=False)
 @click.pass_context
 def press(ctx, target, press_keys):
-    """Press a key on a specific element (e.g. `press @e3 Enter`)."""
+    """Press a key on an element (`press @e3 Enter`), or on the page (`press Escape`)."""
+    if press_keys is None:
+        _emit(call("keys", {"keys": target}), ctx.obj["json"], "pressed")
+        return
     _emit(call("press", {"target": target, "keys": press_keys}),
           ctx.obj["json"], "pressed")
 

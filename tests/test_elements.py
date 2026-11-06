@@ -1,4 +1,6 @@
 """Element model tests — map / click / fill / type / refs."""
+import re
+
 from vibatchium.client import call
 
 
@@ -17,7 +19,7 @@ def test_map_compact(local_server):
     assert "Increment" in m["text"] or "Submit" in m["text"]
     # compact format is one-per-line, no nested YAML
     lines = [ln for ln in m["text"].splitlines() if ln.strip()]
-    assert all(ln.lstrip().startswith("@e") for ln in lines)
+    assert all(re.match(r"@(f\d+)?e\d+", ln.lstrip()) for ln in lines), lines
 
 
 def test_click_increment_button(local_server):

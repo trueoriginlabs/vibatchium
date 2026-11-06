@@ -47,6 +47,7 @@ _PAGE = """<!doctype html><html><body style="margin:0">
 _POLLER = """<!doctype html><html><body><div id="out"></div><script>
   const out = document.getElementById('out');
   setInterval(() => {
+    if (!document.documentElement.dataset.go) return;
     const i = document.createElement('input');
     i.type = 'file';
     i.onchange = () => { out.textContent += [...i.files].map(f => f.name).join(',') + ';'; };
@@ -233,8 +234,13 @@ def test_arm_is_bound_to_the_active_tab(chooser_page, tmp_path):
     log_start = LOG_PATH.stat().st_size if LOG_PATH.exists() else 0
 
     call("upload_next", {"files": [_file(tmp_path, "mine.txt", "mmm")]}, session=s)
-    st = _wait_status(s, lambda st: st["foreign"] >= 5)
-    assert st["foreign"] >= 5, st
+    # Start the poller only now. Its clicks need user activation, which an eval
+    # grants for 5s, and a chooser opened before the arm can stay pending on macOS.
+    call("page_switch", {"index": 1}, session=s)
+    call("eval", {"expr": "document.documentElement.dataset.go = '1'"}, session=s)
+    call("page_switch", {"index": 0}, session=s)
+    st = _wait_status(s, lambda st: st["foreign"] >= 3)
+    assert st["foreign"] >= 3, st
     assert st["armed"] and not st["consumed"]
     _click(s, ONE)
     st = call("upload_status", {"wait_s": 5}, session=s)

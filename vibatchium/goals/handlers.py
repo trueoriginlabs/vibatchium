@@ -80,6 +80,8 @@ def _make_caps_cb(daemon):
             entry.ephemeral = False
             log.info("session %s is now goal-owned — cleared its ephemeral flag "
                      "so the profile persists for checkpoint/resume", session)
+        # A goal can sit waiting on a human answer for days: never idle-close it.
+        entry.flags.pop("agent_started", None)
     return caps_cb
 
 

@@ -98,6 +98,11 @@ _SKILL_BODY = """# vibatchium — agentic stealth browser
 JavaScript SPA, needs a login/session, or the task is multi-step. For plain
 static HTML or a Google/news lookup, use WebFetch/WebSearch — it's cheaper.
 
+**Covering many sites:** find the URLs with WebSearch or `vb search` first, then
+`vb explore` each one. Don't guess URLs, and prefer a product or article page
+over a site's own search page. Parallel explores are fine: extra ones wait for a
+free slot.
+
 ## The 80% — one-call verbs
 - `vb explore <url>` — look at a page: text + screenshot, auto-closes.
 - `vb research --target <url> --intent "..." --intent "..."` — parallel fan-out.
@@ -112,6 +117,9 @@ common way sessions get slow or flaky.
 **1. Never `sleep` after a navigation or click. Wait for the thing.**
 
     vb --session s wait selector "text=Add to cart" --state visible --timeout 20000
+
+To read the result of a click, `vb text --settle` waits for the page to stop
+changing (up to 5s), then reads it.
 
 A blind `sleep 8` is both slower and less reliable than a 0.2s wait that
 returns the moment the element is there. On one measured flow, deleting sleeps
@@ -194,12 +202,9 @@ no need to observe first:
     @role:button[name=Submit] role + accessible name
     div.price > span          plain CSS also works
 
-**The one exception, and it will bite you:** `wait selector` does NOT accept
-the `@…` grammar — it passes the string to Playwright as a raw selector and
-errors `Unsupported token "@text"`. Inside `wait`, use Playwright syntax
-(`text=Add to cart`) instead. `wait ref @e3` does resolve refs. When several
-elements match, `vb candidates <sel>` lists them with their visible text and
-you pick with `--index N`.
+`wait selector` takes all of these too. When several elements match,
+`vb candidates <sel>` lists them with their visible text and you pick with
+`--index N`.
 
 ## Multi-step / logged-in flows
     vb session new work && vb --session work start

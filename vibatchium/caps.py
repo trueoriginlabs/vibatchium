@@ -104,30 +104,28 @@ CAP_BUCKETS: dict[str, set[str]] = {
 #
 #   explore        one call: stealth session → navigate → text. The 80% case.
 #   go             navigate a stateful session (auto-starts it — no `start`).
-#   extract        LLM-ready Markdown of the current page; supersedes `text`.
+#   extract        LLM-ready Markdown of the current page.
 #   screenshot     the fallback when extract flags structure_loss (tiles=true),
 #                  and the only way to SEE a page.
-#   act            interact by intent without knowing a selector.
-#   map            @eN refs — the deterministic targets when act's lexical match
-#                  misses (`executed: 0`).
-#   click, fill    act's deterministic twins, driven by map refs or @label:/
-#                  @text: locators. fill (not type) — it clears first and is the
-#                  vault-safe path.
-#   press          submit a search box / form with Enter; act can't reliably
-#                  pick a key.
+#   text           settle=true waits for a page to stop changing, then reads:
+#                  the step after every click, in place of eval with a sleep.
+#   map_compact    @eN refs, one line per element.
+#   click, fill    driven by those refs or @label:/@text: locators. fill (not
+#                  type): it clears first and is the vault-safe path.
+#   press          submit a search box / form with Enter.
 #   expect         one-call post-action check (element state / text / URL /
-#                  challenge wall) — stands in for wait_* + url + text.
+#                  challenge wall) — stands in for wait_* + url.
 #   session_close  release a stateful session's Chrome. `go` auto-starts one,
 #                  so without this an agent leaks Chromes into a shared
 #                  daemon's MAX_SESSIONS budget.
 #   (+ status, ALWAYS_EXPOSED.)
 #
-# Left out on purpose: start (go auto-starts), observe (act's dry run), text/
-# html (extract), type (fill), wait_* (expect), back/reload (go), tabs, frames,
-# and every opt-in lane. Anything else is a `--caps min,<bucket>` away.
+# Left out on purpose: start (go auto-starts), act and observe (agents with
+# refs don't use them), html (extract), type (fill), wait_* (expect), back/reload
+# (go), tabs, frames, and every opt-in lane. Anything else is a `--caps min,<bucket>` away.
 MIN_VERBS: frozenset[str] = frozenset({
-    "explore", "go", "extract", "screenshot", "act", "map", "click", "fill",
-    "press", "expect", "session_close",
+    "explore", "go", "extract", "screenshot", "text", "map_compact", "click",
+    "fill", "press", "expect", "session_close",
 })
 # A bucket as well as a profile, so it composes with the others like any
 # bucket does (`--caps min,search`) and the per-goal caps check can use it.
