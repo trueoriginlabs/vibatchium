@@ -59,7 +59,9 @@ turned out to be wrong are marked, because the wrong version circulated first.
 
 `click`, `fill`, `count`, `text` and `wait selector` all take the same targets:
 `@eN`, `@text:` / `@role:` / `@label:`, visible text, Playwright syntax, CSS.
-`wait selector` still ignores `vb frame switch`: it always waits on the main page.
+All of them, and the whole-page reads (`text`, `html`, `extract`, `extract-fields`,
+`detect-forms`), follow the frame chosen with `vb frame --name <name>` (or `--url
+<substring>`) until `vb frame --clear` or a navigation. `eval` always runs in the top page.
 
 A plain tag selector with a space and no `[ ] . # >` or `:name(` still reads as
 visible text, so it matches nothing:
@@ -88,14 +90,14 @@ the page settled (`vb wait load` / `vb wait selector`).
 
 ### `extract --mode links` returning 0 means shadow DOM, not a cap
 
-It is exactly `document.querySelectorAll('a[href]')` on the **main frame**,
+It is exactly `document.querySelectorAll('a[href]')` on the **active frame**,
 deduped by absolute URL, dropping empty / `#` / `javascript:`. It does not
 filter by visibility or origin, and the cap does not lose links.
 
 So if `vb count "a[href*='/item/']"` finds 12 and extract finds 0, the anchors
 are almost certainly in an open shadow root (Playwright pierces it; plain
-`querySelectorAll` does not) — or you switched frames and extract read the top
-document anyway. Scope to a container, don't pass the anchor selector itself:
+`querySelectorAll` does not). Scope to a container, don't pass the anchor selector
+itself:
 
 ```bash
 vb extract "<container>" --mode links    # ✓ descendants of one element
@@ -327,7 +329,7 @@ what you know about the element:
 
 | Form | Resolves to |
 |---|---|
-| `@e3` | last `map`'s ref (refresh map after navigation) |
+| `@e3` | last `map`'s ref (refresh map after navigation); `@f1e5` is an element inside an iframe, usable without switching frames |
 | `"Sign Up"` (bare text with space) | `page.get_by_text("Sign Up")` — auto-fallback |
 | `@text:Sign Up` | `page.get_by_text("Sign Up")` |
 | `@label:Email` | `page.get_by_label("Email")` |

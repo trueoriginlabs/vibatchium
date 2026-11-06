@@ -100,7 +100,7 @@ def _surface(d):
     return _session(d).target
 
 
-_REF_TARGET_RE = re.compile(r"^\s*(?:@e\d+|e\d+|\[ref=e\d+\])\s*$")
+_REF_TARGET_RE = re.compile(r"^\s*(?:@?(?:f\d+)?e\d+|\[ref=(?:f\d+)?e\d+\])\s*$")
 
 
 def _guarded_locator(d, surface, target):
@@ -1729,7 +1729,7 @@ def register_extra(daemon) -> None:
 
         # boxes=True yields lines like:  [ref=e3] [box=L,T,W,H]
         snap_text = await s.page.aria_snapshot(mode="ai", boxes=True)
-        box_re = re.compile(r"\[ref=(e\d+)\][^\n]*\[box=([\d.]+),([\d.]+),([\d.]+),([\d.]+)\]")
+        box_re = re.compile(r"\[ref=((?:f\d+)?e\d+)\][^\n]*\[box=([\d.]+),([\d.]+),([\d.]+),([\d.]+)\]")
         boxes = []
         for m in box_re.finditer(snap_text):
             ref, L, T, W, H = m.group(1), *(float(v) for v in m.groups()[1:])
@@ -1799,7 +1799,7 @@ def register_extra(daemon) -> None:
         # extract (role, name, ref) tuples from the snapshot
         # pattern: `- {role} "{name}" ... @eN`
         entry_re = _re_local.compile(
-            r'^\s*-\s+(?P<role>button|link)\s+"(?P<name>[^"]+)"[^\n@]*@(?P<ref>e\d+)',
+            r'^\s*-\s+(?P<role>button|link)\s+"(?P<name>[^"]+)"[^\n@]*@(?P<ref>(?:f\d+)?e\d+)',
             _re_local.MULTILINE,
         )
         candidates = []
@@ -2565,9 +2565,9 @@ def register_extra(daemon) -> None:
             await _secret_guard.refuse_secret_readback(_entry(d), "detect_forms values=true")
         # wait_for so a wedged renderer frees the session lock (mirrors extract_fields).
         if target:
-            loc = _guarded_locator(d, s.page, target)
+            loc = _guarded_locator(d, s.target, target)
             return await asyncio.wait_for(loc.evaluate(FORMS_EL, jarg), timeout / 1000)
-        return await asyncio.wait_for(s.page.evaluate(FORMS_PAGE, jarg), timeout / 1000)
+        return await asyncio.wait_for(s.target.evaluate(FORMS_PAGE, jarg), timeout / 1000)
 
     # ─── locator disambiguation (0.15.0 agent-forms) ─────────────────────
 

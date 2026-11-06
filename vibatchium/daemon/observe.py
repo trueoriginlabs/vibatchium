@@ -44,7 +44,7 @@ _REF_LINE = re.compile(
     r'^\s*-\s+(?P<role>\S+)'
     r'(?:\s+"(?P<name>[^"]+)")?'
     r'(?:\s+\[(?P<attrs>[^\]@]+)\])?'
-    r'(?:[^@]*@(?P<ref>e\d+))'
+    r'(?:[^@]*@(?P<ref>(?:f\d+)?e\d+))'
 )
 
 

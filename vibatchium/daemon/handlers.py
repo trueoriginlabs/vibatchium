@@ -110,7 +110,7 @@ class HeadedNoDisplayError(RuntimeError):
 
 import re as _re
 
-_REF_TARGET_RE = _re.compile(r"^@?(e\d+)$|^\[ref=e\d+\]$")
+_REF_TARGET_RE = _re.compile(r"^@?((?:f\d+)?e\d+)$|^\[ref=(?:f\d+)?e\d+\]$")
 
 
 def _mask_url(url: str) -> str:
@@ -208,6 +208,27 @@ BLOCK_HINT = ("HTTP {status}: the site refused this request, so this is not the 
               "blocked rather than as missing.")
 
 
+async def _frameset_children(surface) -> list:
+    """The child frames if this document is a frameset, else []. A frameset page
+    has no <body>, so its text only exists in its frames."""
+    frame = getattr(surface, "main_frame", surface)
+    if not await frame.locator("frameset").count():
+        return []
+    return [f for f in frame.child_frames if not f.is_detached()]
+
+
+async def _read_text(surface) -> str:
+    if frames := await _frameset_children(surface):
+        return "\n".join(filter(None, [await _read_text(f) for f in frames]))
+    return await surface.inner_text("body")
+
+
+async def _read_html(surface) -> str:
+    if frames := await _frameset_children(surface):
+        return "\n".join([await _read_html(f) for f in frames])
+    return await surface.content()
+
+
 def _nav_result(s, settled: bool) -> dict:
     out = {"url": s.page.url}
     if not settled:
@@ -234,8 +255,8 @@ def _resolve_target(daemon, target: str):
                 f"ref {target!r} cannot be resolved — last `map` was invalidated by "
                 f"a navigation. Run `map_compact` (`vb map`) for fresh refs."
             )
-        return elements.resolve(s.page, daemon._snapshot, target)
-    return elements.resolve_target(s.page, daemon._snapshot, target)
+        return elements.resolve(s.page, daemon._snapshot, target)  # refs name their frame
+    return elements.resolve_target(s.target, daemon._snapshot, target)
 
 
 # ─── secret-render masking (0.16.3) ──────────────────────────────────────
@@ -2771,7 +2792,7 @@ def register_all(daemon) -> None:
         if args.get("settle"):
             with RequestWatch(s.page) as watch:
                 settled = await wait_settled(
-                    s.page, watch=watch, min_chars=0,
+                    s.target, watch=watch, min_chars=0,
                     cap_ms=int(args.get("settle_timeout_ms", 5000)))
             out["url"] = s.page.url
             if not settled:
@@ -2779,7 +2800,7 @@ def register_all(daemon) -> None:
         if sel:
             out["text"] = await _resolve_target(d, sel).inner_text()
         else:
-            out["text"] = await s.page.inner_text("body")
+            out["text"] = await _read_text(s.target)
         return out
 
     @daemon.handler("html")
@@ -2803,7 +2824,7 @@ def register_all(daemon) -> None:
         # whole-page path also frees the session lock (same goal as the locator
         # branch). wait_for cancels the call and surfaces a TimeoutError.
         import asyncio as _asyncio
-        return {"html": await _asyncio.wait_for(s.page.content(), timeout / 1000)}
+        return {"html": await _asyncio.wait_for(s.target.content(), timeout / 1000)}
 
     @daemon.handler("extract")
     async def _extract(d, args):
@@ -2847,7 +2868,7 @@ def register_all(daemon) -> None:
                 res = await _asyncio.wait_for(loc.evaluate(el_fn, jarg), timeout / 1000)
             else:
                 s = _need_session(d)
-                res = await _asyncio.wait_for(s.page.evaluate(page_fn, jarg), timeout / 1000)
+                res = await _asyncio.wait_for(s.target.evaluate(page_fn, jarg), timeout / 1000)
             res["mode"] = mode
             return res
 
@@ -2863,19 +2884,19 @@ def register_all(daemon) -> None:
                 )
             from ..dom_js import MAIN_PAGE
             s = _need_session(d)
-            picked = await _asyncio.wait_for(s.page.evaluate(MAIN_PAGE), timeout / 1000)
+            picked = await _asyncio.wait_for(s.target.evaluate(MAIN_PAGE), timeout / 1000)
             raw_html = picked.get("html")
             ratio = picked.get("ratio") or 0
             fallback = (not raw_html) or ratio < _MAIN_MIN_RATIO
             if fallback:
-                raw_html = await _asyncio.wait_for(s.page.content(), timeout / 1000)
+                raw_html = await _asyncio.wait_for(_read_html(s.target), timeout / 1000)
             md, sig = extract_with_signals(raw_html or "")
             out = _markdown_response(md, sig, int(args.get("max_chars", 40_000)))
             out["mode"] = "main"
             out["main_content"] = not fallback
             if fallback:
                 out["main_fallback"] = True   # no dense block → returned full page
-            out["url"] = s.page.url
+            out["url"] = s.target.url
             return out
 
         # ── default: whole-page / subtree markdown (unchanged behavior) ──────
@@ -2885,15 +2906,15 @@ def register_all(daemon) -> None:
             url = None
         else:
             s = _need_session(d)
-            raw_html = await _asyncio.wait_for(s.page.content(), timeout / 1000)
-            url = s.page.url
+            raw_html = await _asyncio.wait_for(_read_html(s.target), timeout / 1000)
+            url = s.target.url
         md, sig = extract_with_signals(raw_html)
         out = _markdown_response(md, sig, int(args.get("max_chars", 40_000)))
         if url is not None:
             out["url"] = url
             s = _need_session(d)
             try:
-                out["title"] = await s.page.title()
+                out["title"] = await s.target.title()
             except Exception:  # noqa: BLE001
                 pass
         return out
@@ -2938,7 +2959,7 @@ def register_all(daemon) -> None:
             loc = _resolve_target(d, target)
             return await _asyncio.wait_for(loc.evaluate(FIELDS_EL, jarg), timeout / 1000)
         s = _need_session(d)
-        return await _asyncio.wait_for(s.page.evaluate(FIELDS_PAGE, jarg), timeout / 1000)
+        return await _asyncio.wait_for(s.target.evaluate(FIELDS_PAGE, jarg), timeout / 1000)
 
     @daemon.handler("eval")
     async def _eval(d, args):

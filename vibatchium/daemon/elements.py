@@ -18,7 +18,7 @@ import re
 from dataclasses import dataclass, field
 
 
-REF_RE = re.compile(r"\[ref=(e\d+)\]")
+REF_RE = re.compile(r"\[ref=((?:f\d+)?e\d+)\]")  # f1e5 = element e5 in the page's frame 1
 
 
 def _to_vibium(yaml_text: str) -> str:
@@ -59,7 +59,9 @@ class Snapshot:
 
 
 async def take_snapshot(page, depth: int | None = None) -> Snapshot:
-    raw = await page.aria_snapshot(mode="ai", depth=depth)
+    # A Frame has no aria_snapshot of its own; its <body> locator does.
+    surface = page if hasattr(page, "aria_snapshot") else page.locator("body")
+    raw = await surface.aria_snapshot(mode="ai", depth=depth)
     refs = REF_RE.findall(raw)
     return Snapshot(url=page.url, raw_yaml=raw, refs=refs)
 
@@ -163,11 +165,7 @@ def resolve_target(page, snap: Snapshot | None, target: str):
     # 1. @eN / eN / [ref=eN] ref — all three spellings resolve via the aria-ref
     # engine (not a CSS `[ref=...]` attribute match), so ref-taking verbs and the
     # semantic `find`/`candidates`/`detect_forms` scoping agree on every spelling.
-    if t.startswith("@e") and len(t) > 2 and t[2].isdigit():
-        return resolve(page, snap, t)
-    if t.startswith("e") and len(t) > 1 and t[1:].isdigit():
-        return resolve(page, snap, t)
-    if REF_RE.fullmatch(t):
+    if re.fullmatch(r"@?(?:f\d+)?e\d+", t) or REF_RE.fullmatch(t):
         return resolve(page, snap, t)
 
     # 2-9. @prefix:value semantic shortcuts

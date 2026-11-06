@@ -389,6 +389,14 @@ class SessionLimitError(RuntimeError):
     """Raised when VIBATCHIUM_MAX_SESSIONS would be exceeded."""
 
 
+def _driver_lost(pw: Playwright) -> bool:
+    """True once the driver subprocess is gone. Its connection never comes back,
+    so every launch on this handle would fail until the daemon restarted.
+    Patchright has no public check for this."""
+    conn = pw._impl_obj._connection
+    return conn._closed_error is not None or conn._transport.on_error_future.done()
+
+
 class SessionRegistry:
     """Holds all live sessions; serializes registry mutations with `mutate_lock`.
 
@@ -407,6 +415,7 @@ class SessionRegistry:
         # if VIBATCHIUM_WARM in {eager,both}. Per-session driver subprocess would
         # saturate fds on long-running daemons with frequent session churn.
         self._pw: Playwright | None = None
+        self._pw_lock = asyncio.Lock()
         # Wave 6.1b: opportunistic per-session pre-warm.
         # Map name → (BrowserSession, task) of Chromes spawned via session_new
         # in the background. start() pops from here if the warm session matches.
@@ -422,10 +431,16 @@ class SessionRegistry:
         self._explore_locks: dict[str, list] = {}
 
     async def _ensure_pw(self) -> Playwright:
-        if self._pw is None:
-            self._pw = await async_playwright().start()
-            log.info("started shared Playwright driver")
-        return self._pw
+        # The lock: the daemon listens before warmup finishes, so the first
+        # request used to race it and leave a second driver running.
+        async with self._pw_lock:
+            if self._pw is not None and _driver_lost(self._pw):
+                log.warning("shared Playwright driver lost, starting a new one")
+                self._pw = None
+            if self._pw is None:
+                self._pw = await async_playwright().start()
+                log.info("started shared Playwright driver")
+            return self._pw
 
     async def _maybe_stop_pw(self) -> None:
         """Stop the shared Playwright driver when no sessions are running.

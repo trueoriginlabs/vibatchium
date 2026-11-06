@@ -8,8 +8,12 @@ from __future__ import annotations
 
 import asyncio
 import http.server
+import os
+import re
 import shutil
+import signal
 import socketserver
+import subprocess
 import tempfile
 import threading
 import time
@@ -278,11 +282,29 @@ GROWING = (b"<!doctype html><title>Growing</title><p>" + b"Text. " * 30 +
 OVERLAY = PAGE + b"<div style='position:fixed;inset:0;z-index:9'>drawer</div>"
 
 
+OUTER = (b"<!doctype html><body><p>outer words</p><a href='/from-outer'>o</a>"
+         b"<iframe name='inner' src='/inner'></iframe></body>")
+INNER = (b"<!doctype html><body><h1 id='h'>inner words</h1><a href='/from-inner'>i</a>"
+         b"<form><input name='q'></form></body>")
+FRAMESET = (b"<!doctype html><html><frameset cols='50%,50%'>"
+            b"<frame src='/left'><frame src='/right'></frameset></html>")
+
+
 class _Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         path = self.path.split("?")[0]
         status, body = 200, PAGE
-        if path == "/spa":
+        if path == "/outer":
+            body = OUTER
+        elif path == "/inner":
+            body = INNER
+        elif path == "/frameset":
+            body = FRAMESET
+        elif path == "/left":
+            body = b"<!doctype html><body>left words</body>"
+        elif path == "/right":
+            body = b"<!doctype html><body>right words</body>"
+        elif path == "/spa":
             body = SPA
         elif path == "/dropdown":
             body = DROPDOWN
@@ -337,7 +359,7 @@ def daemon(tmp_path_factory):
     if not shutil.which("google-chrome") and not shutil.which("google-chrome-stable"):
         pytest.skip("needs channel Chrome")
     run = IsolatedDaemon(tmp_path_factory.mktemp("giveups"),
-                         {"VIBATCHIUM_MAX_EPHEMERAL": "2"}).start()
+                         {"VIBATCHIUM_MAX_SESSIONS": "16", "VIBATCHIUM_MAX_EPHEMERAL": "2"}).start()
     yield run
     run.stop()
 
@@ -494,3 +516,77 @@ def test_cli_press_and_screenshot_take_the_obvious_forms():
     assert all(c.args[1]["path"].endswith("/tmp/a.png") for c in call.call_args_list)
 
 
+
+
+def _drivers(run):
+    pid = (run.run / "vibatchium" / "daemon.pid").read_text().strip()
+    out = subprocess.run(["pgrep", "-P", pid, "-f", "patchright/driver"],
+                         capture_output=True, text=True).stdout
+    return [int(p) for p in out.split()]
+
+
+def test_daemon_survives_losing_its_driver(short_tmp, site):
+    """A dead driver used to fail every launch until the daemon was restarted."""
+    run = IsolatedDaemon(short_tmp).start()
+    try:
+        _ok(run.call("start", {"headless": True}, session="kept"))
+        _ok(run.call("go", {"url": site}, session="kept"))
+        assert len(_drivers(run)) == 1                  # not one per racing request
+        os.kill(_drivers(run)[0], signal.SIGKILL)
+        time.sleep(1)
+
+        assert _ok(run.call("explore", {"url": site}))["status"] == 200
+        assert len(_drivers(run)) == 1
+        _ok(run.call("go", {"url": site}, session="kept"))
+        assert _ok(run.call("text", {}, session="kept"))["text"]
+    finally:
+        run.stop()
+
+
+def test_reads_follow_the_active_frame(daemon, site):
+    """They read the top page, so an agent got the wrong text with no warning."""
+    _ok(daemon.call("go", {"url": f"{site}/outer"}, session="fr"))
+    _ok(daemon.call("frame", {"name": "inner"}, session="fr"))
+
+    def read(cmd, **args):
+        return _ok(daemon.call(cmd, args, session="fr"))
+
+    assert read("text")["text"].strip().startswith("inner words")
+    assert "outer" not in read("text", settle=True)["text"]
+    assert "inner words" in read("html")["html"]
+    md = read("extract")
+    assert "inner words" in md["markdown"] and "outer" not in md["markdown"]
+    assert md["url"].endswith("/inner")
+    assert "inner words" in read("extract", mode="main")["markdown"]
+    assert [x["url"].rsplit("/", 1)[1] for x in read("extract", mode="links")["links"]] == ["from-inner"]
+    assert read("extract_fields", fields={"h": "#h"})["fields"]["h"] == "inner words"
+    assert read("detect_forms")["count"] == 1
+    assert read("wait_selector", selector="#h", timeout_ms=2000)["matched"] == "#h"
+    assert "inner words" in read("text", target="#h")["text"]
+    read("fill", target="[name=q]", text="typed")
+    assert read("value", target="[name=q]")["value"] == "typed"
+    ref = re.search(r"textbox.*?(@f\d+e\d+)", read("map")["text"]).group(1)
+    read("fill", target=ref, text="by ref")
+    assert read("value", target="[name=q]")["value"] == "by ref"
+
+    _ok(daemon.call("frame", {}, session="fr"))
+    assert "outer words" in read("text")["text"]
+
+    # A top-page map lists iframe elements too, and those refs must work.
+    ref = re.search(r"textbox.*?(@f\d+e\d+)", read("map")["text"]).group(1)
+    read("fill", target=ref, text="from the top page")
+    _ok(daemon.call("frame", {"name": "inner"}, session="fr"))
+    assert read("value", target="[name=q]")["value"] == "from the top page"
+
+
+def test_a_frameset_page_reads_as_its_frames(daemon, site):
+    """It has no <body>, so a read waited 30s and failed."""
+    started = time.monotonic()
+    out = _ok(daemon.call("go", {"url": f"{site}/frameset"}, session="fs"))
+    assert "still_rendering" not in out
+    text = _ok(daemon.call("text", {}, session="fs"))["text"]
+    assert "left words" in text and "right words" in text
+    md = _ok(daemon.call("extract", {}, session="fs"))["markdown"]
+    assert "left words" in md and "right words" in md
+    assert time.monotonic() - started < 10
+    assert "right words" in _ok(daemon.call("explore", {"url": f"{site}/frameset"}))["text"]

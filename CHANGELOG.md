@@ -10,6 +10,20 @@ minor bumps may include breaking changes; we'll always call them out here.
 
 Found by running clean agents on real shops and driving the MCP server by hand.
 
+- **A dead Playwright driver no longer takes the daemon with it.** The daemon kept
+  its handle, so every launch failed with `Connection closed while reading from the
+  driver` until someone restarted it. It now starts a new driver, and open sessions
+  come back through self-heal. The first request also no longer races warmup into
+  starting a second driver.
+- **Reads follow the active frame.** After `vb frame`, `text`, `html`, `extract`,
+  `extract-fields`, `detect-forms` and `wait selector` still used the top page, so an
+  agent got the wrong text with no warning. `eval` still runs in the top page.
+- **Clicks and fills follow the active frame too**, and `map` works inside one (it
+  crashed: a Frame has no `aria_snapshot`). Refs for iframe elements, like `@f1e5`,
+  appeared in every `map` but no verb accepted them, and `map_compact` dropped those
+  elements. All of that works now.
+- **Frameset pages read as their frames.** They have no `<body>`, so `text` and
+  `explore` waited 30s and failed, and `go` waited 5s to say `still_rendering`.
 - **`go` and `explore` read client-rendered pages too early.** They stopped
   waiting at 100 characters, which a site header passes: Myer's search page read
   126 characters, then 5,069 three seconds later, with status 200 and no warning,

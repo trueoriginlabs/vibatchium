@@ -27,6 +27,7 @@ _DATA_REQUESTS = ("xhr", "fetch", "document")
 # would keep pages "activated" for the whole wait, letting them open popups and
 # file dialogs. `s` keeps its state between polls: Playwright reuses the arg.
 _STILL_JS = """(s) => {
+  if (document.body && document.body.tagName === "FRAMESET") return true;  // text is in its frames
   const n = document.body ? document.body.innerText.trim().length : 0;
   const now = performance.now();
   if (s.last == null || Math.abs(n - s.last) > Math.max(20, s.last * 0.01)) {
