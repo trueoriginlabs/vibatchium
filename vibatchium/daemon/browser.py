@@ -92,9 +92,21 @@ log = logging.getLogger("vibatchium.browser")
 _HEADLESS_UA_CACHE: dict[str | None, str | None] = {}
 _HEADLESS_UA_LOCK = asyncio.Lock()
 
-#: Per-session disk cache ceiling, MB. 0 = let Chrome size it off free disk
-#: (its default, and unbounded in practice on a large volume).
-DISK_CACHE_MB_DEFAULT = 256
+#: Per-session disk cache ceiling, MB. 0 = let Chrome size it itself: on
+#: Linux that is 1% of free disk up to 1.28 GB for the HTTP cache, plus up to
+#: 320 MB of code cache (cache_util.cc).
+#:
+#: Chrome applies this ceiling to the HTTP cache and to the code cache
+#: SEPARATELY (both read the same pref), so a profile carries about twice
+#: this. At 256 every long-lived profile sat at ~512 MB, 5.8 GB on one box.
+#: 128 halves that. Going lower costs proxied sessions real traffic: replaying
+#: Chrome's eviction over live X-bot caches, 64 MB re-fetched ~4 MB per 3-hour
+#: tick that 256 would have served from disk, 128 about 2.5 MB. A session that
+#: re-watches video wants 256 (VIBATCHIUM_DISK_CACHE_MB=256).
+#:
+#: A relaunch at a lower cap trims the HTTP cache within seconds and the code
+#: cache on its next write. A running Chrome keeps the cap it launched with.
+DISK_CACHE_MB_DEFAULT = 128
 
 
 def disk_cache_mb() -> int:
