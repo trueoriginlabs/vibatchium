@@ -6,6 +6,21 @@ minor bumps may include breaking changes; we'll always call them out here.
 
 ## [Unreleased]
 
+### perf: the default disk cache cap drops from 256 MB to 128 MB
+
+Chrome applies `--disk-cache-size` to the HTTP cache and the code cache
+separately, so at 256 every long-lived profile held ~512 MB of cache: 5.8 GB
+of the 11.4 GB in one box's 41 profiles. 128 halves it.
+
+The cost is proxy traffic. Replaying Chrome's eviction over live X-bot caches,
+128 MB re-fetches about 2.5 MB per 3-hour tick that 256 served from disk (64
+would be about 4 MB). A session that re-watches the same video wants
+`VIBATCHIUM_DISK_CACHE_MB=256`.
+
+A relaunch trims an existing cache: the HTTP cache within seconds, the code
+cache on its next write. A Chrome that is already running keeps its old cap
+until its session relaunches.
+
 ## [0.21.0] — 2026-11-06
 
 Agents had too many ways to stop early or read the wrong thing: pages read before

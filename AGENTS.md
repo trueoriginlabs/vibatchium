@@ -900,7 +900,7 @@ VIBATCHIUM_DAEMON_IDLE_TIMEOUT=0  # seconds; >0 self-shuts an idle (0-session) d
 VIBATCHIUM_IDLE_FREEZE=1        # lifecycle-freeze parked headless sessions (default on; 0 disables)
 VIBATCHIUM_IDLE_FREEZE_AFTER=90 # idle seconds before a parked session's pages freeze (default 90, min 5)
 VIBATCHIUM_AMBIENT_HORIZON=180  # `humanize ambient`: idle seconds after the last verb before ambient goes quiet (5-1800)
-VIBATCHIUM_DISK_CACHE_MB=256    # per-session Chrome disk-cache ceiling (0 = let Chrome size it off free disk)
+VIBATCHIUM_DISK_CACHE_MB=128    # per-session Chrome disk-cache ceiling, applied to the HTTP and code cache each (0 = let Chrome size it off free disk)
 VIBATCHIUM_BROWSER_BINARY=<abs> # daemon env: default Chromium executable for sessions without a `start --browser-binary` pin
 VIBATCHIUM_DISABLE_SANDBOX=1    # pass --no-sandbox (containers, or a custom binary AppArmor won't let sandbox) — visible infobar + fingerprint signal
 VIBATCHIUM_LOG_FILE=<path>      # full daemon-log path (default: a persistent state dir, see below)
